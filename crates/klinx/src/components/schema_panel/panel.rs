@@ -1,7 +1,7 @@
 //! Schema panel — left-side slide-in (280px) showing all discovered schemas.
 //!
 //! Schemas are grouped by format (CSV, JSON, XML) with expandable field lists.
-//! Spec §S3.6: format tabs, field search, schema cards.
+//! Provides format tabs, field search, and per-schema cards.
 
 use dioxus::prelude::*;
 

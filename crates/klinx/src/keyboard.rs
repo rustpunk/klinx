@@ -384,7 +384,7 @@ pub fn open_file(tab_mgr: &mut TabManagerState) {
 }
 
 /// Save the active tab to disk. Handles save-as for untitled tabs.
-/// Auto-creates workspace (kiln.toml) on first save per §F4.3.
+/// Auto-creates the workspace (kiln.toml) on first save.
 pub fn save_active_tab(tab_mgr: &mut TabManagerState, force_save_as: bool) {
     let active_id = match (tab_mgr.active_tab_id)() {
         Some(id) => id,
@@ -440,7 +440,7 @@ fn save_tab_by_id(tab_mgr: &mut TabManagerState, tab_id: TabId, force_save_as: b
                 tab.mark_saved(path.clone(), &yaml);
             }
 
-            // Auto-create workspace if needed (§F4.3)
+            // Auto-create workspace if needed
             if let Some(parent) = path.parent()
                 && workspace::detect_workspace(&path).is_none()
                 && workspace::auto_create_workspace(parent)

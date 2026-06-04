@@ -1,9 +1,9 @@
-/// Minimal YAML syntax tokeniser for static Phase 1 display.
+/// Minimal YAML syntax tokenizer for static display (no external dependencies).
 ///
 /// No external dependencies — no regex, no tree-sitter (C binding). A simple
 /// line-by-line pass that covers the common patterns in the demo YAML.
 ///
-/// Replaced in Phase 2 with incremental parsing driven by serde-saphyr.
+/// Future versions will use serde-saphyr for incremental parsing.
 /// A single coloured span within a YAML line.
 #[derive(Clone, Debug)]
 pub struct Token {

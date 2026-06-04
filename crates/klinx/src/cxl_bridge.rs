@@ -3,8 +3,8 @@
 /// Wraps `cxl::parser::Parser::parse()` into a UI-friendly validation result
 /// that components can render without depending on cxl types directly.
 ///
-/// Phase 2a: parser only (no resolver/typechecker — those need a real schema).
-/// Phase 2b will add `validate_with_schema()` using `resolve_program` + `type_check`.
+/// Placeholder for real schema validation — currently parser-only, skipping resolver/typechecker steps.
+/// Future versions will add schema-aware validation via resolver and type checker.
 use cxl::parser::Parser;
 
 /// Result of validating a CXL expression, suitable for rendering.

@@ -3,7 +3,6 @@
 //! Watches the workspace root for file changes and triggers git status
 //! recomputation after a 500ms debounce. Also refreshes the schema index
 //! when .schema.yaml files change.
-//! Spec: clinker-kiln-git-addendum.md §G2.4.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;

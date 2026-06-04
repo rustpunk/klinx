@@ -1,5 +1,4 @@
 //! Log tab — scrollable commit history.
-//! Spec: clinker-kiln-git-addendum.md §G6.3.
 
 use dioxus::prelude::*;
 

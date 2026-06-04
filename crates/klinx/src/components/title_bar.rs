@@ -15,8 +15,6 @@ use crate::tab::TabEntry;
 ///
 /// Other contexts:
 ///   Context label  |  context-specific actions
-///
-/// Doc: spec §8, §F5, addendum §N4.
 #[component]
 pub fn TitleBar() -> Element {
     // Native window handle drives the frameless drag region.

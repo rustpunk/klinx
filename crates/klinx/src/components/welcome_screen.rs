@@ -1,6 +1,6 @@
 /// Welcome screen shown when no tabs are open.
 ///
-/// Spec §F7: brand badge, recent files, open/new buttons, shortcut hints.
+/// Shows a brand badge, recent files, open/new buttons, and shortcut hints.
 use dioxus::prelude::*;
 
 use crate::keyboard;

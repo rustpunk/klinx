@@ -3,7 +3,7 @@
 /// Notes are stored as `serde_json::Value` in the `_notes` field of each
 /// config struct. This module provides typed accessors.
 ///
-/// YAML format (spec §A5A.5):
+/// YAML format:
 /// ```yaml
 /// _notes:
 ///   stage: |

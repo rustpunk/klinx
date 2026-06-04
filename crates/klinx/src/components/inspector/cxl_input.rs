@@ -13,8 +13,6 @@ use super::cxl_diagnostics::CxlDiagnostics;
 /// On every keystroke, `cxl_bridge::validate_expr()` runs the CXL Pratt
 /// parser synchronously (sub-millisecond for typical expressions). Parse
 /// errors are rendered as red diagnostics below the input.
-///
-/// Doc: spec §5.2 — Inspector form field generation.
 #[component]
 pub fn CxlInput(label: String, initial_value: String) -> Element {
     let mut text = use_signal(move || initial_value.clone());

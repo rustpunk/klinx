@@ -2,7 +2,6 @@
 //!
 //! Read operations use gix (pure Rust). Network operations fall back
 //! to the git CLI for reliable credential helper integration.
-//! Spec: clinker-kiln-git-addendum.md §G2.2.
 
 use std::path::Path;
 

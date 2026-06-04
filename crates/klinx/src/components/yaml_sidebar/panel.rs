@@ -15,7 +15,6 @@ use super::tokenizer::tokenize;
 /// together via a shared container.
 ///
 /// Blame gutter: toggleable column showing per-line git blame (author, time, hash).
-/// Spec §G9.
 #[component]
 pub fn YamlSidebar() -> Element {
     let state = use_app_state();

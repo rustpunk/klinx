@@ -1,5 +1,4 @@
 //! PR creation pane — create pull requests from Version Mode.
-//! Spec: clinker-kiln-git-addendum.md §G7.
 
 use dioxus::prelude::*;
 

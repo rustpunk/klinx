@@ -14,8 +14,6 @@ use super::stage_header::StageHeader;
 ///
 /// Keyed on `stage_id` in the parent so selection changes cause a full remount
 /// with fresh signals (drawer state resets on selection change).
-///
-/// Spec §A2.1: Panel structure (Config + toggle bar + drawer).
 #[component]
 pub fn InspectorPanel(stage_id: String) -> Element {
     let state = use_app_state();

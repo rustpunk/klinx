@@ -53,9 +53,7 @@ pub fn read_pipeline_file(path: &Path) -> Result<String, String> {
 
 /// Write pipeline YAML to disk.
 ///
-/// Uses a simple write (not atomic — Phase 2.75 adds tempfile + rename
-/// for `.kiln-state.json`; pipeline YAML is small enough that truncation
-/// risk is acceptable in v1).
+/// Performs a simple synchronous write (non-atomic; future versions will add atomic write support).
 pub fn write_pipeline_file(path: &Path, content: &str) -> Result<(), String> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {

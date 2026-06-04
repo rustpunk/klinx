@@ -1,5 +1,4 @@
 //! Branch bar — shows current branch + Push/Pull/Fetch buttons.
-//! Spec: clinker-kiln-git-addendum.md §G5.4.
 
 use dioxus::prelude::*;
 

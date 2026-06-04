@@ -4,8 +4,6 @@
 //! integration works out of the box. The `GitOps` trait is designed
 //! so a future gix (gitoxide) backend can be swapped in for read
 //! operations without changing callers.
-//!
-//! Spec: clinker-kiln-git-addendum.md §G2.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

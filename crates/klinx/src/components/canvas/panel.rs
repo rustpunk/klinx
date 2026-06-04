@@ -40,7 +40,7 @@ struct DragState {
 ///
 /// Pan: left-click-drag anywhere on the canvas background.
 /// Zoom: scroll wheel (zoom anchored to cursor position, range 25 %–400 %).
-/// Fit-to-view: double-click empty canvas (Phase 3, stub here as reset to origin).
+/// Fit-to-view: double-click empty canvas (not yet implemented; currently resets to origin).
 ///
 /// Visual layers (back to front):
 ///   1. Dot grid background (CSS radial-gradient, does NOT transform with content)
@@ -48,8 +48,6 @@ struct DragState {
 ///   3. `kiln-canvas-viewport` div — receives CSS transform(translate + scale)
 ///      a. SVG connector overlay (absolute, inset: 0, overflow: visible)
 ///      b. Node cards (absolute, world-space coordinates)
-///
-/// Doc: spec §4.1 — Viewport.
 #[component]
 pub fn CanvasPanel() -> Element {
     let state = use_app_state();
@@ -125,7 +123,7 @@ pub fn CanvasPanel() -> Element {
         let drag = drag.clone();
         move |e: MouseEvent| {
             // Only initiate pan on left-button (button 0) or middle-button (1).
-            // Right-click is reserved for the future context menu (Phase 3).
+            // Right-click is reserved for a future context menu.
             if e.trigger_button() == Some(dioxus::html::input_data::MouseButton::Primary)
                 || e.trigger_button() == Some(dioxus::html::input_data::MouseButton::Auxiliary)
             {
@@ -304,7 +302,7 @@ pub fn CanvasPanel() -> Element {
 
             div {
                 class: "kiln-canvas-panel",
-            // Events on the outer panel — pointer capture would be added in Phase 3.
+            // Events on the outer panel — pointer capture is a future enhancement.
             onmousedown: drag_down,
             onmousemove: drag_move,
             onmouseup: drag_up,

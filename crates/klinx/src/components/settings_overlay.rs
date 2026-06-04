@@ -10,8 +10,6 @@
 /// - Schema directory
 /// - CLI binary path
 /// - Environment variables
-///
-/// Spec: navigation addendum §N3.6.
 use dioxus::prelude::*;
 
 use crate::state::{KilnTheme, TabManagerState};

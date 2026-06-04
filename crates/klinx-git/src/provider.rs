@@ -1,6 +1,4 @@
 //! Git remote provider abstraction — GitHub, GitLab, Bitbucket.
-//!
-//! Spec: clinker-kiln-git-addendum.md §G7.1.
 
 use crate::ops::GitError;
 

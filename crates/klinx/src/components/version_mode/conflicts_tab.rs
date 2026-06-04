@@ -1,5 +1,4 @@
 //! Conflicts tab — structured merge conflict resolution.
-//! Spec: clinker-kiln-git-addendum.md §G6.5, §G8.
 
 use dioxus::prelude::*;
 

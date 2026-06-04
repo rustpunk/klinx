@@ -1,6 +1,4 @@
 //! Search results rendering — file-grouped matches with highlighted text.
-//!
-//! Spec §S2.3: results grouped by file, line matches with highlighted substring.
 
 use dioxus::prelude::*;
 

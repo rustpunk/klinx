@@ -9,8 +9,6 @@ use crate::sync::EditSource;
 /// Both the stage note and field annotations are always editable (no
 /// display/edit toggle). Edits write back through the sync engine:
 /// mutate PipelineConfig._notes → EditSource::Inspector → serialize → YAML.
-///
-/// Spec §A5A.2–A5A.4.
 #[component]
 pub fn DrawerNotes(stage_id: String) -> Element {
     let state = use_app_state();

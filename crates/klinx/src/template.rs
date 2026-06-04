@@ -3,8 +3,6 @@
 //! Templates are valid Clinker pipeline YAML files with `_template` metadata.
 //! No template engine, no variables — Klinx copies the file, strips the
 //! `_template` block, opens it as a new tab, and the user edits it.
-//!
-//! Spec: clinker-kiln-search-schemas-templates-addendum.md §S4.
 
 use std::collections::HashMap;
 use std::fs;

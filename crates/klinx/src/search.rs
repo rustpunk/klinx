@@ -3,8 +3,6 @@
 //! Two modes: text search (substring/regex across YAML files) and structural
 //! search (query pipeline topology using a DSL). Results link directly to
 //! the relevant stage in the relevant pipeline.
-//!
-//! Spec: clinker-kiln-search-schemas-templates-addendum.md §S2.
 
 use std::fs;
 use std::path::{Path, PathBuf};

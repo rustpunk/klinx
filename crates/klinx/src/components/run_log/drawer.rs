@@ -3,7 +3,6 @@ use dioxus::prelude::*;
 use crate::state::use_app_state;
 
 /// Severity level of a run-log line.
-/// All variants used in Phase 5 live log streaming; Phase 1 demo uses a subset.
 #[derive(Clone, Copy, PartialEq)]
 enum Level {
     Cmd,
@@ -40,7 +39,7 @@ struct LogLine {
     message: &'static str,
 }
 
-/// Returns the hardcoded demo log content for Phase 1.
+/// Returns the hardcoded demo log content.
 fn demo_log() -> Vec<LogLine> {
     vec![
         LogLine {
@@ -103,14 +102,12 @@ fn demo_log() -> Vec<LogLine> {
 
 /// Collapsible bottom drawer showing `clinker run` output.
 ///
-/// Streaming output (via `tokio::process::Command`) is implemented in Phase 5.
-/// Phase 1 shows static demo log content.
+/// Currently renders static demo log content; live streaming will run
+/// `clinker` via `tokio::process::Command` and append output as it arrives.
 ///
 /// Collapsed height: 28 px (tab bar only).
 /// Expanded height: 220 px (tab bar + scrollable log content).
 /// Transition: `height 300ms ease-out` via CSS `data-expanded` attribute.
-///
-/// Doc: spec §7 — Run Log.
 #[component]
 pub fn RunLogDrawer() -> Element {
     let state = use_app_state();

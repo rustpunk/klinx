@@ -1,6 +1,6 @@
 //! Template gallery — centered overlay showing available pipeline templates.
 //!
-//! Spec §S4.4: 560px centered overlay, card grid, format tabs, search.
+//! A 560px centered overlay with a card grid, format tabs, and search.
 //! Opened via Ctrl+Shift+N, command palette, or welcome screen.
 
 use dioxus::prelude::*;

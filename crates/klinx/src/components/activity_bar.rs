@@ -1,6 +1,6 @@
 /// Activity bar — vertical navigation strip on the far left edge.
 ///
-/// Spec N2: 48px fixed-width, icon + label entries, active/inactive/hover states.
+/// 48px fixed-width, icon + label entries, active/inactive/hover states.
 /// Each entry maps to a `NavigationContext`. Settings button pinned to bottom.
 /// Badge indicators on Git (dirty file count).
 use dioxus::prelude::*;

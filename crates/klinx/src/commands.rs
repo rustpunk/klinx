@@ -3,7 +3,6 @@
 //! Every action available in Klinx is registered as a `Command` with an id,
 //! label, description, optional keyboard shortcut, and group.
 //! The command palette fuzzy-searches against label + description.
-//! Spec: clinker-kiln-git-addendum.md §G4.4, navigation addendum §N8.
 
 /// A registered command.
 #[derive(Clone, Debug)]

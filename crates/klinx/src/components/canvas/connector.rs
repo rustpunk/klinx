@@ -10,8 +10,6 @@ use crate::pipeline_view::StageView;
 /// 3. Bright centre — hairline solid stroke at 90% opacity (hot-wire effect).
 ///
 ///    Plus an open chevron arrowhead at the target port.
-///
-/// Doc: spec §4.4 — Connectors.
 #[derive(Props, Clone, PartialEq)]
 pub struct ConnectorProps {
     pub from: StageView,

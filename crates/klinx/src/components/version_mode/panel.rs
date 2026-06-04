@@ -1,7 +1,6 @@
 //! Version Mode — full-viewport git operations layout.
 //!
 //! Fifth layout preset: branch bar, tab bar, file list + content area.
-//! Spec: clinker-kiln-git-addendum.md §G5.
 
 use dioxus::prelude::*;
 

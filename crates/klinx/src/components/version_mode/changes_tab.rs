@@ -1,5 +1,4 @@
 //! Changes tab — staged/unstaged file list + commit interface.
-//! Spec: clinker-kiln-git-addendum.md §G6.1.
 
 use dioxus::prelude::*;
 

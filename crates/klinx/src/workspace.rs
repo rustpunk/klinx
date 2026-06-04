@@ -1,8 +1,8 @@
 /// Workspace system: kiln.toml manifest, .kiln-state.json persistence,
 /// auto-detection via ancestor walk, auto-creation on first save.
 ///
-/// Spec §F4: kiln.toml is human-editable + version-controlled.
-/// .kiln-state.json is machine-managed + gitignored.
+/// kiln.toml is human-editable and version-controlled;
+/// .kiln-state.json is machine-managed and gitignored.
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -94,7 +94,7 @@ pub struct PipelineDiscovery {
 
 /// Schema configuration from `[schemas]` in kiln.toml.
 ///
-/// Spec §S3.8: directory for `.schema.yaml` files, inference sample size.
+/// Holds the directory for `.schema.yaml` files and the inference sample size.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SchemaConfig {
     /// Schema file directory (default: "schemas").
@@ -137,7 +137,7 @@ pub struct WorkspaceState {
     pub pipelines: HashMap<String, PipelineEditorState>,
     #[serde(default)]
     pub last_open_directory: Option<String>,
-    /// Search history and saved queries (spec §S2.6).
+    /// Search history and saved queries.
     #[serde(default)]
     pub search: Option<SearchState>,
     /// Active channel and recent channel list for session restoration.
@@ -298,7 +298,7 @@ impl Workspace {
 
 /// Walk ancestor directories looking for kiln.toml.
 ///
-/// Spec §F4.4: stops at first kiln.toml found, or after 10 levels.
+/// Stops at the first kiln.toml found, or after 10 levels.
 /// Returns the workspace root (directory containing kiln.toml) if found.
 pub fn detect_workspace(file_path: &Path) -> Option<PathBuf> {
     let dir = if file_path.is_file() {
@@ -351,7 +351,7 @@ pub fn load_workspace(root: &Path) -> Option<Workspace> {
 
 /// Auto-create a minimal kiln.toml in the given directory.
 ///
-/// Spec §F4.3: silent creation as a side effect of saving.
+/// Silent creation as a side effect of saving.
 /// Returns true if created, false if already exists or on error.
 pub fn auto_create_workspace(dir: &Path) -> bool {
     let manifest_path = dir.join("kiln.toml");
@@ -374,7 +374,7 @@ pub fn auto_create_workspace(dir: &Path) -> bool {
 
 /// Save workspace IDE state to .kiln-state.json.
 ///
-/// Spec §F4.5: atomic write (best-effort — write then rename on supported platforms).
+/// Atomic write, best-effort — write then rename on supported platforms.
 pub fn save_workspace_state(root: &Path, state: &WorkspaceState) {
     let state_path = root.join(".kiln-state.json");
     let Ok(json) = serde_json::to_string_pretty(state) else {
@@ -395,7 +395,7 @@ pub fn save_workspace_state(root: &Path, state: &WorkspaceState) {
 
 /// Append .kiln-state.json to .gitignore if not already covered.
 ///
-/// Spec §F4.6: only appends if .gitignore already exists.
+/// Only appends if .gitignore already exists.
 fn append_gitignore(dir: &Path) {
     let gitignore_path = dir.join(".gitignore");
     if !gitignore_path.exists() {

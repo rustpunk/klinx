@@ -1,5 +1,4 @@
 //! Stash tab — saved stash entries with apply/pop/drop actions.
-//! Spec: clinker-kiln-git-addendum.md §G6.4.
 
 use dioxus::prelude::*;
 

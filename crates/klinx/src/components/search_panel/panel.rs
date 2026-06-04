@@ -1,7 +1,6 @@
 //! Search panel — left-side slide-in (280px) for workspace-wide search.
 //!
 //! Two tabs: Text (substring/regex) and Structural (DSL tags).
-//! Spec §S2.1–§S2.6.
 
 use dioxus::prelude::*;
 

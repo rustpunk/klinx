@@ -2,8 +2,6 @@
 //!
 //! Shows: format diamond + schema name + field count, path, format + usage,
 //! expandable field list. Click name to open `.schema.yaml` in editor tab.
-//!
-//! Spec §S3.6: card anatomy.
 
 use dioxus::prelude::*;
 

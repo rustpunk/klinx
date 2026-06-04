@@ -1,6 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    KLINX — Rustpunk Theme (Oxide sub-aesthetic)
-   Spec: clinker-kiln-spec.md §4.3, §5, §6, §7
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── 1. Google Fonts ───────────────────────────────────────────────────────
@@ -90,7 +89,7 @@
 }
 
 /* ── 2. CSS Custom Properties (Rustpunk colour palette) ────────────────────
-   Token names follow the spec exactly. All UI colours reference these vars.
+   All UI colours reference these vars.
    ─────────────────────────────────────────────────────────────────────── */
 :root {
   /* Accent colours */
@@ -106,12 +105,12 @@
   --kiln-iron:        #A89A88;
   --kiln-text-floor:  #8A7560;
 
-  /* Surface layers (darkest → lightest) — aligned to RUSTPUNK_AESTHETICS.md */
+  /* Surface layers (darkest → lightest) */
   --kiln-char:        #0D0A08;
   --kiln-char-raised: #14110C;
   --kiln-char-surface:#0A0804;
 
-  /* Border tiers — aligned to RUSTPUNK_AESTHETICS.md */
+  /* Border tiers */
   --kiln-border-subtle: #2A211A;
   --kiln-border-medium: #3D3020;
   --kiln-border-strong: #5A4530;
@@ -361,7 +360,7 @@
     0 0, calc(100% - 11px) 0, 100% 9px, 100% 100%, 0 100%
   );
 }
-/* Selected nodes: no clip-path (spec: eroded corners removed on selection) */
+/* Selected nodes: eroded corners removed, so no clip-path */
 [data-theme="enamel"] .kiln-node--selected {
   clip-path: none !important;
 }
@@ -704,7 +703,7 @@ input:-webkit-autofill:focus {
   background: var(--kiln-char-surface);
 }
 
-/* Workspace name in title bar (§F5.1) */
+/* Workspace name in title bar */
 .kiln-title-workspace {
   font-family: var(--kiln-font-ui);
   font-size: 11px;
@@ -828,7 +827,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 5b. Tab bar ──────────────────────────────────────────────────────────
-   Spec §F3.1: 28px height, below title bar, full viewport width.
+   28px height, below the title bar, full viewport width.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-tab-bar {
   display: flex;
@@ -950,7 +949,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 5c. Welcome screen ───────────────────────────────────────────────────
-   Spec §F7: shown when no tabs are open.
+   Shown when no tabs are open.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-welcome {
   flex: 1;
@@ -1047,7 +1046,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 5d. Toast notifications ──────────────────────────────────────────────
-   Spec §F2.2: anchored bottom-right, 16px from edges, auto-dismiss.
+   Anchored bottom-right, 16px from the edges, auto-dismiss.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-toast {
   position: fixed;
@@ -1073,7 +1072,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 5e. Confirmation dialog ───────────────────────────────────────────────
-   Spec §F2.5: modal for unsaved changes. Backdrop blur, hazard accent.
+   Modal for unsaved changes. Backdrop blur, hazard accent.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-confirm-backdrop {
   position: fixed;
@@ -2199,7 +2198,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 6e. Command palette ─────────────────────────────────────────────────
-   440px centered overlay with fuzzy search. Spec §G4.
+   440px centered overlay with fuzzy search.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-palette-backdrop {
   position: fixed;
@@ -2476,7 +2475,7 @@ input:-webkit-autofill:focus {
 
 /* ── 6f. Version Mode ────────────────────────────────────────────────────
    Full-viewport git layout. Branch bar, tab bar, file list + content.
-   Spec §G5. ok-green (#7ab648) accent for Version Mode.
+   ok-green (#7ab648) accent for Version Mode.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-version-mode {
   display: flex;
@@ -3447,7 +3446,7 @@ input:-webkit-autofill:focus {
 
 /* ── 6g. Status bar ──────────────────────────────────────────────────────
    22px bottom bar with git branch, changes, cursor, encoding, language.
-   Git segments hidden when no repo detected. Spec §G3.
+   Git segments hidden when no repo detected.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-status-bar {
   display: flex;
@@ -3557,7 +3556,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── Branch switcher dropdown ────────────────────────────────────────────
-   Opens above the status bar on branch click. Spec §G3.4.
+   Opens above the status bar on branch click.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-branch-switcher-backdrop {
   position: fixed;
@@ -3666,7 +3665,6 @@ input:-webkit-autofill:focus {
 
 /* ── Blame gutter ────────────────────────────────────────────────────────
    Toggleable 130px column in YAML sidebar showing per-line blame.
-   Spec §G9.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-blame-toggle {
   background: transparent;
@@ -3742,7 +3740,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 7. Canvas panel ───────────────────────────────────────────────────────
-   Infinite world-space viewport. Phase 3 adds CSS transform for pan/zoom.
+   Infinite world-space viewport. Future versions will add CSS transform pan/zoom support.
    Visual layers: dot grid → noise → scanlines → SVG connectors → nodes.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-canvas-panel {
@@ -3752,15 +3750,14 @@ input:-webkit-autofill:focus {
   overflow: hidden;
   background-color: var(--kiln-char);
 
-  /* Two-tier Blueprint line grid: 20px minor + 100px major
-     RUSTPUNK_AESTHETICS.md §Grid Paper */
+  /* Two-tier Blueprint line grid: 20px minor + 100px major */
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Cdefs%3E%3Cpattern id='minor' width='20' height='20' patternUnits='userSpaceOnUse'%3E%3Cpath d='M 20 0 L 0 0 0 20' fill='none' stroke='%2343B3AE' stroke-width='0.3' opacity='0.08'/%3E%3C/pattern%3E%3Cpattern id='major' width='100' height='100' patternUnits='userSpaceOnUse'%3E%3Crect width='100' height='100' fill='url(%23minor)'/%3E%3Cpath d='M 100 0 L 0 0 0 100' fill='none' stroke='%2343B3AE' stroke-width='0.8' opacity='0.08'/%3E%3C/pattern%3E%3C/defs%3E%3Crect width='100' height='100' fill='url(%23major)'/%3E%3C/svg%3E");
   background-repeat: repeat;
   background-size: 100px 100px;
 }
 
 /* Scanline overlay — ::before
-   RUSTPUNK_AESTHETICS.md §Scanlines: 2px transparent + 2px rgba(0,0,0,0.06) */
+   2px transparent + 2px rgba(0,0,0,0.06) */
 .kiln-canvas-panel::before {
   content: '';
   position: absolute;
@@ -3777,8 +3774,8 @@ input:-webkit-autofill:focus {
 }
 
 /* Noise / grain overlay — ::after
-   RUSTPUNK_AESTHETICS.md §Noise Overlay: 256x256 warm-weighted grain,
-   blend overlay, opacity 0.6. feColorMatrix warm-weights: R×1.0, G×0.7, B×0.4 */
+   256x256 warm-weighted grain, blend overlay, opacity 0.6.
+   feColorMatrix warm-weights: R×1.0, G×0.7, B×0.4 */
 .kiln-canvas-panel::after {
   content: '';
   position: absolute;
@@ -3812,7 +3809,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 8. Node cards ─────────────────────────────────────────────────────────
-   Spec §4.2: 160 px wide, accent border-top, eroded asymmetric corners.
+   160 px wide, accent border-top, eroded asymmetric corners.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-node {
   position: absolute;
@@ -3820,7 +3817,7 @@ input:-webkit-autofill:focus {
   background: var(--kiln-char-surface);
   border: 1px solid var(--kiln-border-subtle);
   border-top-width: 3px;
-  /* Eroded corners: top-right 16 px, bottom-left 14 px — spec §4.2 */
+  /* Eroded corners: top-right 16 px, bottom-left 14 px */
   clip-path: polygon(
     0 0,
     calc(100% - 16px) 0,
@@ -3840,7 +3837,7 @@ input:-webkit-autofill:focus {
   cursor: pointer;
 }
 
-/* Selected node — accent border glow, eroded corners removed (spec §4.5) */
+/* Selected node — accent border glow, eroded corners removed */
 .kiln-node--selected {
   border-color: var(--kiln-verdigris) !important;
   box-shadow: 0 0 12px 2px rgba(67, 179, 174, 0.3),
@@ -3899,7 +3896,7 @@ input:-webkit-autofill:focus {
   text-overflow: ellipsis;
 }
 
-/* Rust-line separator — oxidation spread gradient, RUSTPUNK_AESTHETICS.md §Surface Treatment */
+/* Rust-line separator — oxidation spread gradient */
 .kiln-rust-line {
   border: none;
   height: 1px;
@@ -4102,7 +4099,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 9. YAML Sidebar ───────────────────────────────────────────────────────
-   Spec §6: full-height column with section header + scrollable code area.
+   Full-height column with section header + scrollable code area.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-yaml-sidebar {
   display: flex;
@@ -4278,7 +4275,7 @@ input:-webkit-autofill:focus {
   word-break: break-all;
 }
 
-/* YAML syntax colours via data-token attribute — spec §6.2 (kept for tokenizer) */
+/* YAML syntax colours via data-token attribute (kept for tokenizer) */
 [data-token="comment"] { color: var(--kiln-text-floor); }
 [data-token="key"]     { color: var(--kiln-verdigris); }
 [data-token="value"]   { color: var(--kiln-phosphor); }
@@ -4294,7 +4291,7 @@ input:-webkit-autofill:focus {
 [data-token="cxl-punct"]   { color: var(--kiln-iron); }
 
 /* ── 10. Run-log drawer ────────────────────────────────────────────────────
-   Spec §7: bottom-anchored, pushes content up (not an overlay).
+   Bottom-anchored, pushes content up (not an overlay).
    Collapsed: 28 px tab bar. Expanded: 220 px.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-run-log {
@@ -4392,7 +4389,7 @@ input:-webkit-autofill:focus {
   text-overflow: ellipsis;
 }
 
-/* Level colours — spec §7.3 */
+/* Level colours */
 .kiln-log-line[data-level="cmd"]  .kiln-log-tag,
 .kiln-log-line[data-level="cmd"]  .kiln-log-msg  { color: var(--kiln-bone); font-weight: 600; }
 
@@ -4432,7 +4429,7 @@ input:-webkit-autofill:focus {
 }
 
 /* ── 12. Inspector panel ───────────────────────────────────────────────────
-   Spec §5: slide-in panel between canvas and YAML sidebar.
+   Slide-in panel between canvas and YAML sidebar.
    340 px default width, vertical flex with scrollable content.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-inspector {
@@ -4597,7 +4594,7 @@ input:-webkit-autofill:focus {
 
 /* ── 16. Drawer toggle bar ─────────────────────────────────────────────────
    Three equal-width buttons: Run (phosphor) | Docs (verdigris) | Notes (iron).
-   Spec §A2.3: 32px height, char-raised background.
+   32px height, char-raised background.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-drawer-bar {
   display: flex;
@@ -4712,7 +4709,6 @@ input:-webkit-autofill:focus {
 
 /* ── 18. Notes drawer content ───────────────────────────────────────────────
    Stage-level note and field-level annotations. Iron accent.
-   Spec §A5A.2–A5A.4.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-notes-section {
   margin-bottom: 12px;
@@ -4842,7 +4838,6 @@ input:-webkit-autofill:focus {
 
 /* ── 19. Docs drawer content (Blueprint sub-aesthetic) ─────────────────────
    Auto-generated stage descriptions, metadata grid, column impact.
-   Spec §A5.2–A5.6, §A10.1.
    ─────────────────────────────────────────────────────────────────────── */
 
 /* Auto-generated description block */
@@ -5274,7 +5269,6 @@ input:-webkit-autofill:focus {
 
 /* ── 20. Schematics layout ─────────────────────────────────────────────────
    Full-pipeline documentation view with Blueprint sub-aesthetic.
-   Spec §A7.
    ─────────────────────────────────────────────────────────────────────── */
 .kiln-schematics {
   display: flex;
@@ -5391,7 +5385,7 @@ input:-webkit-autofill:focus {
 
 /* ── Scrollable content area with Blueprint gridlines ── */
 /* Two-tier SVG grid: 20px minor (0.3 stroke) + 100px major (0.8 stroke),
-   verdigris at 0.08 opacity. RUSTPUNK_AESTHETICS.md §Grid Paper */
+   verdigris at 0.08 opacity. */
 .kiln-schematics-content {
   flex: 1;
   overflow-y: auto;
@@ -5451,7 +5445,7 @@ input:-webkit-autofill:focus {
   border-radius: 2px;
   padding: 20px 24px;
   margin-bottom: 0;
-  /* Eroded corners: top-right 24px, bottom-left 16px — RUSTPUNK_AESTHETICS.md §Surface Treatment */
+  /* Eroded corners: top-right 24px, bottom-left 16px */
   clip-path: polygon(
     0 0,
     calc(100% - 24px) 0,
@@ -5463,7 +5457,7 @@ input:-webkit-autofill:focus {
 }
 
 /* Registration marks — L-shaped corner indicators at non-eroded corners
-   RUSTPUNK_AESTHETICS.md §Registration Marks: 8x8px, 1.5px accent, 50% opacity */
+   8x8px, 1.5px accent, 50% opacity */
 .kiln-stage-card::before,
 .kiln-stage-card::after {
   content: '';
@@ -5922,7 +5916,7 @@ input:-webkit-autofill:focus {
   white-space: nowrap;
 }
 
-/* ── Dimension-line separators — addendum §Dimension Lines ─────────────── */
+/* ── Dimension-line separators ─────────────────────────────────────── */
 
 /* Vertical dimension line between stage cards */
 .kiln-schematics-dimension {
@@ -5992,7 +5986,7 @@ input:-webkit-autofill:focus {
   flex-shrink: 0;
 }
 
-/* ── Title block stamp — addendum §Title Block Stamps ─────────────────── */
+/* ── Title block stamp ─────────────────────────────────────────────────── */
 .kiln-stage-card-stamp {
   position: absolute;
   top: -8px;
@@ -6009,7 +6003,7 @@ input:-webkit-autofill:focus {
   z-index: 1;
 }
 
-/* ── Blueprint entry animation — addendum §Blueprint Motion ───────────── */
+/* ── Blueprint entry animation ────────────────────────────────────────── */
 @keyframes blueprintIn {
   from { opacity: 0; transform: translateY(16px); }
   to   { opacity: 1; transform: translateY(0); }

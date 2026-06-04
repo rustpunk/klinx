@@ -7,8 +7,6 @@ use crate::pipeline_view::StageView;
 /// Each stage is a small pill showing label + type badge, connected by
 /// dashed verdigris SVG connectors. Scrolls horizontally if the pipeline
 /// is wider than the viewport.
-///
-/// Spec §A7.4: Flow Bar.
 #[component]
 pub fn FlowBar(stages: Vec<StageView>) -> Element {
     rsx! {

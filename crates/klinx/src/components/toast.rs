@@ -1,6 +1,6 @@
 /// Toast notification overlay with auto-dismiss.
 ///
-/// Spec §F2.2: anchored bottom-right, 16px from edges, auto-dismiss after 5s.
+/// Anchored bottom-right, 16px from the edges, auto-dismissing after 5s.
 /// Verdigris accent for success, oxide-red for errors. Click to dismiss early.
 use dioxus::prelude::*;
 

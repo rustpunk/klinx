@@ -1,4 +1,4 @@
-#![allow(dead_code)] // Types consumed starting Phase 2+
+#![allow(dead_code)] // Types consumed by future features
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

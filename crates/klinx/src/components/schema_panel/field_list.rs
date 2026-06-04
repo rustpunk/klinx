@@ -3,8 +3,6 @@
 //! Renders a list of `FieldDescriptor` entries with type badges, nullable
 //! indicators, description snippets, enum counts, and nested indentation.
 //! XML attributes show an `attr` tag. Object fields recurse.
-//!
-//! Spec §S3.6: field list with type badges and indicators.
 
 use dioxus::prelude::*;
 

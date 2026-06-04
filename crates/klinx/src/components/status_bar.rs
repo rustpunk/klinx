@@ -8,7 +8,6 @@
 //!
 //! Branch segment clickable → opens branch switcher dropdown.
 //! Changes segment clickable → switches to Git context.
-//! Spec: clinker-kiln-git-addendum.md §G3, navigation addendum §N5.
 
 use dioxus::prelude::*;
 
@@ -174,7 +173,6 @@ pub fn StatusBar() -> Element {
 }
 
 /// Branch switcher dropdown — opens above the status bar.
-/// Spec: clinker-kiln-git-addendum.md §G3.4.
 #[component]
 fn BranchSwitcher(on_close: EventHandler<()>) -> Element {
     let mut tab_mgr = use_context::<TabManagerState>();

@@ -1,5 +1,4 @@
 //! Diff tab — unified diff viewer with YAML syntax tokens.
-//! Spec: clinker-kiln-git-addendum.md §G6.2.
 
 use dioxus::prelude::*;
 

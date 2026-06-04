@@ -12,10 +12,9 @@ pub enum ActiveDrawer {
 
 /// Toggle bar with Run / Docs / Notes buttons.
 ///
-/// Spec §A2.3: 32px height, `char-raised` background, three equal-width
-/// buttons separated by 1px vertical dividers. Each button has an icon,
-/// label, and badge. Active button gets accent-tinted background and
-/// 2px accent bottom border.
+/// Three equal-width buttons separated by 1px vertical dividers. Each
+/// button has an icon, label, and badge. The active button gets an
+/// accent-tinted background and a 2px accent bottom border.
 #[component]
 pub fn DrawerToggleBar(active: ActiveDrawer, on_toggle: EventHandler<ActiveDrawer>) -> Element {
     rsx! {

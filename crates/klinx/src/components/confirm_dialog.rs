@@ -1,6 +1,6 @@
 /// Modal confirmation dialog for unsaved changes.
 ///
-/// Spec §F2.5: centered modal with backdrop blur, hazard accent,
+/// Centered modal with backdrop blur and hazard accent, offering
 /// Save / Don't Save / Cancel buttons.
 use dioxus::prelude::*;
 

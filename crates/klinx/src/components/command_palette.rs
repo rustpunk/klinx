@@ -2,7 +2,6 @@
 //!
 //! Built on `dioxus-nox-cmdk` for fuzzy search, keyboard navigation,
 //! and accessible command execution.
-//! Spec: clinker-kiln-git-addendum.md §G4, navigation addendum §N8.
 
 use dioxus::prelude::*;
 use dioxus_nox_cmdk::*;
