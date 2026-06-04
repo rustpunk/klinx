@@ -1,0 +1,63 @@
+# cargo-deny configuration for klinx
+# Ensures zero C build dependencies in klinx's own crates (pure Rust only);
+# Dioxus desktop's GTK/WebView transitive graph is the only exception.
+#
+# Run: cargo deny check
+
+[bans]
+multiple-versions = "warn"
+deny = [
+    # Ban cmake — enforces pure Rust compilation
+    { name = "cmake" },
+]
+# Tolerate duplicate versions of Dioxus desktop's Windows binding crates
+# (multiple windows-sys / windows-targets versions are common in transitive
+# graphs that pull in different Dioxus subcrates).
+skip = [
+    { name = "windows-sys" },
+    { name = "windows-targets" },
+]
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Zlib",
+    # University of Illinois/NCSA Open Source License — a permissive,
+    # BSD/MIT-style license with no copyleft. Reaches the graph through the
+    # Dioxus desktop AVIF image decoder (dioxus-desktop -> image -> ravif ->
+    # rav1e), whose fuzz-target build dep libfuzzer-sys is triple-licensed
+    # "(MIT OR Apache-2.0) AND NCSA".
+    "NCSA",
+]
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+# Dioxus desktop transitive deps: GTK3 bindings, instant, proc-macro-error.
+ignore = [
+    "RUSTSEC-2024-0370",
+    "RUSTSEC-2024-0384",
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    "RUSTSEC-2025-0057",
+    # paste 1.0.15 is author-archived (no successor adopted upstream). It is an
+    # unavoidable transitive proc-macro of the Dioxus desktop AVIF image
+    # decoder (dioxus-desktop -> image -> ravif -> rav1e -> paste).
+    "RUSTSEC-2024-0436",
+]

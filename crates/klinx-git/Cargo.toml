@@ -1,0 +1,9 @@
+[package]
+name = "klinx-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Git backend abstraction for Klinx — CLI-based with future gix upgrade path"
+
+[dependencies]
+tokio = { workspace = true, features = ["process"] }

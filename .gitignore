@@ -1,0 +1,20 @@
+# Build artifacts
+/target/
+
+# Dioxus CLI (`dx serve`) build cache and output
+/.dioxus/
+dist/
+
+# Playwright MCP scratch output (web UI tests)
+.playwright-mcp/
+test-results/
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Klinx ships binaries (the IDE application), so Cargo.lock is committed for
+# reproducible builds and to pin the transitive graph behind the git deps.
+# It is intentionally NOT ignored here.

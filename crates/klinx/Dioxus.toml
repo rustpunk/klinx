@@ -1,0 +1,3 @@
+[application]
+name = "klinx"
+default_platform = "desktop"

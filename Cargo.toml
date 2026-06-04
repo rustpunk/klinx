@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/klinx", "crates/klinx-git"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+toml = "0.8"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde-saphyr = { version = "=0.0.23", features = ["miette"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+indexmap = { version = "2", features = ["serde"] }
+dioxus = { version = "=0.7.4" }
+rfd = "0.15"
+blake3 = { version = "1", default-features = false, features = ["pure"] }
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+# `process` is required by klinx-git (it spawns the `git` CLI) and is declared
+# at both the workspace and consumer sites; the union is harmless.
+tokio = { version = "1", features = ["time", "rt", "rt-multi-thread", "macros", "sync", "process"] }
+notify = "7"
+petgraph = "0.8"
+
+# Engine crates consumed from the clinker workspace as git dependencies, pinned
+# to a single commit so the IDE compiles against a known engine surface.
+cxl = { git = "https://github.com/rustpunk/clinker", rev = "c233a38" }
+clinker-core = { git = "https://github.com/rustpunk/clinker", rev = "c233a38" }
+clinker-record = { git = "https://github.com/rustpunk/clinker", rev = "c233a38" }
+clinker-schema = { git = "https://github.com/rustpunk/clinker", rev = "c233a38" }
+clinker-channel = { git = "https://github.com/rustpunk/clinker", rev = "c233a38" }
+
+# Local workspace member: the git VCS layer (formerly clinker-git).
+klinx-git = { path = "crates/klinx-git" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
