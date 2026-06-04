@@ -5,17 +5,11 @@ Guidance for Claude Code (claude.ai/code) when working in the klinx repository.
 ## What klinx is
 
 Klinx is the standalone Dioxus IDE for authoring Clinker pipeline YAML. It was
-extracted from the `clinker-kiln` crate of the Clinker workspace. One codebase,
-two targets:
-
-- **Desktop** — `wry` webview (Linux/macOS/Windows). Default per `Dioxus.toml`.
-  Uses `dioxus = { features = ["desktop"] }` under
-  `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`, plus `tokio` for
-  async and the local `klinx-git` crate for VCS operations.
-  Launch: `dx serve --package klinx --platform desktop`.
-- **Web** — `wasm32` target. Launch: `dx serve --package klinx`. Playwright
-  drives this build only; it cannot drive the desktop `wry` webview, so all UI
-  integration tests live on the web side.
+extracted from the `clinker-kiln` crate of the Clinker workspace. Klinx is a
+`wry` desktop application (Linux/macOS/Windows), the default platform per
+`Dioxus.toml`. It builds with `dioxus = { features = ["desktop"] }`, uses
+`tokio` for async, and depends on the local `klinx-git` crate for VCS
+operations. Launch: `dx serve --package klinx`.
 
 The Dioxus version is pinned to `=0.7.4` to avoid silent breakage. The `dx` CLI
 is required — install via `cargo install dioxus-cli`.
@@ -38,8 +32,7 @@ surface, bump the `rev` in `[workspace.dependencies]` (a single edit point) and
 rebuild.
 
 The git VCS layer is the local `klinx-git` crate (formerly `clinker-git`),
-imported in source as `klinx_git` and referenced only under
-`cfg(not(target_arch = "wasm32"))`.
+imported in source as `klinx_git`.
 
 ## Pre-commit checks
 
@@ -62,9 +55,11 @@ that step 2 never compiles — it does not replace step 2.
 ```bash
 cargo build --workspace          # first build fetches the clinker git pin
 cargo test --workspace
-dx serve --package klinx                       # web target (Playwright drives this)
-dx serve --package klinx --platform desktop    # desktop target
+dx serve --package klinx         # desktop target (default per Dioxus.toml)
 ```
+
+Klinx is desktop-only: there is no `wasm32`/web build and no Playwright web test
+target. UI verification runs against the `wry` desktop app.
 
 ## Dioxus
 
@@ -84,8 +79,8 @@ crates; Dioxus/GTK transitive C deps are exempted via the `deny.toml` skips.
 ## Comment policy
 
 Comments explain WHY the code is the way it is. A short WHAT is fine when it
-adds precision the signature can't express (invariants, units, desktop-vs-web
-gating). Every public item gets a `///` summary. Avoid deletion tombstones;
+adds precision the signature can't express (invariants, units, threading/UI
+model). Every public item gets a `///` summary. Avoid deletion tombstones;
 explanations for removed code belong in the commit message.
 
 ## Rust edition & toolchain

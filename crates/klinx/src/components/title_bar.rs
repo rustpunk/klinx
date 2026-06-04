@@ -1,4 +1,3 @@
-#[cfg(not(target_arch = "wasm32"))]
 use dioxus::desktop::use_window;
 use dioxus::prelude::*;
 
@@ -9,7 +8,7 @@ use crate::tab::TabEntry;
 /// Custom frameless title bar with context-aware content.
 ///
 /// Common elements (always visible):
-///   [clinker][kiln]  |  workspace-name  |  validation LED
+///   [klinx]  |  workspace-name  |  validation LED
 ///
 /// Pipeline context:
 ///   [New][Open][Save]  |  filename  |  [Canvas|Hybrid|Editor]
@@ -20,9 +19,7 @@ use crate::tab::TabEntry;
 /// Doc: spec §8, §F5, addendum §N4.
 #[component]
 pub fn TitleBar() -> Element {
-    // Native window handle drives the frameless drag region; the wasm target
-    // has no OS window, so the drag handler is gated out below.
-    #[cfg(not(target_arch = "wasm32"))]
+    // Native window handle drives the frameless drag region.
     let window = use_window();
     let state = use_app_state();
     let mut tab_mgr: TabManagerState = use_context();
@@ -55,19 +52,14 @@ pub fn TitleBar() -> Element {
     // Mutable signal copy for layout mode switching
     let mut pipeline_layout = state.pipeline_layout;
 
-    // Git state for Git context title bar. Git is desktop-only; on wasm the
-    // Git context page is itself stubbed out, so the branch label is None.
-    #[cfg(not(target_arch = "wasm32"))]
+    // Git state for the Git-context title bar branch label.
     let git_branch = (tab_mgr.git_state)().as_ref().map(|gs| gs.branch.clone());
-    #[cfg(target_arch = "wasm32")]
-    let git_branch: Option<String> = None;
 
     rsx! {
         div {
             class: "kiln-title-bar",
             onmousedown: move |_| {
-                // Frameless-window drag is a native-only affordance; no-op on wasm.
-                #[cfg(not(target_arch = "wasm32"))]
+                // Drag the frameless window from the title-bar region.
                 window.drag();
             },
 
@@ -75,8 +67,8 @@ pub fn TitleBar() -> Element {
             div {
                 class: "kiln-brand",
                 onmousedown: move |e| e.stop_propagation(),
-                span { class: "kiln-brand-label", "clinker" }
-                span { class: "kiln-brand-value", "kiln" }
+                span { class: "kiln-brand-label", "" }
+                span { class: "kiln-brand-value", "klinx" }
             }
 
             span { class: "kiln-title-divider" }

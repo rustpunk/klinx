@@ -18,15 +18,11 @@ pub fn ActivityBar() -> Element {
     let tab_mgr = use_context::<TabManagerState>();
     let activity_bar_visible = (tab_mgr.activity_bar_visible)();
 
-    // Git badge: count of dirty files. Git is desktop-only; the wasm build has
-    // no backend, so the badge is always zero (and the Git nav item hidden).
-    #[cfg(not(target_arch = "wasm32"))]
+    // Git badge: count of dirty files.
     let git_badge = (tab_mgr.git_state)()
         .as_ref()
         .map(|gs| gs.files.len())
         .unwrap_or(0);
-    #[cfg(target_arch = "wasm32")]
-    let git_badge: usize = 0;
 
     // Channel badge: count of discovered channels
     let _channel_badge = (tab_mgr.channel_state)()

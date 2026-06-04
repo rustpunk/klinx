@@ -12,7 +12,6 @@ use dioxus::prelude::*;
 /// Navigation uses a two-level model:
 /// - `NavigationContext` selects the active page (Pipeline, Channels, Git, Docs, Runs)
 /// - `PipelineLayoutMode` selects the view within Pipeline (Canvas, Hybrid, Editor)
-#[cfg(not(target_arch = "wasm32"))]
 use klinx_git::GitOps;
 
 use crate::components::confirm_dialog::{ConfirmAction, ConfirmDialog, PendingConfirm};
@@ -100,10 +99,7 @@ pub fn AppShell() -> Element {
     let left_panel: Signal<LeftPanel> = use_signal(|| LeftPanel::None);
     let mut schema_index: Signal<SchemaIndex> = use_signal(SchemaIndex::default);
     let show_template_gallery: Signal<bool> = use_signal(|| false);
-    #[cfg(not(target_arch = "wasm32"))]
     let mut git_state: Signal<Option<klinx_git::RepoStatus>> = use_signal(|| None);
-    #[cfg(target_arch = "wasm32")]
-    let git_state: Signal<Option<()>> = use_signal(|| None);
     let show_command_palette: Signal<bool> = use_signal(|| false);
     let show_settings: Signal<bool> = use_signal(|| false);
     let mut channel_state: Signal<Option<crate::state::ChannelState>> = use_signal(|| None);
@@ -116,7 +112,6 @@ pub fn AppShell() -> Element {
     });
 
     // ── Git: detect repo and compute status on workspace change ──────────
-    #[cfg(not(target_arch = "wasm32"))]
     {
         use_effect(move || {
             let ws = (workspace)();
@@ -185,7 +180,6 @@ pub fn AppShell() -> Element {
 
     // ── Filesystem watcher: auto-refresh git status + schema index ─────
     // Spawns a background watcher on the workspace root. Debounced 500ms.
-    #[cfg(not(target_arch = "wasm32"))]
     {
         use_effect(move || {
             let ws = (workspace)();
@@ -235,7 +229,6 @@ pub fn AppShell() -> Element {
     // Periodic autosave: flush state to disk every 5 seconds.
     // Catches all state changes even if the user never switches tabs.
     // Worst case on force-kill: lose last 5 seconds of layout/tab state.
-    #[cfg(not(target_arch = "wasm32"))]
     use_future(move || {
         let tabs = tabs;
         let channel_state = channel_state;
@@ -638,23 +631,11 @@ pub fn AppShell() -> Element {
     }
 }
 
-/// Git context page — conditional on desktop target (git not available on web).
-#[cfg(not(target_arch = "wasm32"))]
+/// Git context page — renders the version-control workspace.
 #[component]
 fn GitContextPage() -> Element {
     use crate::components::version_mode::VersionMode;
     rsx! { VersionMode {} }
-}
-
-#[cfg(target_arch = "wasm32")]
-#[component]
-fn GitContextPage() -> Element {
-    rsx! {
-        PlaceholderPage {
-            name: "Version Control",
-            description: "Git integration is not available in the web build.",
-        }
-    }
 }
 
 /// Active tab's content area — Pipeline context only.

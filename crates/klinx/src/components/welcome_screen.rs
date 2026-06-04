@@ -19,8 +19,8 @@ pub fn WelcomeScreen() -> Element {
             // Brand badge (stacked)
             div {
                 class: "kiln-welcome-brand",
-                div { class: "kiln-welcome-brand-top", "CLINKER" }
-                div { class: "kiln-welcome-brand-bottom", "KILN" }
+                div { class: "kiln-welcome-brand-top", "" }
+                div { class: "kiln-welcome-brand-bottom", "KLINX" }
             }
 
             // Subtitle

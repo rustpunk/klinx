@@ -1,9 +1,9 @@
 # Klinx
 
-Klinx is the standalone IDE for authoring [Clinker](https://github.com/rustpunk/clinker)
+Klinx is the standalone desktop IDE for authoring [Clinker](https://github.com/rustpunk/clinker)
 YAML pipeline configurations. It is a [Dioxus](https://dioxuslabs.com) 0.7
-application that builds from one codebase to two targets — a native desktop app
-(`wry` webview) and a `wasm32` web app.
+application that runs as a native desktop app (`wry` webview) on Linux, macOS,
+and Windows.
 
 Klinx provides a visual pipeline canvas, a node inspector, a YAML editor with
 CXL syntax support, schema and provenance panels, a git version-control mode,
@@ -14,12 +14,9 @@ and a bundled gallery of starter pipeline templates.
 ```
 klinx/
   crates/
-    klinx/        the IDE binary (Dioxus desktop + web)
+    klinx/        the IDE binary (Dioxus desktop)
     klinx-git/    git VCS abstraction (CLI-based, future gix upgrade path)
 ```
-
-`klinx-git` is a desktop-only local dependency; it is gated behind
-`cfg(not(target_arch = "wasm32"))` and does not enter the web build.
 
 ## Engine crates come from Clinker via a git pin
 
@@ -53,18 +50,14 @@ checkout. Bumping the engine surface means bumping the `rev` in the workspace
 ## Running
 
 ```bash
-# Web target — served by the dx dev server in your browser.
-# The explicit --platform web is required: Dioxus.toml sets
-# default_platform = "desktop", so dx cannot infer the web triple otherwise.
-dx serve --package klinx --platform web
-
 # Desktop target — native wry webview (default platform per Dioxus.toml)
 dx serve --package klinx --platform desktop
 ```
 
-The web build is the one driven by Playwright in CI and local UI testing; the
-desktop `wry` webview cannot be driven by Playwright, so UI integration tests
-live on the web side.
+There is no automated UI integration test target: klinx is desktop-only and
+the `wry` desktop webview cannot be driven by Playwright or similar headless
+browser tools. Correctness validation relies on the cargo test suite and manual
+exploratory testing against the desktop build.
 
 ## Checks
 

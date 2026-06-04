@@ -198,7 +198,7 @@ pub fn SchematicsPanel() -> Element {
                 div {
                     class: "kiln-schematics-footer",
                     span { class: "kiln-schematics-footer-rule" }
-                    span { class: "kiln-schematics-footer-label", "CLINKER AUTODOC \u{00B7} BLUEPRINT" }
+                    span { class: "kiln-schematics-footer-label", "KLINX AUTODOC \u{00B7} BLUEPRINT" }
                     span { class: "kiln-schematics-footer-rule" }
                 }
             }

@@ -290,11 +290,7 @@ pub struct TabManagerState {
     /// Whether the template gallery overlay is visible.
     pub show_template_gallery: Signal<bool>,
     /// Git repository status — branch, ahead/behind, file changes.
-    /// On web builds, this is always None (git not available in WASM).
-    #[cfg(not(target_arch = "wasm32"))]
     pub git_state: Signal<Option<klinx_git::RepoStatus>>,
-    #[cfg(target_arch = "wasm32")]
-    pub git_state: Signal<Option<()>>,
     /// Whether the command palette overlay is visible.
     pub show_command_palette: Signal<bool>,
     /// Whether the settings overlay is visible.

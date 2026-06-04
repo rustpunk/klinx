@@ -1,8 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::state::use_app_state;
-// Only the desktop-only blame components touch the tab manager directly.
-#[cfg(not(target_arch = "wasm32"))]
+// The blame components read git state from the tab manager directly.
 use crate::state::TabManagerState;
 use crate::sync::EditSource;
 
@@ -194,10 +193,9 @@ pub fn YamlSidebar() -> Element {
     }
 }
 
-// ── Blame components (desktop-only) ─────────────────────────────────────
+// ── Blame components ────────────────────────────────────────────────────
 
-/// Blame toggle button — only rendered on desktop when git is available.
-#[cfg(not(target_arch = "wasm32"))]
+/// Blame toggle button — rendered when git is available for the workspace.
 #[component]
 fn BlameToggle() -> Element {
     let tab_mgr = use_context::<TabManagerState>();
@@ -225,14 +223,7 @@ fn BlameToggle() -> Element {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[component]
-fn BlameToggle() -> Element {
-    rsx! {}
-}
-
-/// Blame gutter — desktop only, shows per-line git blame data.
-#[cfg(not(target_arch = "wasm32"))]
+/// Blame gutter — shows per-line git blame data.
 #[component]
 fn BlameGutter(line_count: usize) -> Element {
     use klinx_git::BlameLine;
@@ -300,14 +291,7 @@ fn BlameGutter(line_count: usize) -> Element {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[component]
-fn BlameGutter(line_count: usize) -> Element {
-    rsx! {}
-}
-
 /// Load blame data for the current file.
-#[cfg(not(target_arch = "wasm32"))]
 fn load_blame(tab_mgr: &TabManagerState, blame_data: &mut Signal<Vec<klinx_git::BlameLine>>) {
     use klinx_git::GitOps;
 
@@ -334,7 +318,6 @@ fn load_blame(tab_mgr: &TabManagerState, blame_data: &mut Signal<Vec<klinx_git::
 }
 
 /// Short relative time for blame gutter (2h, 3d, 1w, 2mo).
-#[cfg(not(target_arch = "wasm32"))]
 fn relative_time_short(timestamp: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

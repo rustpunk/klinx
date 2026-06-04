@@ -27,9 +27,7 @@ pub fn TabBar() -> Element {
                     let is_dirty = tab.is_dirty();
                     let name = tab.display_name();
 
-                    // Git status badge per tab — desktop only; the wasm build
-                    // carries no git backend, so no per-tab status is shown.
-                    #[cfg(not(target_arch = "wasm32"))]
+                    // Git status badge per tab.
                     let git_status = (tab_mgr.git_state)().as_ref().and_then(|gs| {
                         tab.file_path.as_ref().and_then(|fp| {
                             gs.files.iter().find(|f| fp.ends_with(&f.path)).map(|f| f.status)
@@ -55,29 +53,20 @@ pub fn TabBar() -> Element {
                                 span { class: "kiln-tab-dirty", "\u{25CF} " }
                             }
                             span { class: "kiln-tab-name", "{name}" }
-                            {
-                                #[cfg(not(target_arch = "wasm32"))]
+                            if let Some(status) = git_status {
                                 {
+                                    let letter = status.letter();
+                                    let css_class = match status {
+                                        klinx_git::StatusKind::Modified => "kiln-tab-git kiln-tab-git--modified",
+                                        klinx_git::StatusKind::Added => "kiln-tab-git kiln-tab-git--added",
+                                        klinx_git::StatusKind::Deleted => "kiln-tab-git kiln-tab-git--deleted",
+                                        klinx_git::StatusKind::Renamed => "kiln-tab-git kiln-tab-git--renamed",
+                                        klinx_git::StatusKind::Untracked => "kiln-tab-git kiln-tab-git--untracked",
+                                    };
                                     rsx! {
-                                        if let Some(status) = git_status {
-                                            {
-                                                let letter = status.letter();
-                                                let css_class = match status {
-                                                    klinx_git::StatusKind::Modified => "kiln-tab-git kiln-tab-git--modified",
-                                                    klinx_git::StatusKind::Added => "kiln-tab-git kiln-tab-git--added",
-                                                    klinx_git::StatusKind::Deleted => "kiln-tab-git kiln-tab-git--deleted",
-                                                    klinx_git::StatusKind::Renamed => "kiln-tab-git kiln-tab-git--renamed",
-                                                    klinx_git::StatusKind::Untracked => "kiln-tab-git kiln-tab-git--untracked",
-                                                };
-                                                rsx! {
-                                                    span { class: "{css_class}", "{letter}" }
-                                                }
-                                            }
-                                        }
+                                        span { class: "{css_class}", "{letter}" }
                                     }
                                 }
-                                #[cfg(target_arch = "wasm32")]
-                                { rsx! {} }
                             }
 
                             button {

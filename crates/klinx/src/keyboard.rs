@@ -202,9 +202,7 @@ pub fn handle_keyboard(event: &KeyboardEvent, tab_mgr: &mut TabManagerState) -> 
 
         // ── Ctrl+Q — Graceful quit ──────────────────────────────────────
         Key::Character(ref c) if c == "q" && !shift => {
-            // Closing the OS window only applies to the native target; the web
-            // build has no window to close, so the shortcut is a no-op there.
-            #[cfg(not(target_arch = "wasm32"))]
+            // Close the OS window to exit the desktop app.
             dioxus::desktop::window().close();
             true
         }

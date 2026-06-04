@@ -636,7 +636,6 @@ pub fn parse_navigation_state(state: &WorkspaceState) -> (NavigationContext, Pip
 }
 
 /// Show a native directory picker and try to open it as a workspace.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn open_workspace_dialog() -> Option<Workspace> {
     let dialog = rfd::FileDialog::new().set_title("Open Workspace");
 
@@ -650,12 +649,6 @@ pub fn open_workspace_dialog() -> Option<Workspace> {
         // (user might have picked the parent)
         None
     }
-}
-
-/// Stub for web builds — no native directory picker.
-#[cfg(target_arch = "wasm32")]
-pub fn open_workspace_dialog() -> Option<Workspace> {
-    None
 }
 
 // ── Session restore (single entry point for app startup) ────────────────
