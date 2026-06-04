@@ -34,18 +34,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The dx CLI builds the desktop bundle. binstall pulls the prebuilt
-      # 0.7.4 binary (matches the workspace's pinned dioxus = "=0.7.4").
-      - uses: cargo-bins/cargo-binstall@main
-      - name: Install dx (Dioxus CLI)
-        run: cargo binstall -y dioxus-cli@0.7.4
-
-      # Formatting is OS-independent; check once on Linux to avoid Windows
-      # CRLF false-positives.
+      # Code gauntlet runs on all three platforms — this is the cross-platform
+      # guarantee that the engine git-pins + the IDE compile and test on
+      # Linux, macOS, and Windows. Formatting is OS-independent, checked once
+      # on Linux to avoid Windows CRLF false-positives.
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
-
       # Two clippy passes. The first omits --all-targets on purpose: with
       # test targets excluded, a pub(crate) item referenced only from
       # #[cfg(test)] code still trips the dead-code lint, so the dead-code
@@ -55,13 +50,21 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
       - name: Clippy (all targets)
         run: cargo clippy --workspace --all-targets -- -D warnings
-
       - name: Test
         run: cargo test --workspace
 
-      # Verify the actual desktop bundle compiles on each platform, not just
-      # the library/binary crates.
+      # Desktop-bundle build runs on Linux + Windows only. dioxus-cli 0.7.4
+      # ships no aarch64-apple-darwin prebuilt, and its from-source build is
+      # currently broken upstream (auth-git2 vs git2 0.21), so dx cannot be
+      # installed on the Apple-Silicon runner. macOS still builds and tests
+      # the code above; only the dx packaging step is skipped there.
+      - uses: cargo-bins/cargo-binstall@main
+        if: runner.os != 'macOS'
+      - name: Install dx (Dioxus CLI)
+        if: runner.os != 'macOS'
+        run: cargo binstall -y dioxus-cli@0.7.4
       - name: Build desktop bundle
+        if: runner.os != 'macOS'
         run: dx build --package klinx --platform desktop
 
   deny:
