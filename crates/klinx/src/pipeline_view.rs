@@ -758,7 +758,7 @@ nodes:
     /// still renders via the variant-dispatch code path and produces the
     /// expected stage count.
     #[test]
-    fn test_kiln_loads_migrated_fixture() {
+    fn test_loads_migrated_fixture() {
         let yaml = r#"
 pipeline:
   name: loaded_fixture_smoke
@@ -830,7 +830,7 @@ nodes:
     /// A pipeline containing a `PipelineNode::Composition` stub renders it
     /// as a placeholder stage (badge subtitle) without panic.
     #[test]
-    fn test_kiln_composition_placeholder_renders() {
+    fn test_composition_placeholder_renders() {
         let yaml = r#"
 pipeline:
   name: composition_placeholder_smoke
