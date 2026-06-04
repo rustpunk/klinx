@@ -44,7 +44,17 @@ jobs:
         if: runner.os != 'macOS'
       - name: Install dx (Dioxus CLI)
         if: runner.os != 'macOS'
-        run: cargo binstall -y dioxus-cli@0.7.4
+        shell: bash
+        run: |
+          cargo binstall -y dioxus-cli@0.7.4
+          # binstall drops dx in $CARGO_HOME/bin, which is not reliably on the
+          # Windows runner PATH for the later pwsh bundle step — add it
+          # explicitly (GITHUB_PATH applies to subsequent steps).
+          BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
+          [ "$RUNNER_OS" = "Windows" ] && BIN="$(cygpath -w "$BIN")"
+          echo "$BIN" >> "$GITHUB_PATH"
+          echo "dx installed under: $BIN"
+          ls "${CARGO_HOME:-$HOME/.cargo}/bin" | grep -i '^dx' || true
 
       # Code gauntlet runs on all three platforms — the cross-platform
       # guarantee that the engine git-pins + the IDE compile and test on
