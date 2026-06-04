@@ -34,7 +34,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Code gauntlet runs on all three platforms — this is the cross-platform
+      # Install the dx CLI early so its ~/.cargo/bin entry is on PATH by the
+      # time the bundle step runs (installing immediately before `dx build`
+      # races the GITHUB_PATH update on Windows). Skipped on macOS: dioxus-cli
+      # 0.7.4 ships no aarch64-apple-darwin prebuilt and its from-source build
+      # is broken upstream (auth-git2 vs git2 0.21), so dx cannot be installed
+      # on the Apple-Silicon runner — macOS still builds and tests the code.
+      - uses: cargo-bins/cargo-binstall@main
+        if: runner.os != 'macOS'
+      - name: Install dx (Dioxus CLI)
+        if: runner.os != 'macOS'
+        run: cargo binstall -y dioxus-cli@0.7.4
+
+      # Code gauntlet runs on all three platforms — the cross-platform
       # guarantee that the engine git-pins + the IDE compile and test on
       # Linux, macOS, and Windows. Formatting is OS-independent, checked once
       # on Linux to avoid Windows CRLF false-positives.
@@ -53,16 +65,8 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # Desktop-bundle build runs on Linux + Windows only. dioxus-cli 0.7.4
-      # ships no aarch64-apple-darwin prebuilt, and its from-source build is
-      # currently broken upstream (auth-git2 vs git2 0.21), so dx cannot be
-      # installed on the Apple-Silicon runner. macOS still builds and tests
-      # the code above; only the dx packaging step is skipped there.
-      - uses: cargo-bins/cargo-binstall@main
-        if: runner.os != 'macOS'
-      - name: Install dx (Dioxus CLI)
-        if: runner.os != 'macOS'
-        run: cargo binstall -y dioxus-cli@0.7.4
+      # Verify the actual desktop bundle compiles (Linux + Windows; see the
+      # macOS note above).
       - name: Build desktop bundle
         if: runner.os != 'macOS'
         run: dx build --package klinx --platform desktop
