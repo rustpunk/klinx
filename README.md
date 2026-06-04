@@ -53,8 +53,10 @@ checkout. Bumping the engine surface means bumping the `rev` in the workspace
 ## Running
 
 ```bash
-# Web target — served by the dx dev server in your browser
-dx serve --package klinx
+# Web target — served by the dx dev server in your browser.
+# The explicit --platform web is required: Dioxus.toml sets
+# default_platform = "desktop", so dx cannot infer the web triple otherwise.
+dx serve --package klinx --platform web
 
 # Desktop target — native wry webview (default platform per Dioxus.toml)
 dx serve --package klinx --platform desktop
