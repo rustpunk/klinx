@@ -682,7 +682,7 @@ pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) 
 }
 
 #[cfg(test)]
-mod task_16b_5_tests {
+mod migrated_fixture_tests {
     use super::*;
     use clinker_core::config::parse_config;
 
