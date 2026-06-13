@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::perf::perf_trace;
 use crate::state::use_app_state;
 // The blame components read git state from the tab manager directly.
 use crate::state::TabManagerState;
@@ -20,7 +21,7 @@ pub fn YamlSidebar() -> Element {
     let state = use_app_state();
     let raw_text = (state.yaml_text)();
     let errors = (state.parse_errors)();
-    let raw_lines = tokenize(&raw_text);
+    let raw_lines = perf_trace!(tokenize(&raw_text), "tokenize: {} bytes", raw_text.len());
     let raw_line_count = raw_lines.len().max(1);
 
     // Compute selected stage's YAML line range for highlighting.

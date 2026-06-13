@@ -1,3 +1,6 @@
+use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
+use dioxus::desktop::tao::event::Event;
+use dioxus::desktop::{WindowEvent, use_window, use_wry_event_handler};
 use dioxus::prelude::*;
 /// Root application shell: owns all reactive signals.
 ///
@@ -26,6 +29,7 @@ use crate::components::{
 use clinker_schema::SchemaIndex;
 
 use crate::keyboard::handle_keyboard;
+use crate::perf::perf_trace;
 use crate::state::{
     AppState, ChannelViewMode, KilnTheme, LeftPanel, NavigationContext, PipelineLayoutMode,
     TabManagerState, use_app_state,
@@ -110,6 +114,56 @@ pub fn AppShell() -> Element {
             .and_then(|s| s.theme)
             .unwrap_or_default()
     });
+
+    // ── Window: cache live geometry; restore + reveal after first paint ──
+    // The window is created hidden (`with_visible(false)` in main.rs) so users
+    // never see an unstyled white flash. Live geometry is cached from the
+    // event-loop thread via `use_wry_event_handler` — never by querying the
+    // window from the async autosave task, which is unsound on some platforms.
+    // The cached value feeds session save; the restored value is applied just
+    // before the window is revealed (see `onmounted` on `.kiln-app`).
+    let desktop = use_window();
+    // Geometry restored from the saved session, captured once at mount. The
+    // live `window_geom` below (which feeds session save) must NOT drive the
+    // restore: events emitted while the hidden window is laid out at its default
+    // size would otherwise clobber the saved value before `onmounted` applies it.
+    let restored_geom: Option<workspace::WindowGeometry> = use_hook(|| {
+        workspace
+            .peek()
+            .as_ref()
+            .and_then(|ws| ws.state.window.clone())
+    });
+    let mut window_geom: Signal<Option<workspace::WindowGeometry>> =
+        use_signal(|| restored_geom.clone());
+    {
+        let desktop = desktop.clone();
+        use_wry_event_handler(move |event, _| {
+            if let Event::WindowEvent { event, .. } = event
+                && matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
+                && let Ok(pos) = desktop.outer_position()
+            {
+                // While maximized, the reported frame is the maximized one, not
+                // the user's normal window — keep the last normal geometry and
+                // only record the flag, so un-maximizing on the next launch
+                // returns to a sensible size rather than the full-screen size.
+                let maximized = desktop.is_maximized();
+                let (x, y, width, height) =
+                    if maximized && let Some(g) = window_geom.peek().as_ref() {
+                        (g.x, g.y, g.width, g.height)
+                    } else {
+                        let size = desktop.inner_size();
+                        (pos.x, pos.y, size.width, size.height)
+                    };
+                window_geom.set(Some(workspace::WindowGeometry {
+                    x,
+                    y,
+                    width,
+                    height,
+                    maximized,
+                }));
+            }
+        });
+    }
 
     // ── Git: detect repo and compute status on workspace change ──────────
     {
@@ -222,6 +276,7 @@ pub fn AppShell() -> Element {
                 *activity_bar_visible.peek(),
                 &channel_state.peek(),
                 *theme.peek(),
+                window_geom.peek().clone(),
             );
         }
     });
@@ -244,6 +299,7 @@ pub fn AppShell() -> Element {
                     *activity_bar_visible.peek(),
                     &channel_state.peek(),
                     *theme.peek(),
+                    window_geom.peek().clone(),
                 );
             }
         }
@@ -321,6 +377,7 @@ pub fn AppShell() -> Element {
                 (activity_bar_visible)(),
                 &(channel_state)(),
                 (theme)(),
+                window_geom.peek().clone(),
             );
             workspace::save_workspace_state(&ws.root, &state);
             workspace::save_last_workspace(&ws.root);
@@ -432,7 +489,13 @@ pub fn AppShell() -> Element {
 
             let ws_root = workspace.read().as_ref().map(|ws| ws.root.clone());
 
-            match try_parse_yaml(&text, ws_root.as_deref()) {
+            let parse_result = perf_trace!(
+                try_parse_yaml(&text, ws_root.as_deref()),
+                "try_parse_yaml: {} bytes",
+                text.len()
+            );
+
+            match parse_result {
                 ParseResult::Complete(resolved) => {
                     pipeline.set(Some(resolved.resolved));
                     partial_pipeline.set(None);
@@ -523,6 +586,31 @@ pub fn AppShell() -> Element {
             class: "kiln-app",
             "data-theme": (theme)().as_data_attr(),
             tabindex: "0",
+            // Reveal the window once its first frame has mounted, applying any
+            // restored geometry while still hidden so there is no visible jump.
+            onmounted: move |_| {
+                if let Some(g) = restored_geom.as_ref() {
+                    // Only restore the position if it still lands on a connected
+                    // monitor; a coordinate from a now-disconnected display would
+                    // strand the frameless (un-draggable) window off-screen.
+                    let on_screen = desktop.available_monitors().any(|m| {
+                        let mp = m.position();
+                        let ms = m.size();
+                        g.x >= mp.x
+                            && g.y >= mp.y
+                            && g.x < mp.x + ms.width as i32
+                            && g.y < mp.y + ms.height as i32
+                    });
+                    if on_screen {
+                        desktop.set_outer_position(PhysicalPosition::new(g.x, g.y));
+                    }
+                    desktop.set_inner_size(PhysicalSize::new(g.width, g.height));
+                    if g.maximized {
+                        desktop.set_maximized(true);
+                    }
+                }
+                desktop.set_visible(true);
+            },
             onkeydown: move |e: KeyboardEvent| {
                 if handle_keyboard(&e, &mut kb_tab_mgr) {
                     e.prevent_default();

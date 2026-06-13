@@ -29,5 +29,11 @@ notify.workspace = true
 klinx-git.workspace = true
 rfd.workspace = true
 
+[features]
+# Opt-in, zero-cost-when-disabled timing traces for performance work.
+# Build with `--features perf-trace` to print tokenize/parse timings to stderr.
+# See docs/perf.md.
+perf-trace = []
+
 [dev-dependencies]
 chrono.workspace = true

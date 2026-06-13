@@ -55,6 +55,7 @@ mod file_ops;
 mod fs_watcher;
 mod keyboard;
 mod notes;
+mod perf;
 mod pipeline_view;
 mod search;
 mod state;
@@ -78,6 +79,21 @@ pub fn cli_workspace() -> Option<&'static PathBuf> {
 
 fn run() {
     use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
+
+    // On Linux, WebKitGTK's DMABUF renderer (the default on recent versions)
+    // silently falls back to software rendering — or paints nothing — on many
+    // NVIDIA / Wayland configurations, which surfaces as sluggish or missing
+    // frames. Force the stable render path unless the user has explicitly
+    // chosen a value. The compositing cost for a 2D desktop UI is negligible
+    // next to the stability win. See tauri-apps/tauri#9394, tauri-apps/wry#1315.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // SAFETY: called at the very top of `run()` before any webview, GTK, or
+        // background thread is created, so no other thread can observe the env.
+        unsafe {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
 
     // Parse --workspace <path> from CLI args
     let args: Vec<String> = std::env::args().collect();
@@ -107,7 +123,11 @@ fn run() {
                 .with_title("klinx")
                 .with_decorations(false)
                 .with_inner_size(LogicalSize::new(1400, 900))
-                .with_min_inner_size(LogicalSize::new(800, 600)),
+                .with_min_inner_size(LogicalSize::new(800, 600))
+                // Start hidden to avoid a white/unstyled flash on cold start.
+                // AppShell restores saved geometry and reveals the window once
+                // its first frame has mounted (see the `onmounted` on `.kiln-app`).
+                .with_visible(false),
         )
         .with_disable_context_menu(true)
         .with_custom_head(format!("<style>{KLINX_CSS}</style>"));
