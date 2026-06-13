@@ -14,10 +14,12 @@
 
 pub mod channels;
 pub mod git_state;
+pub mod pipeline_sync;
 pub mod schema_index;
 pub mod session_persistence;
 
 pub use channels::use_channels;
 pub use git_state::use_git_state;
+pub use pipeline_sync::use_pipeline_sync;
 pub use schema_index::use_schema_index;
 pub use session_persistence::use_session_persistence;

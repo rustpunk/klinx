@@ -27,12 +27,11 @@ use dioxus::desktop::{WindowEvent, use_window, use_wry_event_handler};
 use dioxus::prelude::*;
 
 use crate::keyboard::handle_keyboard;
-use crate::perf::perf_trace;
 use crate::state::{
     AppState, ChannelViewMode, KilnTheme, LeftPanel, NavigationContext, PipelineLayoutMode,
     TabManagerState, use_app_state,
 };
-use crate::sync::{EditSource, ParseResult, serialize_yaml, try_parse_yaml};
+use crate::sync::EditSource;
 use crate::tab::{TabEntry, TabId};
 use crate::workspace;
 
@@ -47,7 +46,7 @@ pub fn AppShell() -> Element {
     let mut parse_errors = use_signal(Vec::new);
     let mut edit_source = use_signal(|| EditSource::None);
     let mut selected_stages = use_signal(std::collections::HashSet::<String>::new);
-    let mut schema_warnings = use_signal(Vec::new);
+    let schema_warnings = use_signal(Vec::new);
     let mut partial_pipeline = use_signal(|| None);
     // Debounced parse: keystrokes coalesce into one parse ~150ms after typing
     // stops. The debounce effect (below) bumps `parse_trigger`, which the parse
@@ -405,88 +404,20 @@ pub fn AppShell() -> Element {
         });
     }
 
-    // ── Sync effects: YAML ↔ pipeline model ──────────────────────────────
-    {
-        let mut pipeline = pipeline;
-        let mut partial_pipeline = partial_pipeline;
-        let mut parse_errors = parse_errors;
-
-        use_effect(move || {
-            // Debounced trigger (keystrokes) + edit_source (immediate parse for
-            // programmatic Yaml transitions: tab load, workspace re-resolve).
-            let _ = (parse_trigger)();
-            let source = (edit_source)();
-
-            if source != EditSource::Yaml {
-                return;
-            }
-
-            // Read text non-reactively: this effect fires only on the debounced
-            // trigger / source change (never per keystroke) and always sees the
-            // latest text, so there is no stale-text race.
-            let text = yaml_text.peek().clone();
-            let ws_root = workspace.read().as_ref().map(|ws| ws.root.clone());
-
-            let parse_result = perf_trace!(
-                try_parse_yaml(&text, ws_root.as_deref()),
-                "try_parse_yaml: {} bytes",
-                text.len()
-            );
-
-            match parse_result {
-                ParseResult::Complete(resolved) => {
-                    pipeline.set(Some(resolved.resolved));
-                    partial_pipeline.set(None);
-                    parse_errors.set(Vec::new());
-                }
-                ParseResult::Partial(partial) => {
-                    pipeline.set(None);
-                    partial_pipeline.set(Some(partial.clone()));
-                    parse_errors.set(partial.errors);
-                }
-                ParseResult::Failed(errors) => {
-                    partial_pipeline.set(None);
-                    parse_errors.set(errors);
-                }
-            }
-        });
-    }
-
-    {
-        let mut yaml_text = yaml_text;
-        let mut parse_errors = parse_errors;
-
-        use_effect(move || {
-            let source = (edit_source)();
-            let pl_val = (pipeline)();
-
-            if source != EditSource::Inspector {
-                return;
-            }
-
-            if let Some(ref config) = pl_val {
-                let yaml = serialize_yaml(config);
-                yaml_text.set(yaml);
-                parse_errors.set(Vec::new());
-            }
-        });
-    }
-
-    // ── Schema validation: run when pipeline or schema index changes ──────
-    {
-        use_effect(move || {
-            let pl = (pipeline)();
-            let idx = (schema_index)();
-            let ws = (workspace)();
-
-            if let (Some(config), Some(ws)) = (pl.as_ref(), ws.as_ref()) {
-                let warnings = clinker_schema::validate_pipeline(config, &idx, &ws.root);
-                schema_warnings.set(warnings);
-            } else {
-                schema_warnings.set(Vec::new());
-            }
-        });
-    }
+    // ── Edit-sync: YAML ↔ pipeline ↔ schema validation ───────────────────
+    // The EditSource guards inside this hook break the YAML↔inspector feedback
+    // loop; the debounce effect above re-arms the parse via `parse_trigger`.
+    crate::hooks::use_pipeline_sync(
+        parse_trigger,
+        edit_source,
+        yaml_text,
+        workspace,
+        pipeline,
+        partial_pipeline,
+        parse_errors,
+        schema_index,
+        schema_warnings,
+    );
 
     let has_active_tab = current_active.is_some();
     let current_ctx = (active_context)();
