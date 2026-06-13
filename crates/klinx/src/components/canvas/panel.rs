@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 
 use crate::pipeline_view::{
     NODE_HEIGHT, NODE_WIDTH, derive_body_view, derive_partial_pipeline_view, derive_pipeline_view,
+    fit_transform, layout_bounds,
 };
 use crate::state::{ChannelViewMode, use_app_state};
 
@@ -19,6 +20,13 @@ const ZOOM_MAX: f32 = 4.0;
 const ZOOM_STEP_LINE: f32 = 1.10;
 /// Zoom factor per pixel of scroll delta (for Pixel mode).
 const ZOOM_STEP_PIXEL: f32 = 0.001;
+/// Screen-space padding kept around the node graph when fitting it to view.
+const FIT_MARGIN: f32 = 60.0;
+/// Fallback viewport dimensions used before the panel reports its real size
+/// (the `onmounted` measurement is async). Sized to a typical canvas pane so a
+/// fit triggered on the very first frame still produces a sane transform.
+const DEFAULT_VIEWPORT_W: f32 = 1000.0;
+const DEFAULT_VIEWPORT_H: f32 = 700.0;
 
 // ── Drag state — non-reactive, stored in Rc<RefCell<>> to avoid a signal write
 // (and therefore a re-render) on every pointer-move event. ───────────────────
@@ -40,7 +48,8 @@ struct DragState {
 ///
 /// Pan: left-click-drag anywhere on the canvas background.
 /// Zoom: scroll wheel (zoom anchored to cursor position, range 25 %–400 %).
-/// Fit-to-view: double-click empty canvas (not yet implemented; currently resets to origin).
+/// Fit-to-view: double-click the canvas, or the toolbar "FIT" button — frames
+/// every node in the viewport with a margin. "RESET" re-fits the engine layout.
 ///
 /// Visual layers (back to front):
 ///   1. Dot grid background (CSS radial-gradient, does NOT transform with content)
@@ -114,8 +123,38 @@ pub fn CanvasPanel() -> Element {
     let mut pan_y = use_signal(|| 0.0_f32);
     let mut zoom = use_signal(|| 1.0_f32);
 
+    // ── Viewport pixel size — measured on mount/resize so Fit-to-View can frame
+    // the graph against the real pane. Seeded with sane defaults because the
+    // `onmounted` measurement is async and may not have run on first fit. ─────
+    let mut viewport_w = use_signal(|| DEFAULT_VIEWPORT_W);
+    let mut viewport_h = use_signal(|| DEFAULT_VIEWPORT_H);
+
     // ── Non-reactive drag state — hot path, no re-renders during drag ─────────
     let drag = use_hook(|| Rc::new(RefCell::new(DragState::default())));
+
+    // Bounding box of the current layout (None when empty). `LayoutBounds` is
+    // Copy, so each fit handler captures it without cloning the stage list.
+    let bounds = layout_bounds(&stages);
+
+    // Fit-to-view shared by the FIT/RESET buttons and the double-click handler.
+    // Signals are `Copy`, so each handler captures its own copy and calls this
+    // free helper rather than sharing one `FnMut` closure (which can't be moved
+    // into multiple handlers). No-op when there are no nodes to frame.
+    let fit_to_view =
+        move |mut pan_x: Signal<f32>, mut pan_y: Signal<f32>, mut zoom: Signal<f32>| {
+            let Some(b) = bounds else { return };
+            let (px, py, z) = fit_transform(
+                b,
+                *viewport_w.peek(),
+                *viewport_h.peek(),
+                FIT_MARGIN,
+                ZOOM_MIN,
+                ZOOM_MAX,
+            );
+            pan_x.set(px);
+            pan_y.set(py);
+            zoom.set(z);
+        };
 
     // ── Event handler closures ────────────────────────────────────────────────
 
@@ -298,10 +337,46 @@ pub fn CanvasPanel() -> Element {
                         }
                     }
                 }
+
+                // ── Fit to View — frame all nodes in the viewport ──────────
+                button {
+                    class: "kiln-view-toggle",
+                    disabled: bounds.is_none(),
+                    title: if bounds.is_none() { "No nodes to fit" } else { "Fit all nodes to the viewport" },
+                    onclick: move |_| fit_to_view(pan_x, pan_y, zoom),
+                    span { class: "kiln-view-toggle-label", "FIT" }
+                }
+
+                // ── Reset Layout — re-run the engine layout and re-fit. With no
+                // persisted position overrides yet (issue #3 PR 3b), positions
+                // are already recomputed every render, so reset == re-fit. ──
+                button {
+                    class: "kiln-view-toggle",
+                    disabled: bounds.is_none(),
+                    title: if bounds.is_none() { "No layout to reset" } else { "Reset to the engine-computed layout" },
+                    onclick: move |_| fit_to_view(pan_x, pan_y, zoom),
+                    span { class: "kiln-view-toggle-label", "RESET" }
+                }
             }
 
             div {
                 class: "kiln-canvas-panel",
+            // Measure the pane on mount (guaranteed) and on every resize so
+            // Fit-to-View frames the graph against the real viewport size.
+            onmounted: move |evt| {
+                spawn(async move {
+                    if let Ok(rect) = evt.get_client_rect().await {
+                        viewport_w.set(rect.size.width.max(1.0) as f32);
+                        viewport_h.set(rect.size.height.max(1.0) as f32);
+                    }
+                });
+            },
+            onresize: move |evt| {
+                if let Ok(size) = evt.get_content_box_size() {
+                    viewport_w.set(size.width.max(1.0) as f32);
+                    viewport_h.set(size.height.max(1.0) as f32);
+                }
+            },
             // Events on the outer panel — pointer capture is a future enhancement.
             onmousedown: drag_down,
             onmousemove: drag_move,
@@ -309,6 +384,9 @@ pub fn CanvasPanel() -> Element {
             // Cancel drag if pointer leaves the panel entirely.
             onmouseleave: move |_| { drag.borrow_mut().active = false; },
             onwheel: on_wheel,
+            // Double-click empty canvas fits all nodes to view. Node cards
+            // stop_propagation() on mousedown, so this fires only on the background.
+            ondoubleclick: move |_| fit_to_view(pan_x, pan_y, zoom),
             // Clicking empty canvas deselects any selected node.
             // Node clicks call stop_propagation(), so this only fires on empty space.
             onclick: move |_| {
