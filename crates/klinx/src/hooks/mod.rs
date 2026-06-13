@@ -12,6 +12,8 @@
 //! each of these hooks unconditionally at the top level, so the order is stable
 //! and these extractions are behavior-preserving.
 
+pub mod git_state;
 pub mod session_persistence;
 
+pub use git_state::use_git_state;
 pub use session_persistence::use_session_persistence;

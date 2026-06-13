@@ -1,7 +1,3 @@
-use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
-use dioxus::desktop::tao::event::Event;
-use dioxus::desktop::{WindowEvent, use_window, use_wry_event_handler};
-use dioxus::prelude::*;
 /// Root application shell: owns all reactive signals.
 ///
 /// Per-tab state is stored as plain data in `TabEntry::snapshot`. AppShell
@@ -15,8 +11,6 @@ use dioxus::prelude::*;
 /// Navigation uses a two-level model:
 /// - `NavigationContext` selects the active page (Pipeline, Channels, Git, Docs, Runs)
 /// - `PipelineLayoutMode` selects the view within Pipeline (Canvas, Hybrid, Editor)
-use klinx_git::GitOps;
-
 use crate::components::confirm_dialog::{ConfirmAction, ConfirmDialog, PendingConfirm};
 use crate::components::toast::ToastState;
 use crate::components::{
@@ -27,6 +21,10 @@ use crate::components::{
     toast::ToastOverlay, welcome_screen::WelcomeScreen, yaml_sidebar::YamlSidebar,
 };
 use clinker_schema::SchemaIndex;
+use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
+use dioxus::desktop::tao::event::Event;
+use dioxus::desktop::{WindowEvent, use_window, use_wry_event_handler};
+use dioxus::prelude::*;
 
 use crate::keyboard::handle_keyboard;
 use crate::perf::perf_trace;
@@ -109,7 +107,7 @@ pub fn AppShell() -> Element {
     let left_panel: Signal<LeftPanel> = use_signal(|| LeftPanel::None);
     let mut schema_index: Signal<SchemaIndex> = use_signal(SchemaIndex::default);
     let show_template_gallery: Signal<bool> = use_signal(|| false);
-    let mut git_state: Signal<Option<klinx_git::RepoStatus>> = use_signal(|| None);
+    let git_state: Signal<Option<klinx_git::RepoStatus>> = use_signal(|| None);
     let show_command_palette: Signal<bool> = use_signal(|| false);
     let show_settings: Signal<bool> = use_signal(|| false);
     let mut channel_state: Signal<Option<crate::state::ChannelState>> = use_signal(|| None);
@@ -171,24 +169,8 @@ pub fn AppShell() -> Element {
         });
     }
 
-    // ── Git: detect repo and compute status on workspace change ──────────
-    {
-        use_effect(move || {
-            let ws = (workspace)();
-            if let Some(ref ws) = ws {
-                match klinx_git::GitCliOps::discover(&ws.root) {
-                    Ok(ops) => {
-                        if let Ok(status) = ops.status() {
-                            git_state.set(Some(status));
-                        }
-                    }
-                    Err(_) => git_state.set(None),
-                }
-            } else {
-                git_state.set(None);
-            }
-        });
-    }
+    // ── Git: discover repo + compute status, and run the FS watcher ──────
+    crate::hooks::use_git_state(workspace, git_state);
 
     // ── Schema index: rebuild when workspace changes ─────────────────────
     {
@@ -235,35 +217,6 @@ pub fn AppShell() -> Element {
             if ws.is_some() && !text.is_empty() && source == EditSource::None {
                 edit_source.set(EditSource::Yaml);
             }
-        });
-    }
-
-    // ── Filesystem watcher: auto-refresh git status + schema index ─────
-    // Spawns a background watcher on the workspace root. Debounced 500ms.
-    {
-        use_effect(move || {
-            let ws = (workspace)();
-            let Some(ref ws) = ws else { return };
-
-            let root = ws.root.clone();
-            let Some((_watcher, rx)) = crate::fs_watcher::start_watcher(&root) else {
-                return;
-            };
-
-            // Spawn a polling loop that checks for debounced changes
-            // and refreshes git/schema state.
-            let _root2 = root.clone();
-            std::thread::spawn(move || {
-                while let Ok(paths) = rx.recv() {
-                    if crate::fs_watcher::has_git_relevant_changes(&paths) {
-                        // Refresh git status — we can't write to signals from a
-                        // non-Dioxus thread directly. The git state is read-refreshed
-                        // on next render cycle via the workspace effect above.
-                        // For now, this ensures the watcher is running — the actual
-                        // refresh is triggered by re-reading workspace signal.
-                    }
-                }
-            });
         });
     }
 
