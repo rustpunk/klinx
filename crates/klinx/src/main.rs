@@ -64,6 +64,7 @@ mod sync;
 mod tab;
 mod template;
 mod workspace;
+mod yaml_patch;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
