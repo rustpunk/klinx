@@ -105,12 +105,12 @@ pub fn AppShell() -> Element {
 
     // ── Left panel + schema index + template gallery ──────────────────────
     let left_panel: Signal<LeftPanel> = use_signal(|| LeftPanel::None);
-    let mut schema_index: Signal<SchemaIndex> = use_signal(SchemaIndex::default);
+    let schema_index: Signal<SchemaIndex> = use_signal(SchemaIndex::default);
     let show_template_gallery: Signal<bool> = use_signal(|| false);
     let git_state: Signal<Option<klinx_git::RepoStatus>> = use_signal(|| None);
     let show_command_palette: Signal<bool> = use_signal(|| false);
     let show_settings: Signal<bool> = use_signal(|| false);
-    let mut channel_state: Signal<Option<crate::state::ChannelState>> = use_signal(|| None);
+    let channel_state: Signal<Option<crate::state::ChannelState>> = use_signal(|| None);
     let theme: Signal<KilnTheme> = use_signal(|| {
         session_data
             .peek()
@@ -173,37 +173,10 @@ pub fn AppShell() -> Element {
     crate::hooks::use_git_state(workspace, git_state);
 
     // ── Schema index: rebuild when workspace changes ─────────────────────
-    {
-        use_effect(move || {
-            let ws = (workspace)();
-            if let Some(ref ws) = ws {
-                let (index, _errors) = ws.build_schema_index();
-                schema_index.set(index);
-            } else {
-                schema_index.set(SchemaIndex::default());
-            }
-        });
-    }
+    crate::hooks::use_schema_index(workspace, schema_index);
 
-    // ── Channel state: discover channels when workspace changes ────────
-    {
-        use_effect(move || {
-            let ws = (workspace)();
-            if let Some(ref ws) = ws {
-                let mut state = workspace::discover_channels(ws);
-                // Restore persisted channel selection
-                if let Some(ref mut cs) = state
-                    && let Some(ref chan_persist) = ws.state.channels
-                {
-                    cs.active_channel = chan_persist.active.clone();
-                    cs.recent_channels = chan_persist.recent.clone();
-                }
-                channel_state.set(state);
-            } else {
-                channel_state.set(None);
-            }
-        });
-    }
+    // ── Channel state: discover channels + restore persisted selection ───
+    crate::hooks::use_channels(workspace, channel_state);
 
     // ── Workspace available: re-parse active tab to resolve compositions ──
     // On startup, tabs may restore before the workspace signal is set.

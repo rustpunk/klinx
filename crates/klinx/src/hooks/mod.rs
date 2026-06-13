@@ -12,8 +12,12 @@
 //! each of these hooks unconditionally at the top level, so the order is stable
 //! and these extractions are behavior-preserving.
 
+pub mod channels;
 pub mod git_state;
+pub mod schema_index;
 pub mod session_persistence;
 
+pub use channels::use_channels;
 pub use git_state::use_git_state;
+pub use schema_index::use_schema_index;
 pub use session_persistence::use_session_persistence;
