@@ -229,6 +229,24 @@ mod tests {
     }
 
     #[test]
+    fn test_bundled_template_bodies_parse_against_engine() {
+        // Templates ship as valid pipeline YAML with a `_template` header. The
+        // metadata tests only cover the header — this gate compiles the body
+        // each template instantiates into, catching engine schema drift (e.g.
+        // an option that moved from a source to an output struct) that would
+        // otherwise surface only when a user instantiates the template.
+        for (name, yaml) in BUNDLED_TEMPLATES {
+            let body = strip_template_block(yaml);
+            if let Err(errors) = crate::sync::parse_yaml(&body) {
+                panic!(
+                    "bundled template `{name}` body does not parse against the \
+                     current engine: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_strip_template_block() {
         let yaml = r#"_template:
   name: "Test"
