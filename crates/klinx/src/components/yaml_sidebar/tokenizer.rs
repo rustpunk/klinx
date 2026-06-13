@@ -305,7 +305,20 @@ fn render_lines(yaml: &str, segments: &[Segment]) -> Vec<Vec<Token>> {
             && segments[seg_idx].start < line_start
             && segments[seg_idx].end > line_start;
         if !continues_into_line {
-            let indent_end = line_start + (line.len() - line.trim_start().len());
+            let mut indent_end = line_start + (line.len() - line.trim_start().len());
+            // An explicit block-scalar indentation indicator (`|2`, `>2`, …)
+            // makes the parser treat fewer leading spaces as structural than
+            // this line physically has, so the value segment can *begin inside*
+            // the whitespace `trim_start` measured. Capping the indent at that
+            // segment start keeps the overlapping spaces in the value token
+            // instead of emitting them twice (which drifted reconstruction).
+            // The skip-loop above left `segments[seg_idx]` ending after
+            // `line_start`, and `!continues_into_line` rules out a start before
+            // it, so this segment starts at or after `line_start` (no clamp
+            // needed).
+            if seg_idx < segments.len() && segments[seg_idx].start < indent_end {
+                indent_end = segments[seg_idx].start;
+            }
             if indent_end > cursor {
                 tokens.push(Token::new(TokenKind::Indent, &yaml[cursor..indent_end]));
                 cursor = indent_end;
@@ -1004,5 +1017,20 @@ mod tests {
         let yaml = "key: value";
         assert_reconstructs(yaml);
         assert_eq!(texts_of(yaml, 0, TokenKind::Value), vec!["value"]);
+    }
+
+    #[test]
+    fn block_scalar_explicit_indent_indicator() {
+        // An explicit indentation indicator (`|2`/`>2`) makes the parser's
+        // content span start *inside* the line's leading whitespace. The indent
+        // glue must stop at that span start, or the overlapping spaces get
+        // emitted twice and the overlay drifts from the textarea glyphs.
+        let yaml = "k: |2\n    deep\nq: 1\n";
+        assert_reconstructs(yaml);
+        assert_eq!(texts_of(yaml, 0, TokenKind::Key), vec!["k"]);
+        assert_eq!(texts_of(yaml, 2, TokenKind::Key), vec!["q"]);
+
+        // Folded form with the indicator behaves the same.
+        assert_reconstructs("k: >2\n    deep\n");
     }
 }
