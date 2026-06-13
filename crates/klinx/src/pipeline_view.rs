@@ -5,8 +5,10 @@
 /// to a [`StageKind`] via an exhaustive `match` in [`stage_kind_for_node`], so
 /// adding a new variant to `PipelineNode` is a compile-time break. Composition
 /// currently renders as a placeholder badge pending full sub-canvas rendering.
+use clinker_core::config::composition::CompositionFile;
 use clinker_core::config::node_header::NodeInput;
 use clinker_core::config::{PipelineConfig, PipelineNode};
+use clinker_core::yaml::Spanned;
 
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;
@@ -114,6 +116,7 @@ const INPUT_Y_OFFSET: f32 = 30.0;
 /// instead of a top-anchored ragged stack.
 const COLUMN_CENTER_Y: f32 = 260.0;
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct PipelineView {
     pub stages: Vec<StageView>,
     /// Explicit connections between stages: `(from_idx, to_idx)`.
@@ -284,12 +287,22 @@ fn barycenter(idx: usize, predecessors: &[Vec<usize>], row_of: &[usize]) -> f32 
 /// `1 + max(column of inputs)` (sources at column 0), then the shared
 /// barycenter pass orders rows and assigns even, centered coordinates.
 pub fn derive_pipeline_view(config: &PipelineConfig) -> PipelineView {
+    derive_view_from_nodes(&config.nodes)
+}
+
+/// Derive a canvas view from a flat node list.
+///
+/// Shared by pipelines and compositions: both store the same
+/// `Vec<Spanned<PipelineNode>>`, so column/edge derivation is identical. A
+/// composition's body nodes render exactly like a pipeline's; references to the
+/// composition's *input ports* (which are not nodes) simply produce no edge.
+pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
     use std::collections::HashMap;
 
     // Column = 1 + max column of inputs; sources sit in column 0.
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-    let mut cols: Vec<usize> = Vec::with_capacity(config.nodes.len());
-    for (idx, spanned) in config.nodes.iter().enumerate() {
+    let mut cols: Vec<usize> = Vec::with_capacity(nodes.len());
+    for (idx, spanned) in nodes.iter().enumerate() {
         let node = &spanned.value;
         name_to_idx.insert(node.name().to_string(), idx);
         let col = match node {
@@ -324,8 +337,8 @@ pub fn derive_pipeline_view(config: &PipelineConfig) -> PipelineView {
     // Connections: resolve each consumer's input header reference. These also
     // form the predecessor relation the barycenter layout pass consumes.
     let mut connections: Vec<(usize, usize)> = Vec::new();
-    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); config.nodes.len()];
-    for (idx, spanned) in config.nodes.iter().enumerate() {
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    for (idx, spanned) in nodes.iter().enumerate() {
         match &spanned.value {
             PipelineNode::Source { .. } => {}
             PipelineNode::Merge { header, .. } => {
@@ -358,10 +371,9 @@ pub fn derive_pipeline_view(config: &PipelineConfig) -> PipelineView {
     }
 
     // Place nodes: barycenter ordering within each column + even centered
-    // spacing. `positions` is parallel to `config.nodes`.
+    // spacing. `positions` is parallel to `nodes`.
     let positions = layout_positions(&cols, &predecessors);
-    let stages: Vec<StageView> = config
-        .nodes
+    let stages: Vec<StageView> = nodes
         .iter()
         .zip(positions)
         .map(|(spanned, (x, y))| build_stage_view(&spanned.value, x, y))
@@ -371,6 +383,16 @@ pub fn derive_pipeline_view(config: &PipelineConfig) -> PipelineView {
         stages,
         connections,
     }
+}
+
+/// Derive a canvas view for a composition file (`*.comp.yaml`).
+///
+/// Renders the composition's body nodes as a DAG via [`derive_view_from_nodes`].
+/// Input/output *ports* (declared in the `_compose` signature, not nodes) are
+/// not yet drawn as boundary nodes — that's a future enhancement; the body's
+/// internal node graph is what this surfaces today.
+pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
+    derive_view_from_nodes(&comp.nodes)
 }
 
 /// Variant-dispatched [`StageView`] constructor. Every arm is exhaustive;

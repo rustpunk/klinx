@@ -64,8 +64,11 @@ pub fn CanvasPanel() -> Element {
     let view_mode = *state.channel_view_mode.read();
     let drill_stack = state.composition_drill_stack.read();
 
-    // If drilled into a composition, render the body's nodes instead of top-level.
-    let pipeline_view = if let Some(frame) = drill_stack.last() {
+    // A composition document (`*.comp.yaml`) renders its pre-derived body DAG —
+    // it has no pipeline config, channel overlay, or drill stack of its own.
+    let pipeline_view = if let Some(comp_view) = state.composition_view.read().clone() {
+        comp_view
+    } else if let Some(frame) = drill_stack.last() {
         let compiled_guard = state.compiled_plan.read();
         match compiled_guard
             .as_ref()
