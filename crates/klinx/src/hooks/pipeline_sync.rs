@@ -22,7 +22,10 @@ use clinker_core::partial::PartialPipelineConfig;
 use clinker_schema::{SchemaIndex, SchemaWarning};
 
 use crate::perf::perf_trace;
-use crate::sync::{EditSource, ParseResult, try_parse_yaml};
+use crate::pipeline_view::PipelineView;
+use crate::sync::{
+    EditSource, ParseResult, is_composition_yaml, parse_composition, try_parse_yaml,
+};
 use crate::workspace::Workspace;
 use crate::yaml_patch::patch_yaml_preserving_nodes;
 
@@ -40,6 +43,7 @@ pub fn use_pipeline_sync(
     workspace: Signal<Option<Workspace>>,
     mut pipeline: Signal<Option<PipelineConfig>>,
     mut partial_pipeline: Signal<Option<PartialPipelineConfig>>,
+    mut composition_view: Signal<Option<PipelineView>>,
     mut parse_errors: Signal<Vec<String>>,
     schema_index: Signal<SchemaIndex>,
     mut schema_warnings: Signal<Vec<SchemaWarning>>,
@@ -60,6 +64,22 @@ pub fn use_pipeline_sync(
             // trigger / source change (never per keystroke) and always sees the
             // latest text, so there is no stale-text race.
             let text = yaml_text.peek().clone();
+
+            // Composition documents (`_compose:`) take a separate parse path so
+            // they validate as compositions — no spurious "missing required key:
+            // pipeline" — and render their body DAG on the canvas.
+            if is_composition_yaml(&text) {
+                let (view, errors) = parse_composition(&text);
+                composition_view.set(view);
+                parse_errors.set(errors);
+                pipeline.set(None);
+                partial_pipeline.set(None);
+                return;
+            }
+            // Not a composition: clear any stale composition view (e.g. switching
+            // from a comp tab to a pipeline tab) and parse as a pipeline.
+            composition_view.set(None);
+
             let ws_root = workspace.read().as_ref().map(|ws| ws.root.clone());
 
             let parse_result = perf_trace!(

@@ -13,7 +13,8 @@ use clinker_core::partial::PartialPipelineConfig;
 use uuid::Uuid;
 
 use crate::file_ops::compute_hash;
-use crate::sync::{EditSource, parse_yaml_raw_path};
+use crate::pipeline_view::PipelineView;
+use crate::sync::{EditSource, is_composition_yaml, parse_composition, parse_yaml_raw_path};
 
 /// Scaffold YAML for new untitled pipelines.
 const SCAFFOLD_YAML: &str = r#"source:
@@ -48,9 +49,27 @@ pub struct TabSnapshot {
     pub pipeline: Option<PipelineConfig>,
     /// Partial pipeline from graceful degradation (when full parse fails).
     pub partial_pipeline: Option<PartialPipelineConfig>,
+    /// Derived DAG view when the document is a composition (`*.comp.yaml`);
+    /// `None` for pipelines. Mutually exclusive with `pipeline`.
+    pub composition_view: Option<PipelineView>,
     pub parse_errors: Vec<String>,
     pub edit_source: EditSource,
     pub selected_stage: Option<String>,
+}
+
+/// Parse a document as either a pipeline or a composition (by content), giving
+/// back whichever model parsed plus any errors. Shared by the tab constructors;
+/// the live editor uses the equivalent routing in `use_pipeline_sync`.
+fn parse_document(yaml: &str) -> (Option<PipelineConfig>, Option<PipelineView>, Vec<String>) {
+    if is_composition_yaml(yaml) {
+        let (view, errors) = parse_composition(yaml);
+        (None, view, errors)
+    } else {
+        match parse_yaml_raw_path(yaml) {
+            Ok(config) => (Some(config), None, Vec::new()),
+            Err(errors) => (None, None, errors),
+        }
+    }
 }
 
 /// One open pipeline tab with its file info and state snapshot.
@@ -89,6 +108,7 @@ impl TabEntry {
                 yaml_text: SCAFFOLD_YAML.to_string(),
                 pipeline: parse_yaml_raw_path(SCAFFOLD_YAML).ok(),
                 partial_pipeline: None,
+                composition_view: None,
                 parse_errors: Vec::new(),
                 edit_source: EditSource::None,
                 selected_stage: None,
@@ -99,10 +119,7 @@ impl TabEntry {
     /// Create a tab from a file on disk.
     pub fn from_file(path: PathBuf, yaml: String) -> Self {
         let hash = compute_hash(&yaml);
-        let (config, errors) = match parse_yaml_raw_path(&yaml) {
-            Ok(c) => (Some(c), Vec::new()),
-            Err(e) => (None, e),
-        };
+        let (config, composition_view, errors) = parse_document(&yaml);
 
         Self {
             id: TabId::new(),
@@ -113,6 +130,7 @@ impl TabEntry {
                 yaml_text: yaml,
                 pipeline: config,
                 partial_pipeline: None,
+                composition_view,
                 parse_errors: errors,
                 edit_source: EditSource::None,
                 selected_stage: None,
@@ -136,10 +154,7 @@ impl TabEntry {
             format!("untitled-{}.yaml", untitled_count + 1)
         };
 
-        let (config, errors) = match parse_yaml_raw_path(&yaml) {
-            Ok(c) => (Some(c), Vec::new()),
-            Err(e) => (None, e),
-        };
+        let (config, composition_view, errors) = parse_document(&yaml);
 
         Self {
             id: TabId::new(),
@@ -150,6 +165,7 @@ impl TabEntry {
                 yaml_text: yaml,
                 pipeline: config,
                 partial_pipeline: None,
+                composition_view,
                 parse_errors: errors,
                 edit_source: EditSource::None,
                 selected_stage: None,

@@ -63,6 +63,8 @@ pub fn AppShell() -> Element {
     let mut selected_stages = use_signal(std::collections::HashSet::<String>::new);
     let schema_warnings = use_signal(Vec::new);
     let mut partial_pipeline = use_signal(|| None);
+    let mut composition_view: Signal<Option<crate::pipeline_view::PipelineView>> =
+        use_signal(|| None);
     // Debounced parse: keystrokes coalesce into one parse ~150ms after typing
     // stops. The debounce effect (below) bumps `parse_trigger`, which the parse
     // effect keys on; `debounce_gen` identifies the latest pending keystroke so
@@ -257,6 +259,7 @@ pub fn AppShell() -> Element {
                 old_tab.snapshot.yaml_text = (yaml_text)();
                 old_tab.snapshot.pipeline = (pipeline)();
                 old_tab.snapshot.partial_pipeline = (partial_pipeline)();
+                old_tab.snapshot.composition_view = (composition_view)();
                 old_tab.snapshot.parse_errors = (parse_errors)();
                 old_tab.snapshot.edit_source = (edit_source)();
                 old_tab.snapshot.selected_stage = selected_stages.read().iter().next().cloned();
@@ -270,6 +273,7 @@ pub fn AppShell() -> Element {
                 yaml_text.set(new_tab.snapshot.yaml_text.clone());
                 pipeline.set(new_tab.snapshot.pipeline.clone());
                 partial_pipeline.set(new_tab.snapshot.partial_pipeline.clone());
+                composition_view.set(new_tab.snapshot.composition_view.clone());
                 parse_errors.set(new_tab.snapshot.parse_errors.clone());
                 // Show the arriving tab's errors immediately — never the
                 // departing tab's, and without waiting on the settle timer.
@@ -294,6 +298,7 @@ pub fn AppShell() -> Element {
             yaml_text.set(String::new());
             pipeline.set(None);
             partial_pipeline.set(None);
+            composition_view.set(None);
             parse_errors.set(Vec::new());
             visible_errors.set(Vec::new());
             edit_source.set(EditSource::None);
@@ -335,6 +340,7 @@ pub fn AppShell() -> Element {
         yaml_text,
         pipeline,
         partial_pipeline,
+        composition_view,
         parse_errors,
         visible_errors,
         edit_source,
@@ -492,6 +498,7 @@ pub fn AppShell() -> Element {
         workspace,
         pipeline,
         partial_pipeline,
+        composition_view,
         parse_errors,
         schema_index,
         schema_warnings,

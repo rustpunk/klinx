@@ -18,6 +18,7 @@ use clinker_core::plan::CompiledPlan;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::pipeline_view::PipelineView;
 use crate::sync::EditSource;
 use crate::tab::{TabEntry, TabId};
 use crate::workspace::Workspace;
@@ -266,6 +267,11 @@ pub struct AppState {
     pub pipeline: Signal<Option<PipelineConfig>>,
     /// Partial pipeline from graceful degradation.
     pub partial_pipeline: Signal<Option<PartialPipelineConfig>>,
+    /// Derived DAG view for a composition document (`*.comp.yaml`). `Some` only
+    /// when the active tab is a composition; the canvas renders this in place of
+    /// the pipeline view. Kept as a derived view (not a `CompositionFile`) so the
+    /// canvas stays uniform — see [`crate::pipeline_view::derive_composition_view`].
+    pub composition_view: Signal<Option<PipelineView>>,
     /// Parse error messages (empty when YAML is valid).
     ///
     /// Raw, immediate parse output: updated on every debounced parse (~150ms)
