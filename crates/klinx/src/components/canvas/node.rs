@@ -18,19 +18,19 @@ pub fn CanvasNode(stage: StageView) -> Element {
     let node_class = match (is_selected, is_error, is_composition) {
         (_, _, true) => {
             if is_selected {
-                "kiln-node kiln-node--selected kiln-node--composition"
+                "klinx-node klinx-node--selected klinx-node--composition"
             } else {
-                "kiln-node kiln-node--composition"
+                "klinx-node klinx-node--composition"
             }
         }
-        (true, true, _) => "kiln-node kiln-node--selected kiln-node--error",
-        (false, true, _) => "kiln-node kiln-node--error",
-        (true, false, _) => "kiln-node kiln-node--selected",
-        (false, false, _) => "kiln-node",
+        (true, true, _) => "klinx-node klinx-node--selected klinx-node--error",
+        (false, true, _) => "klinx-node klinx-node--error",
+        (true, false, _) => "klinx-node klinx-node--selected",
+        (false, false, _) => "klinx-node",
     };
 
     let border_style = format!(
-        "left: {x}px; top: {y}px; width: {w}px; border-top-color: var(--kiln-stage-accent);",
+        "left: {x}px; top: {y}px; width: {w}px; border-top-color: var(--klinx-stage-accent);",
         x = stage.canvas_x,
         y = stage.canvas_y,
         w = NODE_WIDTH
@@ -76,19 +76,19 @@ pub fn CanvasNode(stage: StageView) -> Element {
             },
 
             div {
-                class: "kiln-node-badge",
-                style: "color: var(--kiln-stage-accent);",
-                span { class: "kiln-node-type-badge", "{badge}" }
+                class: "klinx-node-badge",
+                style: "color: var(--klinx-stage-accent);",
+                span { class: "klinx-node-type-badge", "{badge}" }
             }
 
-            div { class: "kiln-node-label", "{stage.label}" }
-            hr { class: "kiln-rust-line" }
-            div { class: "kiln-node-subtitle", "{stage.subtitle}" }
+            div { class: "klinx-node-label", "{stage.label}" }
+            hr { class: "klinx-rust-line" }
+            div { class: "klinx-node-subtitle", "{stage.subtitle}" }
 
             // Drill-in button for composition nodes
             if is_composition {
                 button {
-                    class: "kiln-node-drill-btn",
+                    class: "klinx-node-drill-btn",
                     title: "Drill into composition",
                     onclick: {
                         let stage_id = stage.id.clone();
@@ -103,11 +103,11 @@ pub fn CanvasNode(stage: StageView) -> Element {
             }
 
             div {
-                class: "kiln-node-port kiln-node-port--in",
+                class: "klinx-node-port klinx-node-port--in",
                 style: "top: {port_y}px;",
             }
             div {
-                class: "kiln-node-port kiln-node-port--out",
+                class: "klinx-node-port klinx-node-port--out",
                 style: "top: {port_y}px;",
             }
         }

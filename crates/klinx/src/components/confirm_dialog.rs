@@ -28,44 +28,44 @@ pub fn ConfirmDialog(pending: PendingConfirm, on_action: EventHandler<ConfirmAct
     rsx! {
         // Backdrop
         div {
-            class: "kiln-confirm-backdrop",
+            class: "klinx-confirm-backdrop",
             onclick: move |_| on_action.call(ConfirmAction::Cancel),
 
             // Dialog (stop propagation so clicking inside doesn't cancel)
             div {
-                class: "kiln-confirm-dialog",
+                class: "klinx-confirm-dialog",
                 onclick: move |e: MouseEvent| e.stop_propagation(),
 
                 // Title
                 div {
-                    class: "kiln-confirm-title",
-                    span { class: "kiln-confirm-diamond", "\u{25C6}" }
+                    class: "klinx-confirm-title",
+                    span { class: "klinx-confirm-diamond", "\u{25C6}" }
                     " UNSAVED CHANGES"
                 }
 
                 // Body
                 div {
-                    class: "kiln-confirm-body",
-                    span { class: "kiln-confirm-filename", "{pending.filename}" }
+                    class: "klinx-confirm-body",
+                    span { class: "klinx-confirm-filename", "{pending.filename}" }
                     " has unsaved changes."
                 }
 
                 // Buttons
                 div {
-                    class: "kiln-confirm-buttons",
+                    class: "klinx-confirm-buttons",
 
                     button {
-                        class: "kiln-confirm-btn kiln-confirm-btn--cancel",
+                        class: "klinx-confirm-btn klinx-confirm-btn--cancel",
                         onclick: move |_| on_action.call(ConfirmAction::Cancel),
                         "Cancel"
                     }
                     button {
-                        class: "kiln-confirm-btn kiln-confirm-btn--discard",
+                        class: "klinx-confirm-btn klinx-confirm-btn--discard",
                         onclick: move |_| on_action.call(ConfirmAction::Discard),
                         "Don\u{2019}t Save"
                     }
                     button {
-                        class: "kiln-confirm-btn kiln-confirm-btn--save",
+                        class: "klinx-confirm-btn klinx-confirm-btn--save",
                         onclick: move |_| on_action.call(ConfirmAction::Save),
                         "Save"
                     }

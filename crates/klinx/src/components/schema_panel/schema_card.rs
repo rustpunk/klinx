@@ -20,7 +20,7 @@ pub fn SchemaCard(schema: SourceSchema) -> Element {
     let field_count = schema.total_field_count();
     let path_display = schema.path.display().to_string();
     let pipeline_count = schema.referencing_pipelines.len();
-    let accent_class = format!("kiln-schema-card--{format_label}");
+    let accent_class = format!("klinx-schema-card--{format_label}");
 
     let description = schema
         .metadata
@@ -31,26 +31,26 @@ pub fn SchemaCard(schema: SourceSchema) -> Element {
 
     rsx! {
         div {
-            class: "kiln-schema-card {accent_class}",
+            class: "klinx-schema-card {accent_class}",
 
             // ── Card header (clickable to expand) ───────────────────────
             div {
-                class: "kiln-schema-card__header",
+                class: "klinx-schema-card__header",
                 onclick: move |_| expanded.set(!is_expanded),
 
-                span { class: "kiln-schema-card__diamond", "◆" }
-                span { class: "kiln-schema-card__name", "{name}" }
-                span { class: "kiln-schema-card__count", "{field_count} fields" }
+                span { class: "klinx-schema-card__diamond", "◆" }
+                span { class: "klinx-schema-card__name", "{name}" }
+                span { class: "klinx-schema-card__count", "{field_count} fields" }
             }
 
             // ── Card meta ───────────────────────────────────────────────
-            div { class: "kiln-schema-card__meta",
-                span { class: "kiln-schema-card__path", "{path_display}" }
+            div { class: "klinx-schema-card__meta",
+                span { class: "klinx-schema-card__path", "{path_display}" }
             }
-            div { class: "kiln-schema-card__meta",
-                span { class: "kiln-schema-card__format", "{format_label}" }
-                span { class: "kiln-schema-card__sep", " · " }
-                span { class: "kiln-schema-card__usage",
+            div { class: "klinx-schema-card__meta",
+                span { class: "klinx-schema-card__format", "{format_label}" }
+                span { class: "klinx-schema-card__sep", " · " }
+                span { class: "klinx-schema-card__usage",
                     {
                         if pipeline_count == 0 {
                             "unused".to_string()
@@ -64,7 +64,7 @@ pub fn SchemaCard(schema: SourceSchema) -> Element {
             }
 
             if !description.is_empty() {
-                div { class: "kiln-schema-card__desc", "{description}" }
+                div { class: "klinx-schema-card__desc", "{description}" }
             }
 
             // ── Field list (expanded) ───────────────────────────────────

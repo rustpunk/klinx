@@ -49,7 +49,7 @@ pub fn Connector(props: ConnectorProps) -> Element {
                 fill: "none",
                 stroke_width: "5",
                 stroke_opacity: "0.1",
-                style: "stroke: var(--kiln-stage-accent);",
+                style: "stroke: var(--klinx-stage-accent);",
             }
             // Layer 2 — dashed core cable
             path {
@@ -58,7 +58,7 @@ pub fn Connector(props: ConnectorProps) -> Element {
                 stroke_width: "2",
                 stroke_dasharray: "8 4",
                 stroke_opacity: "0.7",
-                style: "stroke: var(--kiln-stage-accent);",
+                style: "stroke: var(--klinx-stage-accent);",
             }
             // Layer 3 — bright centre hairline
             path {
@@ -66,7 +66,7 @@ pub fn Connector(props: ConnectorProps) -> Element {
                 fill: "none",
                 stroke_width: "0.75",
                 stroke_opacity: "0.9",
-                style: "stroke: var(--kiln-stage-accent);",
+                style: "stroke: var(--klinx-stage-accent);",
             }
             // Open chevron arrowhead
             path {
@@ -76,7 +76,7 @@ pub fn Connector(props: ConnectorProps) -> Element {
                 stroke_opacity: "0.8",
                 stroke_linejoin: "round",
                 stroke_linecap: "round",
-                style: "stroke: var(--kiln-stage-accent);",
+                style: "stroke: var(--klinx-stage-accent);",
             }
         }
     }

@@ -52,15 +52,15 @@ pub fn DrawerNotes(stage_id: String) -> Element {
 
     rsx! {
         div {
-            class: "kiln-drawer-content kiln-drawer-content--notes",
+            class: "klinx-drawer-content klinx-drawer-content--notes",
 
             // ── Stage note (always editable textarea) ─────────────────────
             div {
-                class: "kiln-notes-section",
+                class: "klinx-notes-section",
 
                 div {
-                    class: "kiln-notes-section-header",
-                    span { class: "kiln-notes-section-label", "STAGE NOTE" }
+                    class: "klinx-notes-section-header",
+                    span { class: "klinx-notes-section-label", "STAGE NOTE" }
                 }
 
                 {
@@ -68,7 +68,7 @@ pub fn DrawerNotes(stage_id: String) -> Element {
                     let current_annotations = annotations.clone();
                     rsx! {
                         textarea {
-                            class: "kiln-notes-textarea",
+                            class: "klinx-notes-textarea",
                             placeholder: "Add a note about this stage...",
                             value: "{stage_note_text}",
                             oninput: move |e: FormEvent| {
@@ -86,17 +86,17 @@ pub fn DrawerNotes(stage_id: String) -> Element {
 
             // ── Field annotations (always editable inputs) ────────────────
             div {
-                class: "kiln-notes-section",
+                class: "klinx-notes-section",
 
                 div {
-                    class: "kiln-notes-section-header",
-                    span { class: "kiln-notes-section-label", "FIELD ANNOTATIONS" }
+                    class: "klinx-notes-section-header",
+                    span { class: "klinx-notes-section-label", "FIELD ANNOTATIONS" }
                     {
                         let count = annotations.len();
                         let suffix = if count != 1 { "s" } else { "" };
                         rsx! {
                             span {
-                                class: "kiln-notes-count",
+                                class: "klinx-notes-count",
                                 "{count} annotation{suffix}"
                             }
                         }
@@ -112,15 +112,15 @@ pub fn DrawerNotes(stage_id: String) -> Element {
                         rsx! {
                             div {
                                 key: "annot-{key}",
-                                class: "kiln-notes-annotation",
+                                class: "klinx-notes-annotation",
 
                                 div {
-                                    class: "kiln-notes-field-key",
+                                    class: "klinx-notes-field-key",
                                     "\u{270E} {key}"
                                 }
 
                                 input {
-                                    class: "kiln-notes-field-input",
+                                    class: "klinx-notes-field-input",
                                     r#type: "text",
                                     value: "{text}",
                                     oninput: {
@@ -150,9 +150,9 @@ pub fn DrawerNotes(stage_id: String) -> Element {
 fn DrawerNotesEmpty() -> Element {
     rsx! {
         div {
-            class: "kiln-drawer-content kiln-drawer-content--notes",
+            class: "klinx-drawer-content klinx-drawer-content--notes",
             div {
-                class: "kiln-drawer-placeholder",
+                class: "klinx-drawer-placeholder",
                 "No notes \u{2014} add _notes to the YAML to annotate this stage"
             }
         }

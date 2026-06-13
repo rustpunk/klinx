@@ -23,17 +23,17 @@ pub fn DiffTab() -> Element {
     let diff_text = (diff_content)();
 
     rsx! {
-        div { class: "kiln-diff-tab",
+        div { class: "klinx-diff-tab",
             // ── File list sidebar ───────────────────────────────────
-            div { class: "kiln-diff-sidebar",
+            div { class: "klinx-diff-sidebar",
                 for file in files {
                     {
                         let path_str = file.path.display().to_string();
                         let is_active = current_file.as_deref() == Some(&path_str);
                         let class = if is_active {
-                            "kiln-diff-file kiln-diff-file--active"
+                            "klinx-diff-file klinx-diff-file--active"
                         } else {
-                            "kiln-diff-file"
+                            "klinx-diff-file"
                         };
                         let p = path_str.clone();
 
@@ -51,8 +51,8 @@ pub fn DiffTab() -> Element {
                                         diff_content.set(diff);
                                     }
                                 },
-                                span { class: "kiln-diff-file__status", "{file.status.letter()}" }
-                                span { class: "kiln-diff-file__path", "{path_str}" }
+                                span { class: "klinx-diff-file__status", "{file.status.letter()}" }
+                                span { class: "klinx-diff-file__path", "{path_str}" }
                             }
                         }
                     }
@@ -60,34 +60,34 @@ pub fn DiffTab() -> Element {
             }
 
             // ── Diff content area ───────────────────────────────────
-            div { class: "kiln-diff-content",
+            div { class: "klinx-diff-content",
                 if current_file.is_none() {
-                    div { class: "kiln-diff-content__empty",
+                    div { class: "klinx-diff-content__empty",
                         "Select a file to view its diff."
                     }
                 } else if diff_text.is_empty() {
-                    div { class: "kiln-diff-content__empty",
+                    div { class: "klinx-diff-content__empty",
                         "No changes in this file."
                     }
                 } else {
-                    div { class: "kiln-diff-content__unified",
+                    div { class: "klinx-diff-content__unified",
                         for (i, line) in diff_text.lines().enumerate() {
                             {
                                 let line_str = line.to_string();
                                 let class = if line.starts_with('+') && !line.starts_with("+++") {
-                                    "kiln-diff-line kiln-diff-line--added"
+                                    "klinx-diff-line klinx-diff-line--added"
                                 } else if line.starts_with('-') && !line.starts_with("---") {
-                                    "kiln-diff-line kiln-diff-line--removed"
+                                    "klinx-diff-line klinx-diff-line--removed"
                                 } else if line.starts_with("@@") {
-                                    "kiln-diff-line kiln-diff-line--hunk"
+                                    "klinx-diff-line klinx-diff-line--hunk"
                                 } else {
-                                    "kiln-diff-line kiln-diff-line--context"
+                                    "klinx-diff-line klinx-diff-line--context"
                                 };
 
                                 rsx! {
                                     div { class: "{class}",
-                                        span { class: "kiln-diff-line__num", "{i + 1}" }
-                                        span { class: "kiln-diff-line__text", "{line_str}" }
+                                        span { class: "klinx-diff-line__num", "{i + 1}" }
+                                        span { class: "klinx-diff-line__text", "{line_str}" }
                                     }
                                 }
                             }

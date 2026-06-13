@@ -58,8 +58,8 @@ pub fn VersionMode() -> Element {
 
     if git.is_none() {
         return rsx! {
-            div { class: "kiln-version-mode kiln-version-mode--no-repo",
-                div { class: "kiln-version-mode__empty",
+            div { class: "klinx-version-mode klinx-version-mode--no-repo",
+                div { class: "klinx-version-mode__empty",
                     "No git repository detected."
                     br {}
                     "Open a workspace with a .git directory to use Version Mode."
@@ -69,15 +69,15 @@ pub fn VersionMode() -> Element {
     }
 
     rsx! {
-        div { class: "kiln-version-mode",
+        div { class: "klinx-version-mode",
             // ── 2px ok mode indicator ───────────────────────────────
-            div { class: "kiln-version-mode__indicator" }
+            div { class: "klinx-version-mode__indicator" }
 
             // ── Branch bar ──────────────────────────────────────────
-            div { class: "kiln-version-mode__branch-row",
+            div { class: "klinx-version-mode__branch-row",
                 BranchBar {}
                 button {
-                    class: "kiln-branch-bar__btn kiln-branch-bar__btn--pr",
+                    class: "klinx-branch-bar__btn klinx-branch-bar__btn--pr",
                     onclick: move |_| show_pr.set(true),
                     "⊕ Create PR"
                 }
@@ -89,13 +89,13 @@ pub fn VersionMode() -> Element {
                 }
             } else {
                 // ── Tab bar ─────────────────────────────────────────
-                div { class: "kiln-version-tabs",
+                div { class: "klinx-version-tabs",
                     for tab in VERSION_TABS {
                         button {
                             class: if current_tab == tab {
-                                "kiln-version-tab kiln-version-tab--active"
+                                "klinx-version-tab klinx-version-tab--active"
                             } else {
-                                "kiln-version-tab"
+                                "klinx-version-tab"
                             },
                             onclick: move |_| active_tab.set(tab),
                             "{tab.label()}"
@@ -104,7 +104,7 @@ pub fn VersionMode() -> Element {
                 }
 
                 // ── Content area ────────────────────────────────────
-                div { class: "kiln-version-content",
+                div { class: "klinx-version-content",
                     match current_tab {
                         VersionTab::Changes => rsx! { ChangesTab {} },
                         VersionTab::Diff => rsx! { DiffTab {} },

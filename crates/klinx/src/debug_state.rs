@@ -100,11 +100,11 @@ impl CellValue {
     /// Returns CSS class name for data table cell styling.
     pub fn cell_css_class(&self) -> &'static str {
         match self {
-            Self::Null => "kiln-debug-td--null",
-            Self::Bool(_) => "kiln-debug-td--bool",
-            Self::Int(_) | Self::Float(_) => "kiln-debug-td--number",
-            Self::Str(_) => "kiln-debug-td--string",
-            Self::Array(_) => "kiln-debug-td--array",
+            Self::Null => "klinx-debug-td--null",
+            Self::Bool(_) => "klinx-debug-td--bool",
+            Self::Int(_) | Self::Float(_) => "klinx-debug-td--number",
+            Self::Str(_) => "klinx-debug-td--string",
+            Self::Array(_) => "klinx-debug-td--array",
         }
     }
 }
@@ -292,23 +292,23 @@ mod tests {
 
     #[test]
     fn test_cell_value_css_class_mapping() {
-        assert_eq!(CellValue::Null.cell_css_class(), "kiln-debug-td--null");
+        assert_eq!(CellValue::Null.cell_css_class(), "klinx-debug-td--null");
         assert_eq!(
             CellValue::Bool(false).cell_css_class(),
-            "kiln-debug-td--bool"
+            "klinx-debug-td--bool"
         );
-        assert_eq!(CellValue::Int(1).cell_css_class(), "kiln-debug-td--number");
+        assert_eq!(CellValue::Int(1).cell_css_class(), "klinx-debug-td--number");
         assert_eq!(
             CellValue::Float(1.0).cell_css_class(),
-            "kiln-debug-td--number"
+            "klinx-debug-td--number"
         );
         assert_eq!(
             CellValue::Str("x".into()).cell_css_class(),
-            "kiln-debug-td--string"
+            "klinx-debug-td--string"
         );
         assert_eq!(
             CellValue::Array(vec![]).cell_css_class(),
-            "kiln-debug-td--array"
+            "klinx-debug-td--array"
         );
     }
 
@@ -390,7 +390,7 @@ mod tests {
     fn test_cell_value_css_class_array() {
         assert_eq!(
             CellValue::Array(vec![CellValue::Int(1)]).cell_css_class(),
-            "kiln-debug-td--array"
+            "klinx-debug-td--array"
         );
     }
 

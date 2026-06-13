@@ -35,9 +35,9 @@ pub fn StashTab() -> Element {
     let stash_list = (stashes)();
 
     rsx! {
-        div { class: "kiln-stash-tab",
+        div { class: "klinx-stash-tab",
             if stash_list.is_empty() {
-                div { class: "kiln-stash-tab__empty",
+                div { class: "klinx-stash-tab__empty",
                     "No stashes saved."
                     br {}
                     "Use Ctrl+Shift+P → git: stash to save working changes."
@@ -50,29 +50,29 @@ pub fn StashTab() -> Element {
                     let msg = entry.message.clone();
 
                     rsx! {
-                        div { class: "kiln-stash-card",
-                            div { class: "kiln-stash-card__header",
-                                span { class: "kiln-stash-card__title", "stash@{{{idx}}}" }
-                                span { class: "kiln-stash-card__msg", "{msg}" }
+                        div { class: "klinx-stash-card",
+                            div { class: "klinx-stash-card__header",
+                                span { class: "klinx-stash-card__title", "stash@{{{idx}}}" }
+                                span { class: "klinx-stash-card__msg", "{msg}" }
                             }
 
-                            div { class: "kiln-stash-card__actions",
+                            div { class: "klinx-stash-card__actions",
                                 button {
-                                    class: "kiln-stash-card__btn kiln-stash-card__btn--apply",
+                                    class: "klinx-stash-card__btn klinx-stash-card__btn--apply",
                                     onclick: move |_| {
                                         run_stash_action(&mut tab_mgr, &mut stashes, idx, "apply");
                                     },
                                     "Apply"
                                 }
                                 button {
-                                    class: "kiln-stash-card__btn kiln-stash-card__btn--pop",
+                                    class: "klinx-stash-card__btn klinx-stash-card__btn--pop",
                                     onclick: move |_| {
                                         run_stash_action(&mut tab_mgr, &mut stashes, idx, "pop");
                                     },
                                     "Pop"
                                 }
                                 button {
-                                    class: "kiln-stash-card__btn kiln-stash-card__btn--drop",
+                                    class: "klinx-stash-card__btn klinx-stash-card__btn--drop",
                                     onclick: move |_| {
                                         run_stash_action(&mut tab_mgr, &mut stashes, idx, "drop");
                                     },

@@ -108,24 +108,24 @@ pub fn SchemaPanel() -> Element {
 
     rsx! {
         div {
-            class: "kiln-schema-panel",
+            class: "klinx-schema-panel",
 
             // ── Header ──────────────────────────────────────────────────
-            div { class: "kiln-schema-panel__header",
-                span { class: "kiln-schema-panel__title",
+            div { class: "klinx-schema-panel__header",
+                span { class: "klinx-schema-panel__title",
                     "SOURCE SCHEMAS — {index.len()}"
                 }
                 button {
-                    class: "kiln-schema-panel__close",
+                    class: "klinx-schema-panel__close",
                     onclick: move |_| tab_mgr.left_panel.set(LeftPanel::None),
                     "×"
                 }
             }
 
             // ── Search input ────────────────────────────────────────────
-            div { class: "kiln-schema-panel__search",
+            div { class: "klinx-schema-panel__search",
                 input {
-                    class: "kiln-schema-panel__search-input",
+                    class: "klinx-schema-panel__search-input",
                     r#type: "text",
                     placeholder: "Search fields...",
                     value: "{search_text}",
@@ -134,10 +134,10 @@ pub fn SchemaPanel() -> Element {
             }
 
             // ── Format filter tabs ──────────────────────────────────────
-            div { class: "kiln-schema-panel__tabs",
+            div { class: "klinx-schema-panel__tabs",
                 for f in FORMAT_FILTERS {
                     button {
-                        class: if filter == f { "kiln-schema-tab kiln-schema-tab--active" } else { "kiln-schema-tab" },
+                        class: if filter == f { "klinx-schema-tab klinx-schema-tab--active" } else { "klinx-schema-tab" },
                         onclick: move |_| active_filter.set(f),
                         "{f.label()}"
                     }
@@ -145,9 +145,9 @@ pub fn SchemaPanel() -> Element {
             }
 
             // ── Schema list ─────────────────────────────────────────────
-            div { class: "kiln-schema-panel__list",
+            div { class: "klinx-schema-panel__list",
                 if schemas.is_empty() {
-                    div { class: "kiln-schema-panel__empty",
+                    div { class: "klinx-schema-panel__empty",
                         if index.is_empty() {
                             "No schemas found."
                             br {}
@@ -171,7 +171,7 @@ pub fn SchemaPanel() -> Element {
 
                         rsx! {
                             if show_header {
-                                div { class: "kiln-schema-panel__section-header",
+                                div { class: "klinx-schema-panel__section-header",
                                     "{schema.metadata.format.label()}"
                                 }
                             }
@@ -184,9 +184,9 @@ pub fn SchemaPanel() -> Element {
             }
 
             // ── Bottom actions ──────────────────────────────────────────
-            div { class: "kiln-schema-panel__actions",
+            div { class: "klinx-schema-panel__actions",
                 button {
-                    class: "kiln-schema-panel__action-btn",
+                    class: "klinx-schema-panel__action-btn",
                     onclick: move |_| {
                         let yaml = NEW_SCHEMA_SCAFFOLD;
                         let new_tab = TabEntry::new_from_yaml(

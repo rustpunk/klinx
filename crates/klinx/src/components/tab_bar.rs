@@ -19,7 +19,7 @@ pub fn TabBar() -> Element {
 
     rsx! {
         div {
-            class: "kiln-tab-bar",
+            class: "klinx-tab-bar",
 
             for tab in tabs.read().iter() {
                 {
@@ -35,9 +35,9 @@ pub fn TabBar() -> Element {
                         })
                     });
                     let class = if is_active {
-                        "kiln-tab kiln-tab--active"
+                        "klinx-tab klinx-tab--active"
                     } else {
-                        "kiln-tab"
+                        "klinx-tab"
                     };
 
                     rsx! {
@@ -51,18 +51,18 @@ pub fn TabBar() -> Element {
                             title: "{tab.full_path().unwrap_or_default()}",
 
                             if is_dirty {
-                                span { class: "kiln-tab-dirty", "\u{25CF} " }
+                                span { class: "klinx-tab-dirty", "\u{25CF} " }
                             }
-                            span { class: "kiln-tab-name", "{name}" }
+                            span { class: "klinx-tab-name", "{name}" }
                             if let Some(status) = git_status {
                                 {
                                     let letter = status.letter();
                                     let css_class = match status {
-                                        klinx_git::StatusKind::Modified => "kiln-tab-git kiln-tab-git--modified",
-                                        klinx_git::StatusKind::Added => "kiln-tab-git kiln-tab-git--added",
-                                        klinx_git::StatusKind::Deleted => "kiln-tab-git kiln-tab-git--deleted",
-                                        klinx_git::StatusKind::Renamed => "kiln-tab-git kiln-tab-git--renamed",
-                                        klinx_git::StatusKind::Untracked => "kiln-tab-git kiln-tab-git--untracked",
+                                        klinx_git::StatusKind::Modified => "klinx-tab-git klinx-tab-git--modified",
+                                        klinx_git::StatusKind::Added => "klinx-tab-git klinx-tab-git--added",
+                                        klinx_git::StatusKind::Deleted => "klinx-tab-git klinx-tab-git--deleted",
+                                        klinx_git::StatusKind::Renamed => "klinx-tab-git klinx-tab-git--renamed",
+                                        klinx_git::StatusKind::Untracked => "klinx-tab-git klinx-tab-git--untracked",
                                     };
                                     rsx! {
                                         span { class: "{css_class}", "{letter}" }
@@ -71,7 +71,7 @@ pub fn TabBar() -> Element {
                             }
 
                             button {
-                                class: "kiln-tab-close",
+                                class: "klinx-tab-close",
                                 onclick: move |e: MouseEvent| {
                                     e.stop_propagation();
                                     keyboard::request_close_tab(&mut tab_mgr, tab_id);
@@ -85,7 +85,7 @@ pub fn TabBar() -> Element {
 
             // [+] New tab button
             button {
-                class: "kiln-tab-new",
+                class: "klinx-tab-new",
                 onclick: move |_| {
                     let new_tab = TabEntry::new_untitled(&tabs.read());
                     let new_id = new_tab.id;

@@ -23,8 +23,8 @@ pub fn SearchResults(
     );
 
     rsx! {
-        div { class: "kiln-search-results",
-            div { class: "kiln-search-results__summary",
+        div { class: "klinx-search-results",
+            div { class: "klinx-search-results__summary",
                 "{summary}"
             }
 
@@ -49,10 +49,10 @@ fn FileResultGroup(
     let path = result.path.clone();
 
     rsx! {
-        div { class: "kiln-search-file-group",
-            div { class: "kiln-search-file-group__header",
-                span { class: "kiln-search-file-group__path", "{path}" }
-                span { class: "kiln-search-file-group__count", "{match_count}" }
+        div { class: "klinx-search-file-group",
+            div { class: "klinx-search-file-group__header",
+                span { class: "klinx-search-file-group__path", "{path}" }
+                span { class: "klinx-search-file-group__count", "{match_count}" }
             }
 
             for m in result.matches {
@@ -82,13 +82,13 @@ fn MatchRow(
 
     rsx! {
         div {
-            class: "kiln-search-match",
+            class: "klinx-search-match",
             onclick: move |_| on_navigate.call((path.clone(), line_num)),
 
-            span { class: "kiln-search-match__line", "{line_num}" }
-            span { class: "kiln-search-match__content",
+            span { class: "klinx-search-match__line", "{line_num}" }
+            span { class: "klinx-search-match__content",
                 "{pre}"
-                span { class: "kiln-search-match__highlight",
+                span { class: "klinx-search-match__highlight",
                     "{matched}"
                 }
                 "{post}"

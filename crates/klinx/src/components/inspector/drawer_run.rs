@@ -6,9 +6,9 @@ use dioxus::prelude::*;
 pub fn DrawerRun() -> Element {
     rsx! {
         div {
-            class: "kiln-drawer-content kiln-drawer-content--run",
+            class: "klinx-drawer-content klinx-drawer-content--run",
             div {
-                class: "kiln-drawer-placeholder",
+                class: "klinx-drawer-placeholder",
                 "No run data \u{2014} execute the pipeline to see results"
             }
         }

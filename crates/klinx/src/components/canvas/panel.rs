@@ -54,7 +54,7 @@ struct DragState {
 /// Visual layers (back to front):
 ///   1. Dot grid background (CSS radial-gradient, does NOT transform with content)
 ///   2. Noise + scanline overlays (CSS ::before / ::after, fixed to panel)
-///   3. `kiln-canvas-viewport` div — receives CSS transform(translate + scale)
+///   3. `klinx-canvas-viewport` div — receives CSS transform(translate + scale)
 ///      a. SVG connector overlay (absolute, inset: 0, overflow: visible)
 ///      b. Node cards (absolute, world-space coordinates)
 #[component]
@@ -282,7 +282,7 @@ pub fn CanvasPanel() -> Element {
 
     rsx! {
         div {
-            class: "kiln-canvas-column",
+            class: "klinx-canvas-column",
 
             // ── Breadcrumb bar (composition drill-in navigation) ─────────
             {
@@ -303,10 +303,10 @@ pub fn CanvasPanel() -> Element {
 
             // ── Channel view mode toggle bar ─────────────────────────────
             div {
-                class: "kiln-canvas-toolbar",
+                class: "klinx-canvas-toolbar",
 
                 button {
-                    class: if is_resolved { "kiln-view-toggle kiln-view-toggle--active" } else { "kiln-view-toggle" },
+                    class: if is_resolved { "klinx-view-toggle klinx-view-toggle--active" } else { "klinx-view-toggle" },
                     disabled: !has_channel && !is_resolved,
                     title: if !has_channel && !is_resolved { "Select a channel to enable resolved view" } else if is_resolved { "Switch to Raw view" } else { "Switch to Resolved view" },
                     onclick: move |_| {
@@ -317,7 +317,7 @@ pub fn CanvasPanel() -> Element {
                             ChannelViewMode::Resolved => ChannelViewMode::Raw,
                         });
                     },
-                    span { class: "kiln-view-toggle-label",
+                    span { class: "klinx-view-toggle-label",
                         if is_resolved { "RESOLVED" } else { "RAW" }
                     }
                 }
@@ -327,40 +327,40 @@ pub fn CanvasPanel() -> Element {
                     let count = state.selected_stages.read().len();
                     rsx! {
                         button {
-                            class: "kiln-view-toggle",
+                            class: "klinx-view-toggle",
                             disabled: count < 2,
                             title: if count < 2 { "Select 2+ nodes to extract as composition" } else { "Extract selected nodes as a composition" },
                             onclick: move |_| {
                                 // TODO: open extraction modal.
                             },
-                            span { class: "kiln-view-toggle-label", "EXTRACT" }
+                            span { class: "klinx-view-toggle-label", "EXTRACT" }
                         }
                     }
                 }
 
                 // ── Fit to View — frame all nodes in the viewport ──────────
                 button {
-                    class: "kiln-view-toggle",
+                    class: "klinx-view-toggle",
                     disabled: bounds.is_none(),
                     title: if bounds.is_none() { "No nodes to fit" } else { "Fit all nodes to the viewport" },
                     onclick: move |_| fit_to_view(pan_x, pan_y, zoom),
-                    span { class: "kiln-view-toggle-label", "FIT" }
+                    span { class: "klinx-view-toggle-label", "FIT" }
                 }
 
                 // ── Reset Layout — re-run the engine layout and re-fit. With no
                 // persisted position overrides yet (issue #3 PR 3b), positions
                 // are already recomputed every render, so reset == re-fit. ──
                 button {
-                    class: "kiln-view-toggle",
+                    class: "klinx-view-toggle",
                     disabled: bounds.is_none(),
                     title: if bounds.is_none() { "No layout to reset" } else { "Reset to the engine-computed layout" },
                     onclick: move |_| fit_to_view(pan_x, pan_y, zoom),
-                    span { class: "kiln-view-toggle-label", "RESET" }
+                    span { class: "klinx-view-toggle-label", "RESET" }
                 }
             }
 
             div {
-                class: "kiln-canvas-panel",
+                class: "klinx-canvas-panel",
             // Measure the pane on mount (guaranteed) and on every resize so
             // Fit-to-View frames the graph against the real viewport size.
             onmounted: move |evt| {
@@ -396,12 +396,12 @@ pub fn CanvasPanel() -> Element {
 
             // ── Transformed viewport ──────────────────────────────────────
             div {
-                class: "kiln-canvas-viewport",
+                class: "klinx-canvas-viewport",
                 style: "transform: translate({pan_x}px, {pan_y}px) scale({zoom});",
 
                 // SVG connector overlay — rendered first (lower z-index).
                 svg {
-                    class: "kiln-canvas-svg",
+                    class: "klinx-canvas-svg",
                     width: "{svg_w}",
                     height: "{svg_h}",
                     for (from, to) in connections {

@@ -9,12 +9,12 @@ use crate::sync::EditSource;
 
 use super::tokenizer::Token;
 
-/// Line height in px. MUST match `.kiln-yaml-line` / `.kiln-yaml-textarea`
+/// Line height in px. MUST match `.klinx-yaml-line` / `.klinx-yaml-textarea`
 /// `line-height` in `klinx.css` — virtualization positions lines by this
 /// constant, so a mismatch would drift the overlay off the textarea.
 const LINE_HEIGHT: u32 = 20;
 
-/// One syntax-highlighted YAML line: token `<span>`s inside a `kiln-yaml-line`
+/// One syntax-highlighted YAML line: token `<span>`s inside a `klinx-yaml-line`
 /// div.
 ///
 /// A `#[component]` so Dioxus memoizes it on its props — a line whose `tokens`
@@ -25,7 +25,7 @@ const LINE_HEIGHT: u32 = 20;
 pub(crate) fn YamlLine(tokens: Vec<Token>, selected: bool) -> Element {
     rsx! {
         div {
-            class: "kiln-yaml-line",
+            class: "klinx-yaml-line",
             "data-selected": if selected { "true" },
             for (j, token) in tokens.iter().enumerate() {
                 span {
@@ -80,7 +80,7 @@ pub(crate) fn EditorPane(
 
     rsx! {
         div {
-            class: "kiln-yaml-editor",
+            class: "klinx-yaml-editor",
             onscroll: move |evt| scroll_top.set(evt.scroll_top().max(0.0) as u32),
             // Measure the real pane height on mount (guaranteed) and on every
             // resize, so the visible window covers the viewport even if the
@@ -100,7 +100,7 @@ pub(crate) fn EditorPane(
 
             // Syntax-highlighted overlay (read-only visual layer)
             div {
-                class: "kiln-yaml-highlight",
+                class: "klinx-yaml-highlight",
                 div { style: "height: {top_spacer}px;" }
                 for i in start..end {
                     YamlLine {
@@ -115,7 +115,7 @@ pub(crate) fn EditorPane(
             // Transparent textarea (captures input), sits on top, full height.
             if editable {
                 textarea {
-                    class: "kiln-yaml-textarea",
+                    class: "klinx-yaml-textarea",
                     spellcheck: "false",
                     value: "{text}",
                     oninput: move |e: FormEvent| {
@@ -132,7 +132,7 @@ pub(crate) fn EditorPane(
                 }
             } else {
                 textarea {
-                    class: "kiln-yaml-textarea kiln-yaml-textarea--readonly",
+                    class: "klinx-yaml-textarea klinx-yaml-textarea--readonly",
                     spellcheck: "false",
                     readonly: true,
                     value: "{text}",

@@ -25,8 +25,8 @@ pub fn DrawerDocs(stage_id: String) -> Element {
         None => {
             return rsx! {
                 div {
-                    class: "kiln-drawer-content kiln-drawer-content--docs",
-                    div { class: "kiln-drawer-placeholder", "No pipeline loaded" }
+                    class: "klinx-drawer-content klinx-drawer-content--docs",
+                    div { class: "klinx-drawer-placeholder", "No pipeline loaded" }
                 }
             };
         }
@@ -35,8 +35,8 @@ pub fn DrawerDocs(stage_id: String) -> Element {
     let Some(doc) = generate_stage_doc(config, &stage_id) else {
         return rsx! {
             div {
-                class: "kiln-drawer-content kiln-drawer-content--docs",
-                div { class: "kiln-drawer-placeholder", "No documentation for this stage" }
+                class: "klinx-drawer-content klinx-drawer-content--docs",
+                div { class: "klinx-drawer-placeholder", "No documentation for this stage" }
             }
         };
     };
@@ -50,14 +50,14 @@ pub fn DrawerDocs(stage_id: String) -> Element {
 
     rsx! {
         div {
-            class: "kiln-drawer-content kiln-drawer-content--docs",
+            class: "klinx-drawer-content klinx-drawer-content--docs",
 
             // ── Summary + user description ───────────────────────────────
             div {
-                class: "kiln-docs-description",
+                class: "klinx-docs-description",
                 style: "position: relative;",
                 span {
-                    class: "kiln-stage-card-stamp",
+                    class: "klinx-stage-card-stamp",
                     "autodoc"
                 }
                 "{doc.summary}"
@@ -65,7 +65,7 @@ pub fn DrawerDocs(stage_id: String) -> Element {
 
             if let Some(ref desc) = doc.user_description {
                 div {
-                    class: "kiln-docs-user-desc",
+                    class: "klinx-docs-user-desc",
                     "{desc}"
                 }
             }
@@ -73,10 +73,10 @@ pub fn DrawerDocs(stage_id: String) -> Element {
             // ── User-authored stage note (when present) ──────────────────
             if !notes.stage_note.is_empty() {
                 div {
-                    class: "kiln-docs-note-section",
-                    span { class: "kiln-docs-note-label", "NOTE" }
+                    class: "klinx-docs-note-section",
+                    span { class: "klinx-docs-note-label", "NOTE" }
                     div {
-                        class: "kiln-docs-note-block",
+                        class: "klinx-docs-note-block",
                         "{notes.stage_note}"
                     }
                 }
@@ -85,25 +85,25 @@ pub fn DrawerDocs(stage_id: String) -> Element {
             // ── Channel override section ─────────────────────────────────
             if let Some(ref co) = doc.channel_override {
                 div {
-                    class: "kiln-docs-section",
-                    span { class: "kiln-docs-section-label", "CHANNEL OVERRIDE" }
+                    class: "klinx-docs-section",
+                    span { class: "klinx-docs-section-label", "CHANNEL OVERRIDE" }
                     div {
-                        class: "kiln-docs-metadata",
-                        div { class: "kiln-docs-meta-row",
-                            span { class: "kiln-docs-meta-key", "CHANNEL" }
-                            span { class: "kiln-docs-meta-value", "{co.channel_id}" }
+                        class: "klinx-docs-metadata",
+                        div { class: "klinx-docs-meta-row",
+                            span { class: "klinx-docs-meta-key", "CHANNEL" }
+                            span { class: "klinx-docs-meta-value", "{co.channel_id}" }
                         }
-                        div { class: "kiln-docs-meta-row",
-                            span { class: "kiln-docs-meta-key", "ACTION" }
-                            span { class: "kiln-docs-meta-value kiln-docs-meta-value--badge", "{co.override_kind}" }
+                        div { class: "klinx-docs-meta-row",
+                            span { class: "klinx-docs-meta-key", "ACTION" }
+                            span { class: "klinx-docs-meta-value klinx-docs-meta-value--badge", "{co.override_kind}" }
                         }
-                        div { class: "kiln-docs-meta-row",
-                            span { class: "kiln-docs-meta-key", "SOURCE" }
-                            span { class: "kiln-docs-meta-value", "{co.override_source}" }
+                        div { class: "klinx-docs-meta-row",
+                            span { class: "klinx-docs-meta-key", "SOURCE" }
+                            span { class: "klinx-docs-meta-value", "{co.override_source}" }
                         }
-                        div { class: "kiln-docs-meta-row",
-                            span { class: "kiln-docs-meta-key", "FILE" }
-                            span { class: "kiln-docs-meta-value kiln-docs-meta-value--path", "{co.override_file}" }
+                        div { class: "klinx-docs-meta-row",
+                            span { class: "klinx-docs-meta-key", "FILE" }
+                            span { class: "klinx-docs-meta-value klinx-docs-meta-value--path", "{co.override_file}" }
                         }
                     }
                 }
@@ -112,8 +112,8 @@ pub fn DrawerDocs(stage_id: String) -> Element {
             // ── Schema table ─────────────────────────────────────────────
             if let Some(ref schema) = doc.schema {
                 div {
-                    class: "kiln-docs-section",
-                    span { class: "kiln-docs-section-label",
+                    class: "klinx-docs-section",
+                    span { class: "klinx-docs-section-label",
                         match &schema.source {
                             crate::autodoc::SchemaOrigin::File(path) => format!("SCHEMA (from {})", path),
                             crate::autodoc::SchemaOrigin::Inline => "SCHEMA (inline)".to_string(),
@@ -123,29 +123,29 @@ pub fn DrawerDocs(stage_id: String) -> Element {
                     }
                     if !schema.fields.is_empty() {
                         div {
-                            class: "kiln-docs-schema-table",
+                            class: "klinx-docs-schema-table",
                             // Header row
-                            div { class: "kiln-docs-schema-row kiln-docs-schema-row--header",
-                                span { class: "kiln-docs-schema-cell", "Name" }
-                                span { class: "kiln-docs-schema-cell", "Type" }
-                                span { class: "kiln-docs-schema-cell", "Required" }
-                                span { class: "kiln-docs-schema-cell", "Format" }
-                                span { class: "kiln-docs-schema-cell", "Default" }
+                            div { class: "klinx-docs-schema-row klinx-docs-schema-row--header",
+                                span { class: "klinx-docs-schema-cell", "Name" }
+                                span { class: "klinx-docs-schema-cell", "Type" }
+                                span { class: "klinx-docs-schema-cell", "Required" }
+                                span { class: "klinx-docs-schema-cell", "Format" }
+                                span { class: "klinx-docs-schema-cell", "Default" }
                             }
                             for field in schema.fields.iter() {
-                                div { class: "kiln-docs-schema-row",
+                                div { class: "klinx-docs-schema-row",
                                     key: "schema-{field.name}",
-                                    span { class: "kiln-docs-schema-cell kiln-docs-schema-cell--name", "{field.name}" }
-                                    span { class: "kiln-docs-schema-cell",
+                                    span { class: "klinx-docs-schema-cell klinx-docs-schema-cell--name", "{field.name}" }
+                                    span { class: "klinx-docs-schema-cell",
                                         {field.field_type.as_deref().unwrap_or("—")}
                                     }
-                                    span { class: "kiln-docs-schema-cell",
+                                    span { class: "klinx-docs-schema-cell",
                                         if field.required { "yes" } else { "—" }
                                     }
-                                    span { class: "kiln-docs-schema-cell",
+                                    span { class: "klinx-docs-schema-cell",
                                         {field.format.as_deref().unwrap_or("—")}
                                     }
-                                    span { class: "kiln-docs-schema-cell",
+                                    span { class: "klinx-docs-schema-cell",
                                         {field.default_value.as_deref().unwrap_or("—")}
                                     }
                                 }
@@ -158,48 +158,48 @@ pub fn DrawerDocs(stage_id: String) -> Element {
             // ── CXL analysis ─────────────────────────────────────────────
             if let Some(ref analysis) = doc.cxl_analysis {
                 div {
-                    class: "kiln-docs-section",
-                    span { class: "kiln-docs-section-label", "CXL ANALYSIS" }
+                    class: "klinx-docs-section",
+                    span { class: "klinx-docs-section-label", "CXL ANALYSIS" }
 
                     // All fields referenced summary
                     if !analysis.all_field_refs.is_empty() {
-                        div { class: "kiln-docs-field-refs-summary",
-                            span { class: "kiln-docs-lineage-refs-label", "fields referenced: " }
+                        div { class: "klinx-docs-field-refs-summary",
+                            span { class: "klinx-docs-lineage-refs-label", "fields referenced: " }
                             for r in analysis.all_field_refs.iter() {
-                                span { class: "kiln-docs-lineage-ref", "{r}" }
+                                span { class: "klinx-docs-lineage-ref", "{r}" }
                             }
                         }
                     }
 
                     // Classified statements
                     div {
-                        class: "kiln-docs-lineage-table",
+                        class: "klinx-docs-lineage-table",
                         for (i, stmt) in analysis.statements.iter().enumerate() {
-                            div { class: "kiln-docs-lineage-row",
+                            div { class: "klinx-docs-lineage-row",
                                 key: "stmt-{i}",
                                 // Kind badge + output field
-                                div { class: "kiln-docs-lineage-field",
+                                div { class: "klinx-docs-lineage-field",
                                     span {
-                                        class: "kiln-docs-stmt-badge",
+                                        class: "klinx-docs-stmt-badge",
                                         "data-kind": stmt.kind.label().to_lowercase(),
                                         "{stmt.kind.label()}"
                                     }
                                     if let Some(ref out) = stmt.output_field {
-                                        span { class: "kiln-docs-column-tag kiln-docs-column-tag--added",
+                                        span { class: "klinx-docs-column-tag klinx-docs-column-tag--added",
                                             "+{out}"
                                         }
                                     }
                                 }
                                 // Expression
-                                div { class: "kiln-docs-lineage-expr",
-                                    code { class: "kiln-docs-lineage-code", "{stmt.expression}" }
+                                div { class: "klinx-docs-lineage-expr",
+                                    code { class: "klinx-docs-lineage-code", "{stmt.expression}" }
                                 }
                                 // Field refs
                                 if !stmt.field_refs.is_empty() {
-                                    div { class: "kiln-docs-lineage-refs",
-                                        span { class: "kiln-docs-lineage-refs-label", "reads: " }
+                                    div { class: "klinx-docs-lineage-refs",
+                                        span { class: "klinx-docs-lineage-refs-label", "reads: " }
                                         for r in stmt.field_refs.iter() {
-                                            span { class: "kiln-docs-lineage-ref", "{r}" }
+                                            span { class: "klinx-docs-lineage-ref", "{r}" }
                                         }
                                     }
                                 }
@@ -212,30 +212,30 @@ pub fn DrawerDocs(stage_id: String) -> Element {
             // ── Contract section ─────────────────────────────────────────
             if let Some(ref contract) = doc.contract {
                 div {
-                    class: "kiln-docs-section",
-                    span { class: "kiln-docs-section-label",
+                    class: "klinx-docs-section",
+                    span { class: "klinx-docs-section-label",
                         "CONTRACT ({contract.composition_name})"
                     }
                     if !contract.requires.is_empty() {
-                        div { class: "kiln-docs-contract-group",
-                            span { class: "kiln-docs-contract-heading", "REQUIRES" }
+                        div { class: "klinx-docs-contract-group",
+                            span { class: "klinx-docs-contract-heading", "REQUIRES" }
                             for f in contract.requires.iter() {
-                                div { class: "kiln-docs-contract-field",
+                                div { class: "klinx-docs-contract-field",
                                     key: "req-{f.name}",
-                                    span { class: "kiln-docs-contract-name", "{f.name}" }
-                                    span { class: "kiln-docs-contract-type", "{f.field_type}" }
+                                    span { class: "klinx-docs-contract-name", "{f.name}" }
+                                    span { class: "klinx-docs-contract-type", "{f.field_type}" }
                                 }
                             }
                         }
                     }
                     if !contract.produces.is_empty() {
-                        div { class: "kiln-docs-contract-group",
-                            span { class: "kiln-docs-contract-heading", "PRODUCES" }
+                        div { class: "klinx-docs-contract-group",
+                            span { class: "klinx-docs-contract-heading", "PRODUCES" }
                             for f in contract.produces.iter() {
-                                div { class: "kiln-docs-contract-field",
+                                div { class: "klinx-docs-contract-field",
                                     key: "prod-{f.name}",
-                                    span { class: "kiln-docs-contract-name", "{f.name}" }
-                                    span { class: "kiln-docs-contract-type", "{f.field_type}" }
+                                    span { class: "klinx-docs-contract-name", "{f.name}" }
+                                    span { class: "klinx-docs-contract-type", "{f.field_type}" }
                                 }
                             }
                         }
@@ -246,16 +246,16 @@ pub fn DrawerDocs(stage_id: String) -> Element {
             // ── Config section (grouped by category) ─────────────────────
             for (label, entries) in config_groups.iter() {
                 div {
-                    class: "kiln-docs-section",
-                    span { class: "kiln-docs-section-label", "{label}" }
+                    class: "klinx-docs-section",
+                    span { class: "klinx-docs-section-label", "{label}" }
                     div {
-                        class: "kiln-docs-metadata",
+                        class: "klinx-docs-metadata",
                         for entry in entries.iter() {
                             div {
                                 key: "cfg-{entry.key}",
-                                class: "kiln-docs-meta-row",
-                                span { class: "kiln-docs-meta-key", "{entry.key}" }
-                                span { class: "kiln-docs-meta-value", "{entry.value}" }
+                                class: "klinx-docs-meta-row",
+                                span { class: "klinx-docs-meta-key", "{entry.key}" }
+                                span { class: "klinx-docs-meta-value", "{entry.value}" }
                             }
                         }
                     }
@@ -265,28 +265,28 @@ pub fn DrawerDocs(stage_id: String) -> Element {
             // ── Provenance section ───────────────────────────────────────
             if let Some(ref prov) = doc.provenance {
                 div {
-                    class: "kiln-docs-section",
-                    span { class: "kiln-docs-section-label", "PROVENANCE" }
+                    class: "klinx-docs-section",
+                    span { class: "klinx-docs-section-label", "PROVENANCE" }
                     div {
-                        class: "kiln-docs-metadata",
-                        div { class: "kiln-docs-meta-row",
-                            span { class: "kiln-docs-meta-key", "COMPOSITION" }
-                            span { class: "kiln-docs-meta-value", "{prov.composition_name}" }
+                        class: "klinx-docs-metadata",
+                        div { class: "klinx-docs-meta-row",
+                            span { class: "klinx-docs-meta-key", "COMPOSITION" }
+                            span { class: "klinx-docs-meta-value", "{prov.composition_name}" }
                         }
-                        div { class: "kiln-docs-meta-row",
-                            span { class: "kiln-docs-meta-key", "PATH" }
-                            span { class: "kiln-docs-meta-value kiln-docs-meta-value--path", "{prov.composition_path}" }
+                        div { class: "klinx-docs-meta-row",
+                            span { class: "klinx-docs-meta-key", "PATH" }
+                            span { class: "klinx-docs-meta-value klinx-docs-meta-value--path", "{prov.composition_path}" }
                         }
                         if let Some(ref ver) = prov.composition_version {
-                            div { class: "kiln-docs-meta-row",
-                                span { class: "kiln-docs-meta-key", "VERSION" }
-                                span { class: "kiln-docs-meta-value", "{ver}" }
+                            div { class: "klinx-docs-meta-row",
+                                span { class: "klinx-docs-meta-key", "VERSION" }
+                                span { class: "klinx-docs-meta-value", "{ver}" }
                             }
                         }
                         if prov.is_overridden {
-                            div { class: "kiln-docs-meta-row",
-                                span { class: "kiln-docs-meta-key", "STATUS" }
-                                span { class: "kiln-docs-meta-value kiln-docs-meta-value--badge", "OVERRIDDEN" }
+                            div { class: "klinx-docs-meta-row",
+                                span { class: "klinx-docs-meta-key", "STATUS" }
+                                span { class: "klinx-docs-meta-value klinx-docs-meta-value--badge", "OVERRIDDEN" }
                             }
                         }
                     }
@@ -294,15 +294,15 @@ pub fn DrawerDocs(stage_id: String) -> Element {
                     // Override diff
                     if prov.is_overridden {
                         if let Some(ref original) = prov.original_cxl {
-                            div { class: "kiln-docs-diff",
-                                span { class: "kiln-docs-diff-label", "ORIGINAL CXL" }
-                                pre { class: "kiln-docs-diff-block kiln-docs-diff-block--original", "{original}" }
+                            div { class: "klinx-docs-diff",
+                                span { class: "klinx-docs-diff-label", "ORIGINAL CXL" }
+                                pre { class: "klinx-docs-diff-block klinx-docs-diff-block--original", "{original}" }
                             }
                         }
                         if let Some(ref current) = prov.current_cxl {
-                            div { class: "kiln-docs-diff",
-                                span { class: "kiln-docs-diff-label", "CURRENT CXL" }
-                                pre { class: "kiln-docs-diff-block kiln-docs-diff-block--current", "{current}" }
+                            div { class: "klinx-docs-diff",
+                                span { class: "klinx-docs-diff-label", "CURRENT CXL" }
+                                pre { class: "klinx-docs-diff-block klinx-docs-diff-block--current", "{current}" }
                             }
                         }
                     }
@@ -311,10 +311,10 @@ pub fn DrawerDocs(stage_id: String) -> Element {
 
             // ── Footer ───────────────────────────────────────────────────
             div {
-                class: "kiln-docs-footer",
-                span { class: "kiln-docs-footer-rule" }
-                span { class: "kiln-docs-footer-label", "AUTODOC" }
-                span { class: "kiln-docs-footer-rule" }
+                class: "klinx-docs-footer",
+                span { class: "klinx-docs-footer-rule" }
+                span { class: "klinx-docs-footer-label", "AUTODOC" }
+                span { class: "klinx-docs-footer-rule" }
             }
         }
     }

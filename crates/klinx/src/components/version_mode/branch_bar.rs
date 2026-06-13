@@ -19,23 +19,23 @@ pub fn BranchBar() -> Element {
     let behind = git.map(|g| g.behind).unwrap_or(0);
 
     rsx! {
-        div { class: "kiln-branch-bar",
+        div { class: "klinx-branch-bar",
             // Left: branch info
-            div { class: "kiln-branch-bar__info",
-                span { class: "kiln-branch-bar__icon", "⑂" }
-                span { class: "kiln-branch-bar__name", "{branch}" }
+            div { class: "klinx-branch-bar__info",
+                span { class: "klinx-branch-bar__icon", "⑂" }
+                span { class: "klinx-branch-bar__name", "{branch}" }
                 if ahead > 0 {
-                    span { class: "kiln-branch-bar__ahead", "↑{ahead}" }
+                    span { class: "klinx-branch-bar__ahead", "↑{ahead}" }
                 }
                 if behind > 0 {
-                    span { class: "kiln-branch-bar__behind", "↓{behind}" }
+                    span { class: "klinx-branch-bar__behind", "↓{behind}" }
                 }
             }
 
             // Right: action buttons
-            div { class: "kiln-branch-bar__actions",
+            div { class: "klinx-branch-bar__actions",
                 button {
-                    class: "kiln-branch-bar__btn",
+                    class: "klinx-branch-bar__btn",
                     onclick: move |_| {
                         run_git_action(&mut tab_mgr, "push");
                     },
@@ -46,7 +46,7 @@ pub fn BranchBar() -> Element {
                     }
                 }
                 button {
-                    class: "kiln-branch-bar__btn",
+                    class: "klinx-branch-bar__btn",
                     onclick: move |_| {
                         run_git_action(&mut tab_mgr, "pull");
                     },
@@ -57,7 +57,7 @@ pub fn BranchBar() -> Element {
                     }
                 }
                 button {
-                    class: "kiln-branch-bar__btn kiln-branch-bar__btn--subtle",
+                    class: "klinx-branch-bar__btn klinx-branch-bar__btn--subtle",
                     onclick: move |_| {
                         run_git_action(&mut tab_mgr, "fetch");
                     },

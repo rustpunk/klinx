@@ -14,22 +14,22 @@ pub fn StageHeader(
 
     rsx! {
         div {
-            class: "kiln-inspector-header",
+            class: "klinx-inspector-header",
             "data-stage-kind": kind_attr,
-            style: "border-top: 3px solid var(--kiln-stage-accent);",
+            style: "border-top: 3px solid var(--klinx-stage-accent);",
 
             span {
-                class: "kiln-inspector-badge",
-                style: "color: var(--kiln-stage-accent); border-color: var(--kiln-stage-accent);",
+                class: "klinx-inspector-badge",
+                style: "color: var(--klinx-stage-accent); border-color: var(--klinx-stage-accent);",
                 "{kind_label}"
             }
 
-            span { class: "kiln-inspector-label", "{label}" }
+            span { class: "klinx-inspector-label", "{label}" }
 
             span { style: "flex: 1;" }
 
             button {
-                class: "kiln-inspector-close",
+                class: "klinx-inspector-close",
                 onclick: move |_| {
                     let mut sel = state.selected_stages;
                     sel.set(std::collections::HashSet::new());

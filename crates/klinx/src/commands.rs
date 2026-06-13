@@ -113,6 +113,14 @@ pub fn all_commands() -> Vec<Command> {
             requires_git: false,
         },
         Command {
+            id: "explorer.toggle",
+            label: "File: Workspace Explorer",
+            description: "Toggle the workspace file explorer panel",
+            shortcut: Some("Alt+B"),
+            group: CommandGroup::File,
+            requires_git: false,
+        },
+        Command {
             id: "file.save",
             label: "File: Save",
             description: "Save the current pipeline",

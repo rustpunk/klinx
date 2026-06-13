@@ -62,15 +62,30 @@ impl KilnTheme {
 
 /// Which left-side panel is currently open (280px slide-in slot).
 ///
-/// Only one panel can be open at a time. Search, Schemas, and Compositions
-/// share the same slot. `None` means the slot is collapsed.
+/// Only one panel can be open at a time. Explorer, Search, Schemas, and
+/// Compositions share the same slot. `None` means the slot is collapsed.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum LeftPanel {
     #[default]
     None,
+    /// Workspace file explorer (discovered tree / raw filesystem).
+    Explorer,
     Search,
     Schemas,
     Compositions,
+}
+
+impl LeftPanel {
+    /// Toggle `target` against the current panel: show `target`, or collapse the
+    /// slot if `target` is already showing. Shared by the keyboard, command
+    /// palette, and activity-bar toggles so the open/close rule lives once.
+    pub fn toggled(self, target: LeftPanel) -> LeftPanel {
+        if self == target {
+            LeftPanel::None
+        } else {
+            target
+        }
+    }
 }
 
 /// Top-level navigation context — the activity the user is performing.
