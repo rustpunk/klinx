@@ -19,7 +19,11 @@ use super::tokenizer::tokenize;
 #[component]
 pub fn YamlSidebar() -> Element {
     let state = use_app_state();
-    let errors = (state.parse_errors)();
+    // Render `visible_errors`, not `parse_errors`: the error bar is decoupled
+    // from the raw parse so it doesn't pop up or flicker mid-keystroke. It
+    // settles ~500ms after typing stops and syncs immediately on tab switch /
+    // file open / inspector edits (see the error-settle effect in app.rs, #43).
+    let errors = (state.visible_errors)();
 
     // Tokenize only when the YAML text changes — not on every re-render (e.g.
     // selection or error-bar churn). `tokenize` is a pure fn of the text.
