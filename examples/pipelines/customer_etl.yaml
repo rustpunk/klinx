@@ -1,0 +1,56 @@
+pipeline:
+  name: customer_etl
+
+nodes:
+  - type: source
+    name: customers
+    description: Source data from the CRM export.
+    config:
+      name: customers
+      type: csv
+      path: ./data/customers.csv
+      options:
+        has_header: true
+      schema:
+        - { name: customer_id, type: string }
+        - { name: first_name, type: string }
+        - { name: last_name, type: string }
+        - { name: email, type: string }
+        - { name: status, type: string }
+        - { name: lifetime_value, type: string }
+        - { name: zip_code, type: string }
+
+  - type: transform
+    name: active_only
+    description: Flag active customers (filter statement added in Phase 12)
+    input: customers
+    config:
+      cxl: |
+        emit is_active = status == "active"
+
+  - type: transform
+    name: final_flag
+    description: Flag high-value customers
+    input: active_only
+    config:
+      cxl: |
+        emit tier = if lifetime_value.to_int() > 10000 then "gold" else "standard"
+
+  - type: output
+    name: results
+    input: final_flag
+    config:
+      name: results
+      type: csv
+      path: ./output/customers.csv
+      include_unmapped: true
+
+error_handling:
+  strategy: fail_fast
+
+_notes:
+  pipeline: |
+    Customer ETL pipeline for the marketing analytics team.
+    Runs nightly via cron. Output feeds the Looker dashboard.
+    TODO(16c compositions): clean_names + validate_email composition imports
+    were stripped during the 16b fixture migration.

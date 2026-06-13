@@ -1,0 +1,104 @@
+pipeline:
+  name: order_fulfillment
+  vars:
+    express_surcharge: { type: float, default: 5.99 }
+    high_value_threshold: { type: int, default: 500 }
+
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./data/orders.csv
+      options:
+        has_header: true
+      schema:
+        - { name: order_id, type: string }
+        - { name: order_date, type: string }
+        - { name: quantity, type: int }
+        - { name: unit_price, type: float }
+        - { name: product_code, type: string }
+        - { name: priority_level, type: string }
+
+  - type: source
+    name: products
+    config:
+      name: products
+      type: csv
+      path: ./data/products.csv
+      options:
+        has_header: true
+      schema:
+        - { name: product_code, type: string }
+        - { name: product_name, type: string }
+        - { name: category, type: string }
+        - { name: weight_kg, type: string }
+
+  - type: transform
+    name: normalize_fields
+    description: Clean and normalize order fields
+    input: orders
+    config:
+      cxl: |
+        emit order_ref = "ORD-" + order_id.to_string().pad_left(8, "0")
+        emit order_date_parsed = order_date.to_date("%Y-%m-%d")
+        emit line_total = quantity * unit_price
+
+  - type: combine
+    name: product_lookup
+    description: Enrich orders with product catalog details
+    input:
+      orders: normalize_fields
+      products: products
+    config:
+      where: "orders.product_code == products.product_code"
+      match: first
+      on_miss: null_fields
+      cxl: |
+        emit order_id = orders.order_id
+        emit order_date = orders.order_date
+        emit quantity = orders.quantity
+        emit unit_price = orders.unit_price
+        emit product_code = orders.product_code
+        emit priority_level = orders.priority_level
+        emit order_ref = orders.order_ref
+        emit order_date_parsed = orders.order_date_parsed
+        emit line_total = orders.line_total
+        emit product_name = products.product_name
+        emit category = products.category
+        emit weight_kg = products.weight_kg
+      propagate_ck: driver
+
+  # TODO(16c compositions): shipping_cost + order_classification composition imports stripped during 16b fixture migration.
+
+  - type: transform
+    name: route_priority
+    description: Compute route field for downstream routing (priority_report vs fulfilled_orders)
+    input: product_lookup
+    config:
+      cxl: |
+        emit _route = if priority_level == "urgent" or priority_level == "high" then "priority_report" else "fulfilled_orders"
+
+  - type: output
+    name: fulfilled_orders
+    input: route_priority
+    config:
+      name: fulfilled_orders
+      type: csv
+      path: ./output/fulfilled_orders.csv
+      include_unmapped: false
+
+  - type: output
+    name: priority_report
+    input: route_priority
+    config:
+      name: priority_report
+      type: json
+      path: ./output/priority_report.json
+
+error_handling:
+  strategy: continue
+  dlq:
+    path: ./output/errors.csv
+    include_reason: true
