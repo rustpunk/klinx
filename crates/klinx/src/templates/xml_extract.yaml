@@ -17,7 +17,7 @@ nodes:
       type: xml
       path: "./data/input.xml"
       options:
-        record_element: record
+        record_path: records/record
       schema:
         - { name: id, type: string }
         - { name: value, type: string }
