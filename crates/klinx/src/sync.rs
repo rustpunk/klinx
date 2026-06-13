@@ -244,4 +244,31 @@ nodes:
         let (_view, errors) = parse_composition(VALID_COMP);
         assert!(!errors.iter().any(|e| e.contains("pipeline")));
     }
+
+    /// Every bundled example composition must parse cleanly against the pinned
+    /// engine schema and render at least one node — guards the example workspace
+    /// against silent schema drift (the reason the originals stopped rendering).
+    #[test]
+    fn bundled_example_compositions_parse_and_render() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/pipelines/compositions");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("compositions dir exists") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let yaml = std::fs::read_to_string(&path).unwrap();
+            assert!(is_composition_yaml(&yaml), "{path:?} not detected as comp");
+            let (view, errors) = parse_composition(&yaml);
+            assert!(errors.is_empty(), "{path:?} must parse cleanly: {errors:?}");
+            let view = view.expect("composition view");
+            assert!(!view.stages.is_empty(), "{path:?} must render >=1 node");
+            checked += 1;
+        }
+        assert!(
+            checked >= 5,
+            "expected the bundled example comps, got {checked}"
+        );
+    }
 }
