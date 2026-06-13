@@ -4107,6 +4107,8 @@ input:-webkit-autofill:focus {
   border-left: 1px solid var(--kiln-border-subtle);
   background: var(--kiln-char);
   overflow: hidden;
+  /* Positioning context for the absolutely-positioned parse-error bar below. */
+  position: relative;
 }
 
 /* Section header row */
@@ -4222,11 +4224,22 @@ input:-webkit-autofill:focus {
   tab-size: 2;
 }
 
-/* Parse error bar below the textarea */
+/* Parse error bar, overlaid on the bottom of the editor.
+   Absolutely positioned (not an in-flow flex sibling) on purpose: when the
+   conditional render toggles it on/off it must not change the code-area
+   height, which would reflow the editor and auto-scroll the caret up/down a
+   few lines (#41). The background is opaque — the red tint stacked over the
+   sidebar base (--kiln-char) — so editor text behind the bar doesn't bleed
+   through. max-height + overflow-y keep multi-line errors scrolling within. */
 .kiln-yaml-errors {
-  flex-shrink: 0;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
   border-top: 1px solid var(--kiln-oxide-red);
-  background: rgba(183, 65, 14, 0.08);
+  background: linear-gradient(rgba(183, 65, 14, 0.08), rgba(183, 65, 14, 0.08)),
+    var(--kiln-char);
   padding: 6px 12px;
   max-height: 80px;
   overflow-y: auto;
