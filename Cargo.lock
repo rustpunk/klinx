@@ -3454,6 +3454,7 @@ dependencies = [
  "petgraph",
  "regex",
  "rfd 0.15.4",
+ "saphyr-parser-bw",
  "serde",
  "serde-saphyr",
  "serde_json",

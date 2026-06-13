@@ -12,6 +12,12 @@ toml = "0.8"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde-saphyr = { version = "=0.0.23", features = ["miette"] }
+# `saphyr-parser-bw` is the span-tracking YAML event parser that `serde-saphyr`
+# already pulls in transitively (see Cargo.lock). Depending on it directly — at
+# the exact same version — adds zero new crates to the graph, whereas the
+# upstream `saphyr`/`saphyr-parser` crate would duplicate the parser. The YAML
+# syntax highlighter walks its event stream to classify source spans.
+saphyr-parser-bw = "=0.0.611"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 indexmap = { version = "2", features = ["serde"] }
