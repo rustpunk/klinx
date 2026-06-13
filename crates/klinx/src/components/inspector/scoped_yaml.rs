@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::components::yaml_sidebar::YamlLine;
 use crate::components::yaml_sidebar::tokenizer::tokenize;
 use crate::state::use_app_state;
 use crate::sync::compute_yaml_ranges;
@@ -63,19 +64,10 @@ pub fn ScopedYaml(stage_id: String) -> Element {
                 div {
                     class: "kiln-yaml-code",
                     for (i, line_tokens) in scoped_lines.iter().enumerate() {
-                        div {
+                        YamlLine {
                             key: "scoped-{i}",
-                            class: "kiln-yaml-line",
-                            for (j, token) in line_tokens.iter().enumerate() {
-                                span {
-                                    key: "tok-{i}-{j}",
-                                    "data-token": token.kind.as_data_attr(),
-                                    "{token.text}"
-                                }
-                            }
-                            if line_tokens.iter().all(|t| t.text.is_empty()) {
-                                "\u{00A0}"
-                            }
+                            tokens: line_tokens.clone(),
+                            selected: false,
                         }
                     }
                 }

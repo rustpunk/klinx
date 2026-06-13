@@ -4,8 +4,8 @@ use crate::perf::perf_trace;
 use crate::state::use_app_state;
 // The blame components read git state from the tab manager directly.
 use crate::state::TabManagerState;
-use crate::sync::EditSource;
 
+use super::highlight::EditorPane;
 use super::tokenizer::tokenize;
 
 /// Full-height YAML sidebar with syntax-highlighted overlay and editable textarea.
@@ -53,7 +53,6 @@ pub fn YamlSidebar() -> Element {
     // Schema warnings for YAML squiggles
     let _warnings = (state.schema_warnings)();
 
-    let text = (state.yaml_text)();
     let is_editable = true;
 
     // Blame visibility state — provided as context for blame sub-components.
@@ -104,65 +103,13 @@ pub fn YamlSidebar() -> Element {
                     }
                 }
 
-                // Editor container: syntax overlay + textarea stacked
-                div {
-                    class: "kiln-yaml-editor",
-
-                    // Syntax-highlighted overlay (read-only visual layer)
-                    div {
-                        class: "kiln-yaml-highlight",
-                        for (i, line_tokens) in raw_lines.read().iter().enumerate() {
-                            {
-                                let line_num = i + 1;
-                                let in_range = sel_range
-                                    .is_some_and(|(s, e)| line_num >= s && line_num <= e);
-                                rsx! {
-                                    div {
-                                        key: "line-{i}",
-                                        class: "kiln-yaml-line",
-                                        "data-selected": if in_range { "true" },
-                                        for (j, token) in line_tokens.iter().enumerate() {
-                                            span {
-                                                key: "tok-{i}-{j}",
-                                                "data-token": token.kind.as_data_attr(),
-                                                "{token.text}"
-                                            }
-                                        }
-                                        if line_tokens.iter().all(|t| t.text.is_empty()) {
-                                            "\u{00A0}"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Transparent textarea (captures input)
-                    if is_editable {
-                        textarea {
-                            class: "kiln-yaml-textarea",
-                            spellcheck: "false",
-                            value: "{text}",
-                            oninput: move |e: FormEvent| {
-                                // Keep yaml_text immediate (textarea echo + undo);
-                                // only flip edit_source on a real transition so it
-                                // doesn't churn the parse/snapshot effects per key.
-                                let mut src = state.edit_source;
-                                if *src.peek() != EditSource::Yaml {
-                                    src.set(EditSource::Yaml);
-                                }
-                                let mut yaml = state.yaml_text;
-                                yaml.set(e.value());
-                            },
-                        }
-                    } else {
-                        textarea {
-                            class: "kiln-yaml-textarea kiln-yaml-textarea--readonly",
-                            spellcheck: "false",
-                            readonly: true,
-                            value: "{text}",
-                        }
-                    }
+                // Editor container: virtualized syntax overlay + textarea.
+                // Lives in its own component so scrolling re-renders only the
+                // editor, not the gutters.
+                EditorPane {
+                    lines: raw_lines,
+                    selected_range: sel_range,
+                    editable: is_editable,
                 }
             }
 

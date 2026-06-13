@@ -1811,6 +1811,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dioxus-nox-virtualize"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "000846ca1c88f733820cf1974416db461b02a06fa5bba6d966697b9b3b80f771"
+
+[[package]]
 name = "dioxus-rsx"
 version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3440,6 +3446,7 @@ dependencies = [
  "dioxus",
  "dioxus-nox-cmdk",
  "dioxus-nox-select",
+ "dioxus-nox-virtualize",
  "dirs",
  "indexmap",
  "klinx-git",
