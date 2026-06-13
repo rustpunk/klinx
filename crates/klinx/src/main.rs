@@ -53,6 +53,7 @@ mod cxl_bridge;
 mod debug_state;
 mod file_ops;
 mod fs_watcher;
+mod hooks;
 mod keyboard;
 mod notes;
 mod perf;

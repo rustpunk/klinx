@@ -267,49 +267,24 @@ pub fn AppShell() -> Element {
         });
     }
 
-    // ── Session persistence: save on quit + periodic autosave ─────────────
-    // use_drop fires when AppShell's scope drops (window close, app exit).
-    use_drop({
-        let tabs = tabs;
-        let channel_state = channel_state;
-        move || {
-            workspace::save_full_session(
-                &workspace.peek(),
-                &tabs.peek(),
-                *active_tab_id.peek(),
-                *active_context.peek(),
-                *pipeline_layout.peek(),
-                *activity_bar_visible.peek(),
-                &channel_state.peek(),
-                *theme.peek(),
-                window_geom.peek().clone(),
-            );
-        }
-    });
-
-    // Periodic autosave: flush state to disk every 5 seconds.
-    // Catches all state changes even if the user never switches tabs.
-    // Worst case on force-kill: lose last 5 seconds of layout/tab state.
-    use_future(move || {
-        let tabs = tabs;
-        let channel_state = channel_state;
-        async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                workspace::save_full_session(
-                    &workspace.peek(),
-                    &tabs.peek(),
-                    *active_tab_id.peek(),
-                    *active_context.peek(),
-                    *pipeline_layout.peek(),
-                    *activity_bar_visible.peek(),
-                    &channel_state.peek(),
-                    *theme.peek(),
-                    window_geom.peek().clone(),
-                );
-            }
-        }
-    });
+    // ── Session persistence: save on quit, 5s autosave, tab-snapshot sync ─
+    crate::hooks::use_session_persistence(
+        workspace,
+        tabs,
+        active_tab_id,
+        active_context,
+        pipeline_layout,
+        activity_bar_visible,
+        channel_state,
+        theme,
+        window_geom,
+        yaml_text,
+        pipeline,
+        partial_pipeline,
+        parse_errors,
+        selected_stages,
+        edit_source,
+    );
 
     // ── Toast + confirm dialog ───────────────────────────────────────────
     let toast_message: Signal<Option<ToastState>> = use_signal(|| None);
@@ -583,37 +558,6 @@ pub fn AppShell() -> Element {
                 schema_warnings.set(warnings);
             } else {
                 schema_warnings.set(Vec::new());
-            }
-        });
-    }
-
-    // ── Sync active tab snapshot from signals (debounced) ────────────────
-    // Keeps the active tab snapshot current for is_dirty()/save. Subscribes to
-    // the parse OUTPUTS (pipeline/partial/errors) — which the parse effect above
-    // already debounces — plus selection, so `tabs` is written ~once per typing
-    // pause instead of per keystroke (no tab-bar re-render on every character).
-    // yaml_text/edit_source are read non-reactively. The dirty dot therefore
-    // appears ~150ms after typing starts; save/close paths call
-    // `flush_active_snapshot` first so they never act on stale text (keyboard.rs).
-    {
-        use_effect(move || {
-            let pl = (pipeline)();
-            let pp = (partial_pipeline)();
-            let errs = (parse_errors)();
-            let sel = selected_stages.read().iter().next().cloned();
-
-            if let Some(active_id) = (active_tab_id)() {
-                let text = yaml_text.peek().clone();
-                let src = *edit_source.peek();
-                let mut tabs_w = tabs.write();
-                if let Some(tab) = tabs_w.iter_mut().find(|t| t.id == active_id) {
-                    tab.snapshot.yaml_text = text;
-                    tab.snapshot.pipeline = pl;
-                    tab.snapshot.partial_pipeline = pp;
-                    tab.snapshot.parse_errors = errs;
-                    tab.snapshot.edit_source = src;
-                    tab.snapshot.selected_stage = sel;
-                }
             }
         });
     }
