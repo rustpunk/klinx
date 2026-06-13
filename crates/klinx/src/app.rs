@@ -35,6 +35,14 @@ use crate::sync::EditSource;
 use crate::tab::{TabEntry, TabId};
 use crate::workspace;
 
+/// Idle delay before typed-in parse errors surface in the YAML error bar.
+///
+/// Longer than the 150ms canvas-parse debounce so the cheap syntax/canvas
+/// update stays responsive while the error *panel* waits for the user to pause
+/// — mirroring CodeMirror's linter (750ms) and LSP diagnostics (a few hundred
+/// ms quiet period). Tune the error-bar settle feel here (#43).
+const ERROR_SETTLE_MS: u64 = 500;
+
 #[component]
 pub fn AppShell() -> Element {
     // ── Global signals (shared across all tabs) ──────────────────────────
@@ -44,6 +52,12 @@ pub fn AppShell() -> Element {
     let mut yaml_text = use_signal(String::new);
     let mut pipeline = use_signal(|| None);
     let mut parse_errors = use_signal(Vec::new);
+    // What the YAML error bar renders. Decoupled from `parse_errors` so the bar
+    // doesn't pop up or flicker while typing (#43): for Yaml-sourced edits it is
+    // committed only after a ~500ms idle settle; for non-typing transitions
+    // (tab switch / file open / inspector edits) it tracks `parse_errors`
+    // immediately. While typing it holds its last committed value.
+    let mut visible_errors = use_signal(Vec::new);
     let mut edit_source = use_signal(|| EditSource::None);
     let mut selected_stages = use_signal(std::collections::HashSet::<String>::new);
     let schema_warnings = use_signal(Vec::new);
@@ -54,6 +68,11 @@ pub fn AppShell() -> Element {
     // only the most recent debounce task fires.
     let mut parse_trigger = use_signal(|| 0u64);
     let mut debounce_gen = use_signal(|| 0u64);
+    // Error-settle debounce generation. Mirrors `debounce_gen` but on a longer
+    // (`ERROR_SETTLE_MS`) timer so the error bar only updates once the user
+    // pauses; identifies the latest pending keystroke so stale settle tasks
+    // no-op. See the error-settle effect below.
+    let mut error_settle_gen = use_signal(|| 0u64);
     let channel_view_mode = use_signal(|| ChannelViewMode::Raw);
     let compiled_plan: Signal<Option<std::sync::Arc<clinker_core::plan::CompiledPlan>>> =
         use_signal(|| None);
@@ -241,6 +260,11 @@ pub fn AppShell() -> Element {
                 pipeline.set(new_tab.snapshot.pipeline.clone());
                 partial_pipeline.set(new_tab.snapshot.partial_pipeline.clone());
                 parse_errors.set(new_tab.snapshot.parse_errors.clone());
+                // Show the arriving tab's errors immediately — never the
+                // departing tab's, and without waiting on the settle timer.
+                // Opening a file is also a tab switch (active_tab_id changes),
+                // so this one assignment covers both open and switch (#43).
+                visible_errors.set(new_tab.snapshot.parse_errors.clone());
                 selected_stages.set(new_tab.snapshot.selected_stage.iter().cloned().collect());
 
                 // If tab was loaded from disk (edit_source == None) and has content,
@@ -260,6 +284,7 @@ pub fn AppShell() -> Element {
             pipeline.set(None);
             partial_pipeline.set(None);
             parse_errors.set(Vec::new());
+            visible_errors.set(Vec::new());
             edit_source.set(EditSource::None);
             selected_stages.set(std::collections::HashSet::new());
         }
@@ -300,6 +325,7 @@ pub fn AppShell() -> Element {
         pipeline,
         partial_pipeline,
         parse_errors,
+        visible_errors,
         edit_source,
         schema_warnings,
         channel_view_mode,
@@ -401,6 +427,47 @@ pub fn AppShell() -> Element {
                     parse_trigger.set(next);
                 }
             });
+        });
+    }
+
+    // ── Error-settle: commit `parse_errors` → `visible_errors` ────────────
+    // Decouples error *display* from the parse so the YAML error bar doesn't
+    // pop up or flicker mid-keystroke (#43). The effect subscribes only to the
+    // keystroke signal (`yaml_text`) — never to `visible_errors`, which it
+    // writes — so there is no re-render loop. It peeks `edit_source` and
+    // `parse_errors` non-reactively, exactly like the 150ms debounce/parse
+    // effects, so committing `visible_errors` never re-arms it.
+    //
+    // - Yaml (typing): arm an `ERROR_SETTLE_MS` timer keyed on
+    //   `error_settle_gen`; only the latest pending keystroke's task fires,
+    //   committing the freshest `parse_errors` once the user pauses. While the
+    //   timer is pending, `visible_errors` is untouched → the bar holds its
+    //   last state (no flicker, no eager pop-up).
+    // - Non-Yaml (inspector serialize, programmatic transitions): commit
+    //   immediately so the bar never lingers on stale typing-errors. Tab switch
+    //   and file open are handled synchronously in the tab-switch block above;
+    //   this branch covers the inspector→YAML write, which clears parse_errors.
+    {
+        use_effect(move || {
+            let _ = (yaml_text)(); // re-arm on every keystroke / programmatic write
+            if *edit_source.peek() == EditSource::Yaml {
+                let generation = *error_settle_gen.peek() + 1;
+                error_settle_gen.set(generation);
+                spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(ERROR_SETTLE_MS)).await;
+                    // Fire only if no newer keystroke arrived during the wait.
+                    if *error_settle_gen.peek() == generation {
+                        visible_errors.set(parse_errors.peek().clone());
+                    }
+                });
+            } else {
+                // Non-typing source: errors are authoritative now. Bump the
+                // generation so any in-flight settle task from prior typing
+                // no-ops instead of clobbering this immediate commit.
+                let generation = *error_settle_gen.peek() + 1;
+                error_settle_gen.set(generation);
+                visible_errors.set(parse_errors.peek().clone());
+            }
         });
     }
 

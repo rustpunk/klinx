@@ -252,7 +252,20 @@ pub struct AppState {
     /// Partial pipeline from graceful degradation.
     pub partial_pipeline: Signal<Option<PartialPipelineConfig>>,
     /// Parse error messages (empty when YAML is valid).
+    ///
+    /// Raw, immediate parse output: updated on every debounced parse (~150ms)
+    /// and consumed by the canvas, inspector, and the title-bar validity LED.
+    /// The YAML error bar renders `visible_errors`, not this — see #43.
     pub parse_errors: Signal<Vec<String>>,
+    /// Parse errors as displayed in the YAML sidebar's error bar.
+    ///
+    /// Decoupled from `parse_errors` to stop the bar flickering while the user
+    /// is mid-keystroke (issue #43). For typing (`EditSource::Yaml`) it tracks
+    /// `parse_errors` only after a ~500ms idle settle; for non-typing
+    /// transitions (tab switch, file open, inspector edits) it tracks
+    /// `parse_errors` immediately. Holds its last value while typing, so the
+    /// bar never pops up or churns between keystrokes.
+    pub visible_errors: Signal<Vec<String>>,
     /// Which view last edited the model (sync loop prevention).
     pub edit_source: Signal<EditSource>,
     /// Schema validation warnings for the current pipeline.
