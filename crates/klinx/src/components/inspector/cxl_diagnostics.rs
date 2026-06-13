@@ -15,17 +15,17 @@ pub fn CxlDiagnostics(diagnostics: Vec<CxlDiagnostic>) -> Element {
 
     rsx! {
         div {
-            class: "kiln-cxl-diagnostics",
+            class: "klinx-cxl-diagnostics",
             for (i, diag) in diagnostics.iter().enumerate() {
                 div {
                     key: "diag-{i}",
                     class: match diag.severity {
-                        DiagSeverity::Error => "kiln-cxl-diag kiln-cxl-diag--error",
+                        DiagSeverity::Error => "klinx-cxl-diag klinx-cxl-diag--error",
                     },
-                    span { class: "kiln-cxl-diag-msg", "{diag.message}" }
+                    span { class: "klinx-cxl-diag-msg", "{diag.message}" }
                     if !diag.how_to_fix.is_empty() {
                         span {
-                            class: "kiln-cxl-diag-fix",
+                            class: "klinx-cxl-diag-fix",
                             " \u{2192} {diag.how_to_fix}"
                         }
                     }

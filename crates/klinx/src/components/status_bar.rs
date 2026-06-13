@@ -29,16 +29,16 @@ pub fn StatusBar() -> Element {
 
     rsx! {
         div {
-            class: "kiln-status-bar",
+            class: "klinx-status-bar",
 
             // ── Context indicator ──────────────────────────────────────
             div {
-                class: "kiln-status-segment kiln-status-segment--context",
+                class: "klinx-status-segment klinx-status-segment--context",
                 "klinx ●"
             }
-            div { class: "kiln-status-divider" }
+            div { class: "klinx-status-divider" }
             div {
-                class: "kiln-status-segment",
+                class: "klinx-status-segment",
                 match current_ctx {
                     NavigationContext::Pipeline => {
                         let mode = (state.pipeline_layout)();
@@ -47,17 +47,17 @@ pub fn StatusBar() -> Element {
                     other => other.label().to_string(),
                 }
             }
-            div { class: "kiln-status-divider" }
+            div { class: "klinx-status-divider" }
 
             // ── Git segments (shown in Pipeline + Git contexts) ──
             if matches!(current_ctx, NavigationContext::Pipeline | NavigationContext::Git) {
                 if let Some(ref status) = git {
                     // Branch segment (clickable → branch switcher)
                     div {
-                        class: "kiln-status-segment kiln-status-segment--branch kiln-status-segment--clickable",
+                        class: "klinx-status-segment klinx-status-segment--branch klinx-status-segment--clickable",
                         onclick: move |_| show_branch_switcher.set(!is_switcher_open),
-                        span { class: "kiln-status__branch-icon", "⑂" }
-                        span { class: "kiln-status__branch-name",
+                        span { class: "klinx-status__branch-icon", "⑂" }
+                        span { class: "klinx-status__branch-name",
                             {
                                 if status.branch.len() > 20 {
                                     format!("{}…", &status.branch[..19])
@@ -67,36 +67,36 @@ pub fn StatusBar() -> Element {
                             }
                         }
                         if status.ahead > 0 {
-                            span { class: "kiln-status__ahead", "↑{status.ahead}" }
+                            span { class: "klinx-status__ahead", "↑{status.ahead}" }
                         }
                         if status.behind > 0 {
-                            span { class: "kiln-status__behind", "↓{status.behind}" }
+                            span { class: "klinx-status__behind", "↓{status.behind}" }
                         }
                     }
 
-                    div { class: "kiln-status-divider" }
+                    div { class: "klinx-status-divider" }
 
                     // Changes segment (clickable → Git context)
                     if status.has_changes() {
                         div {
-                            class: "kiln-status-segment kiln-status-segment--changes kiln-status-segment--clickable",
+                            class: "klinx-status-segment klinx-status-segment--changes klinx-status-segment--clickable",
                             onclick: move |_| {
                                 switch_context(&state, &tab_mgr, NavigationContext::Git);
                             },
                             if status.added > 0 {
-                                span { class: "kiln-status__added", "+{status.added}" }
+                                span { class: "klinx-status__added", "+{status.added}" }
                             }
                             if status.modified > 0 {
-                                span { class: "kiln-status__modified", "~{status.modified}" }
+                                span { class: "klinx-status__modified", "~{status.modified}" }
                             }
                             if status.deleted > 0 {
-                                span { class: "kiln-status__deleted", "−{status.deleted}" }
+                                span { class: "klinx-status__deleted", "−{status.deleted}" }
                             }
                             if status.untracked > 0 {
-                                span { class: "kiln-status__untracked", "?{status.untracked}" }
+                                span { class: "klinx-status__untracked", "?{status.untracked}" }
                             }
                         }
-                        div { class: "kiln-status-divider" }
+                        div { class: "klinx-status-divider" }
                     }
                 }
             }
@@ -104,17 +104,17 @@ pub fn StatusBar() -> Element {
             // ── Pipeline context: cursor, encoding, language ────────────
             if current_ctx == NavigationContext::Pipeline {
                 div {
-                    class: "kiln-status-segment kiln-status-segment--cursor",
+                    class: "klinx-status-segment klinx-status-segment--cursor",
                     "Ln 1, Col 1"
                 }
-                div { class: "kiln-status-divider" }
+                div { class: "klinx-status-divider" }
                 div {
-                    class: "kiln-status-segment kiln-status-segment--encoding",
+                    class: "klinx-status-segment klinx-status-segment--encoding",
                     "UTF-8"
                 }
-                div { class: "kiln-status-divider" }
+                div { class: "klinx-status-divider" }
                 div {
-                    class: "kiln-status-segment kiln-status-segment--lang",
+                    class: "klinx-status-segment klinx-status-segment--lang",
                     "YAML"
                 }
             }
@@ -125,14 +125,14 @@ pub fn StatusBar() -> Element {
             {
                 if let Some(ref config) = (state.pipeline)() {
                     div {
-                        class: "kiln-status-segment",
+                        class: "klinx-status-segment",
                         "{config.transform_node_count()} stages"
                     }
                 }
             }
 
             // ── Spacer ─────────────────────────────────────────────────
-            div { class: "kiln-status-spacer" }
+            div { class: "klinx-status-spacer" }
 
             // ── Theme toggle ───────────────────────────────────────────
             {
@@ -143,21 +143,21 @@ pub fn StatusBar() -> Element {
                 };
                 rsx! {
                     button {
-                        class: "kiln-status-segment kiln-status-segment--theme kiln-status-segment--clickable",
+                        class: "klinx-status-segment klinx-status-segment--theme klinx-status-segment--clickable",
                         title: "Toggle theme (Ctrl+Shift+T)",
                         onclick: move |_| {
                             tab_mgr.theme.set(current_theme.toggle());
                         },
                         "{theme_label}"
                     }
-                    div { class: "kiln-status-divider" }
+                    div { class: "klinx-status-divider" }
                 }
             }
 
             // ── Git engine indicator ────────────────────────────────────
             if git.is_some() {
                 div {
-                    class: "kiln-status-segment kiln-status-segment--engine",
+                    class: "klinx-status-segment klinx-status-segment--engine",
                     "git"
                 }
             }
@@ -206,18 +206,18 @@ fn BranchSwitcher(on_close: EventHandler<()>) -> Element {
     rsx! {
         // Backdrop
         div {
-            class: "kiln-branch-switcher-backdrop",
+            class: "klinx-branch-switcher-backdrop",
             onclick: move |_| on_close.call(()),
         }
 
         // Dropdown
         div {
-            class: "kiln-branch-switcher",
+            class: "klinx-branch-switcher",
             onclick: move |e: MouseEvent| e.stop_propagation(),
 
             // Search input
             input {
-                class: "kiln-branch-switcher__search",
+                class: "klinx-branch-switcher__search",
                 r#type: "text",
                 placeholder: "Search branches...",
                 value: "{query}",
@@ -226,7 +226,7 @@ fn BranchSwitcher(on_close: EventHandler<()>) -> Element {
             }
 
             // Branch list
-            div { class: "kiln-branch-switcher__list",
+            div { class: "klinx-branch-switcher__list",
                 for branch in filtered {
                     {
                         let name = branch.name.clone();
@@ -237,9 +237,9 @@ fn BranchSwitcher(on_close: EventHandler<()>) -> Element {
                         rsx! {
                             div {
                                 class: if is_current {
-                                    "kiln-branch-switcher__item kiln-branch-switcher__item--current"
+                                    "klinx-branch-switcher__item klinx-branch-switcher__item--current"
                                 } else {
-                                    "kiln-branch-switcher__item"
+                                    "klinx-branch-switcher__item"
                                 },
                                 onclick: {
                                     let name = name.clone();
@@ -252,14 +252,14 @@ fn BranchSwitcher(on_close: EventHandler<()>) -> Element {
                                 },
 
                                 if is_current {
-                                    span { class: "kiln-branch-switcher__dot", "●" }
+                                    span { class: "klinx-branch-switcher__dot", "●" }
                                 }
-                                span { class: "kiln-branch-switcher__name", "{name}" }
+                                span { class: "klinx-branch-switcher__name", "{name}" }
                                 if ahead > 0 {
-                                    span { class: "kiln-status__ahead", "↑{ahead}" }
+                                    span { class: "klinx-status__ahead", "↑{ahead}" }
                                 }
                                 if behind > 0 {
-                                    span { class: "kiln-status__behind", "↓{behind}" }
+                                    span { class: "klinx-status__behind", "↓{behind}" }
                                 }
                             }
                         }
@@ -268,11 +268,11 @@ fn BranchSwitcher(on_close: EventHandler<()>) -> Element {
             }
 
             // New branch section
-            div { class: "kiln-branch-switcher__footer",
+            div { class: "klinx-branch-switcher__footer",
                 if show_new {
-                    div { class: "kiln-branch-switcher__new-row",
+                    div { class: "klinx-branch-switcher__new-row",
                         input {
-                            class: "kiln-branch-switcher__new-input",
+                            class: "klinx-branch-switcher__new-input",
                             r#type: "text",
                             placeholder: "New branch name...",
                             value: "{new_branch_name}",
@@ -291,7 +291,7 @@ fn BranchSwitcher(on_close: EventHandler<()>) -> Element {
                     }
                 } else {
                     button {
-                        class: "kiln-branch-switcher__new-btn",
+                        class: "klinx-branch-switcher__new-btn",
                         onclick: move |_| new_branch_input.set(true),
                         "+ New Branch"
                     }

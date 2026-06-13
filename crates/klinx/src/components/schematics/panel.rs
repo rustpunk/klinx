@@ -28,31 +28,31 @@ pub fn SchematicsPanel() -> Element {
             let stages = pipeline_view.stages;
             return rsx! {
                 div {
-                    class: "kiln-schematics",
-                    div { class: "kiln-schematics-indicator" }
+                    class: "klinx-schematics",
+                    div { class: "klinx-schematics-indicator" }
                     FlowBar { stages: stages.clone() }
                     div {
-                        class: "kiln-schematics-content",
+                        class: "klinx-schematics-content",
                         div {
-                            class: "kiln-schematics-summary",
+                            class: "klinx-schematics-summary",
                             div {
-                                class: "kiln-schematics-section-header",
-                                span { class: "kiln-schematics-diamond", "\u{25C7}" }
-                                span { class: "kiln-schematics-section-title", "PARTIAL PIPELINE (errors present)" }
-                                span { class: "kiln-schematics-section-rule" }
+                                class: "klinx-schematics-section-header",
+                                span { class: "klinx-schematics-diamond", "\u{25C7}" }
+                                span { class: "klinx-schematics-section-title", "PARTIAL PIPELINE (errors present)" }
+                                span { class: "klinx-schematics-section-rule" }
                             }
                         }
                         for (i, stage) in stages.iter().enumerate() {
                             if i > 0 {
                                 div {
-                                    class: "kiln-schematics-arrow",
+                                    class: "klinx-schematics-arrow",
                                     svg {
                                         width: "20",
                                         height: "24",
                                         view_box: "0 0 20 24",
                                         line {
                                             x1: "10", y1: "0", x2: "10", y2: "18",
-                                            stroke: "var(--kiln-verdigris)",
+                                            stroke: "var(--klinx-verdigris)",
                                             stroke_width: "1.5",
                                             stroke_dasharray: "4 3",
                                             stroke_opacity: "0.5",
@@ -60,7 +60,7 @@ pub fn SchematicsPanel() -> Element {
                                         polyline {
                                             points: "5,16 10,22 15,16",
                                             fill: "none",
-                                            stroke: "var(--kiln-verdigris)",
+                                            stroke: "var(--klinx-verdigris)",
                                             stroke_width: "1.5",
                                             stroke_opacity: "0.7",
                                             stroke_linejoin: "round",
@@ -85,9 +85,9 @@ pub fn SchematicsPanel() -> Element {
 
         return rsx! {
             div {
-                class: "kiln-schematics",
+                class: "klinx-schematics",
                 div {
-                    class: "kiln-schematics-empty",
+                    class: "klinx-schematics-empty",
                     "No pipeline loaded \u{2014} edit the YAML to see schematics"
                 }
             }
@@ -117,39 +117,39 @@ pub fn SchematicsPanel() -> Element {
 
     rsx! {
         div {
-            class: "kiln-schematics",
+            class: "klinx-schematics",
 
             // ── Mode indicator (2px verdigris bar) ────────────────────────
-            div { class: "kiln-schematics-indicator" }
+            div { class: "klinx-schematics-indicator" }
 
             // ── Flow bar (compact horizontal strip) ───────────────────────
             FlowBar { stages: stages.clone() }
 
             // ── Content area (scrollable, Blueprint gridlines) ────────────
             div {
-                class: "kiln-schematics-content",
+                class: "klinx-schematics-content",
 
                 // Channel banner (when documenting resolved pipeline)
                 if let Some(ref channel_id) = channel_banner {
                     div {
-                        class: "kiln-schematics-channel-banner",
-                        span { class: "kiln-schematics-channel-label", "CHANNEL" }
-                        span { class: "kiln-schematics-channel-name", "{channel_id}" }
-                        span { class: "kiln-schematics-channel-mode", "RESOLVED VIEW" }
+                        class: "klinx-schematics-channel-banner",
+                        span { class: "klinx-schematics-channel-label", "CHANNEL" }
+                        span { class: "klinx-schematics-channel-name", "{channel_id}" }
+                        span { class: "klinx-schematics-channel-mode", "RESOLVED VIEW" }
                     }
                 }
 
                 // Pipeline summary header
                 div {
-                    class: "kiln-schematics-summary",
+                    class: "klinx-schematics-summary",
                     div {
-                        class: "kiln-schematics-section-header",
-                        span { class: "kiln-schematics-diamond", "\u{25C7}" }
-                        span { class: "kiln-schematics-section-title", "PIPELINE SUMMARY" }
-                        span { class: "kiln-schematics-section-rule" }
+                        class: "klinx-schematics-section-header",
+                        span { class: "klinx-schematics-diamond", "\u{25C7}" }
+                        span { class: "klinx-schematics-section-title", "PIPELINE SUMMARY" }
+                        span { class: "klinx-schematics-section-rule" }
                     }
                     div {
-                        class: "kiln-schematics-summary-text",
+                        class: "klinx-schematics-summary-text",
                         "{pipeline_name} \u{2014} {stages.len()} stage(s)"
                     }
                 }
@@ -159,14 +159,14 @@ pub fn SchematicsPanel() -> Element {
                     // Flow arrow between cards (except before the first)
                     if i > 0 {
                         div {
-                            class: "kiln-schematics-arrow",
+                            class: "klinx-schematics-arrow",
                             svg {
                                 width: "20",
                                 height: "24",
                                 view_box: "0 0 20 24",
                                 line {
                                     x1: "10", y1: "0", x2: "10", y2: "18",
-                                    stroke: "var(--kiln-verdigris)",
+                                    stroke: "var(--klinx-verdigris)",
                                     stroke_width: "1.5",
                                     stroke_dasharray: "4 3",
                                     stroke_opacity: "0.5",
@@ -174,7 +174,7 @@ pub fn SchematicsPanel() -> Element {
                                 polyline {
                                     points: "5,16 10,22 15,16",
                                     fill: "none",
-                                    stroke: "var(--kiln-verdigris)",
+                                    stroke: "var(--klinx-verdigris)",
                                     stroke_width: "1.5",
                                     stroke_opacity: "0.7",
                                     stroke_linejoin: "round",
@@ -196,10 +196,10 @@ pub fn SchematicsPanel() -> Element {
 
                 // Footer
                 div {
-                    class: "kiln-schematics-footer",
-                    span { class: "kiln-schematics-footer-rule" }
-                    span { class: "kiln-schematics-footer-label", "KLINX AUTODOC \u{00B7} BLUEPRINT" }
-                    span { class: "kiln-schematics-footer-rule" }
+                    class: "klinx-schematics-footer",
+                    span { class: "klinx-schematics-footer-rule" }
+                    span { class: "klinx-schematics-footer-label", "KLINX AUTODOC \u{00B7} BLUEPRINT" }
+                    span { class: "klinx-schematics-footer-rule" }
                 }
             }
         }

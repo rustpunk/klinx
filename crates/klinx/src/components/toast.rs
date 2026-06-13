@@ -51,7 +51,7 @@ pub fn ToastOverlay() -> Element {
     if let Some(t) = current {
         rsx! {
             div {
-                class: "kiln-toast",
+                class: "klinx-toast",
                 style: "border-left-color: {t.accent};",
                 onclick: move |_| {
                     toast.set(None);

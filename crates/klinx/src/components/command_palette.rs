@@ -52,13 +52,13 @@ pub fn CommandPalette() -> Element {
     rsx! {
         // Backdrop
         div {
-            class: "kiln-palette-backdrop",
+            class: "klinx-palette-backdrop",
             onclick: move |_| tab_mgr.show_command_palette.set(false),
         }
 
         // Palette container
         div {
-            class: "kiln-palette",
+            class: "klinx-palette",
             onclick: move |e: MouseEvent| e.stop_propagation(),
 
             CommandRoot {
@@ -99,11 +99,11 @@ pub fn CommandPalette() -> Element {
                                                     value: id.clone(),
                                                     keywords: vec![desc.clone()],
 
-                                                    div { class: "kiln-palette-item",
-                                                        span { class: "kiln-palette-item__label", "{label}" }
-                                                        span { class: "kiln-palette-item__desc", "{desc}" }
+                                                    div { class: "klinx-palette-item",
+                                                        span { class: "klinx-palette-item__label", "{label}" }
+                                                        span { class: "klinx-palette-item__desc", "{desc}" }
                                                         if let Some(ref sc) = shortcut {
-                                                            span { class: "kiln-palette-item__shortcut", "{sc}" }
+                                                            span { class: "klinx-palette-item__shortcut", "{sc}" }
                                                         }
                                                     }
                                                 }
@@ -151,35 +151,18 @@ fn execute_command(id: &str, tab_mgr: &mut TabManagerState) {
             app.pipeline_layout.set(PipelineLayoutMode::Schematics);
         }
 
-        // ── Search/panel commands (switch to Pipeline first) ───
-        "search.text" => {
+        // ── Panel commands (switch to Pipeline first, then toggle) ───
+        "explorer.toggle" | "search.text" | "search.schemas" | "composition.browse" => {
+            let target = match id {
+                "explorer.toggle" => LeftPanel::Explorer,
+                "search.text" => LeftPanel::Search,
+                "search.schemas" => LeftPanel::Schemas,
+                _ => LeftPanel::Compositions,
+            };
             switch_context(&app, tab_mgr, NavigationContext::Pipeline);
-            let current = (tab_mgr.left_panel)();
-            tab_mgr.left_panel.set(if current == LeftPanel::Search {
-                LeftPanel::None
-            } else {
-                LeftPanel::Search
-            });
-        }
-        "search.schemas" => {
-            switch_context(&app, tab_mgr, NavigationContext::Pipeline);
-            let current = (tab_mgr.left_panel)();
-            tab_mgr.left_panel.set(if current == LeftPanel::Schemas {
-                LeftPanel::None
-            } else {
-                LeftPanel::Schemas
-            });
-        }
-        "composition.browse" => {
-            switch_context(&app, tab_mgr, NavigationContext::Pipeline);
-            let current = (tab_mgr.left_panel)();
             tab_mgr
                 .left_panel
-                .set(if current == LeftPanel::Compositions {
-                    LeftPanel::None
-                } else {
-                    LeftPanel::Compositions
-                });
+                .set((tab_mgr.left_panel)().toggled(target));
         }
 
         // ── Template ───────────────────────────────────────────

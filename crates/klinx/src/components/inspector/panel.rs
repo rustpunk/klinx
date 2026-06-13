@@ -104,7 +104,7 @@ pub fn InspectorPanel(stage_id: String) -> Element {
 
     rsx! {
         div {
-            class: "kiln-inspector",
+            class: "klinx-inspector",
             onmousedown: move |e: MouseEvent| e.stop_propagation(),
 
             // ── Stage header ──────────────────────────────────────────────
@@ -117,27 +117,27 @@ pub fn InspectorPanel(stage_id: String) -> Element {
 
             // ── Config section (upper, always visible) ────────────────────
             div {
-                class: "kiln-inspector-config",
+                class: "klinx-inspector-config",
                 "data-compressed": if drawer_open { "true" } else { "false" },
 
                 div {
-                    class: "kiln-inspector-section",
+                    class: "klinx-inspector-section",
 
                     div {
-                        class: "kiln-section-header",
-                        span { class: "kiln-diamond", "\u{25C6}" }
-                        span { class: "kiln-section-title", "CONFIGURATION" }
-                        span { class: "kiln-section-rule" }
+                        class: "klinx-section-header",
+                        span { class: "klinx-diamond", "\u{25C6}" }
+                        span { class: "klinx-section-title", "CONFIGURATION" }
+                        span { class: "klinx-section-rule" }
                     }
 
                     if !subtitle.is_empty() {
                         div {
-                            class: "kiln-cxl-field",
-                            label { class: "kiln-cxl-label",
+                            class: "klinx-cxl-field",
+                            label { class: "klinx-cxl-label",
                                 if is_source_or_output { "PATH" } else { "DESCRIPTION" }
                             }
                             div {
-                                class: "kiln-inspector-value",
+                                class: "klinx-inspector-value",
                                 "{subtitle}"
                             }
                         }
@@ -159,13 +159,13 @@ pub fn InspectorPanel(stage_id: String) -> Element {
                 // ── Provenance section (composition nodes only) ──────────
                 if !composition_params.is_empty() {
                     div {
-                        class: "kiln-inspector-section",
+                        class: "klinx-inspector-section",
 
                         div {
-                            class: "kiln-section-header",
-                            span { class: "kiln-diamond", "\u{25C6}" }
-                            span { class: "kiln-section-title", "PROVENANCE" }
-                            span { class: "kiln-section-rule" }
+                            class: "klinx-section-header",
+                            span { class: "klinx-diamond", "\u{25C6}" }
+                            span { class: "klinx-section-title", "PROVENANCE" }
+                            span { class: "klinx-section-rule" }
                         }
 
                         for param in composition_params.iter() {
@@ -174,9 +174,9 @@ pub fn InspectorPanel(stage_id: String) -> Element {
                                 let p = param.clone();
                                 rsx! {
                                     div {
-                                        class: "kiln-provenance-field",
+                                        class: "klinx-provenance-field",
                                         div {
-                                            class: "kiln-provenance-field-name",
+                                            class: "klinx-provenance-field-name",
                                             "{p}"
                                         }
                                         super::provenance::ProvenancePanel {
@@ -201,7 +201,7 @@ pub fn InspectorPanel(stage_id: String) -> Element {
 
             // ── Drawer region (expandable) ────────────────────────────────
             div {
-                class: "kiln-drawer-region",
+                class: "klinx-drawer-region",
                 "data-open": if drawer_open { "true" } else { "false" },
 
                 match (active_drawer)() {

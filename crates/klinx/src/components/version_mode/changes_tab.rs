@@ -23,20 +23,20 @@ pub fn ChangesTab() -> Element {
     let msg = (commit_msg)();
 
     rsx! {
-        div { class: "kiln-changes-tab",
+        div { class: "klinx-changes-tab",
             // ── File list sidebar ───────────────────────────────────
-            div { class: "kiln-changes-sidebar",
+            div { class: "klinx-changes-sidebar",
                 if files.is_empty() {
-                    div { class: "kiln-changes-sidebar__empty",
+                    div { class: "klinx-changes-sidebar__empty",
                         "No changes detected."
                     }
                 }
 
                 if has_changes {
-                    div { class: "kiln-changes-sidebar__section",
-                        div { class: "kiln-changes-sidebar__header",
+                    div { class: "klinx-changes-sidebar__section",
+                        div { class: "klinx-changes-sidebar__header",
                             "CHANGES"
-                            span { class: "kiln-changes-sidebar__count", "{files.len()}" }
+                            span { class: "klinx-changes-sidebar__count", "{files.len()}" }
                         }
 
                         for file in files {
@@ -44,18 +44,18 @@ pub fn ChangesTab() -> Element {
                                 let path_str = file.path.display().to_string();
                                 let letter = file.status.letter();
                                 let status_class = match file.status {
-                                    StatusKind::Modified => "kiln-changes-file--modified",
-                                    StatusKind::Added => "kiln-changes-file--added",
-                                    StatusKind::Deleted => "kiln-changes-file--deleted",
-                                    StatusKind::Renamed => "kiln-changes-file--renamed",
-                                    StatusKind::Untracked => "kiln-changes-file--untracked",
+                                    StatusKind::Modified => "klinx-changes-file--modified",
+                                    StatusKind::Added => "klinx-changes-file--added",
+                                    StatusKind::Deleted => "klinx-changes-file--deleted",
+                                    StatusKind::Renamed => "klinx-changes-file--renamed",
+                                    StatusKind::Untracked => "klinx-changes-file--untracked",
                                 };
 
                                 rsx! {
                                     div {
-                                        class: "kiln-changes-file {status_class}",
-                                        span { class: "kiln-changes-file__status", "{letter}" }
-                                        span { class: "kiln-changes-file__path", "{path_str}" }
+                                        class: "klinx-changes-file {status_class}",
+                                        span { class: "klinx-changes-file__status", "{letter}" }
+                                        span { class: "klinx-changes-file__path", "{path_str}" }
                                     }
                                 }
                             }
@@ -65,19 +65,19 @@ pub fn ChangesTab() -> Element {
             }
 
             // ── Commit area ─────────────────────────────────────────
-            div { class: "kiln-changes-commit",
-                div { class: "kiln-changes-commit__header", "COMMIT" }
+            div { class: "klinx-changes-commit",
+                div { class: "klinx-changes-commit__header", "COMMIT" }
 
                 textarea {
-                    class: "kiln-changes-commit__input",
+                    class: "klinx-changes-commit__input",
                     placeholder: "Commit message...",
                     value: "{msg}",
                     oninput: move |e: FormEvent| commit_msg.set(e.value()),
                 }
 
-                div { class: "kiln-changes-commit__actions",
+                div { class: "klinx-changes-commit__actions",
                     button {
-                        class: "kiln-changes-commit__btn kiln-changes-commit__btn--commit",
+                        class: "klinx-changes-commit__btn klinx-changes-commit__btn--commit",
                         disabled: msg.is_empty(),
                         onclick: {
                             move |_| {
@@ -88,7 +88,7 @@ pub fn ChangesTab() -> Element {
                         "Commit"
                     }
                     button {
-                        class: "kiln-changes-commit__btn kiln-changes-commit__btn--push",
+                        class: "klinx-changes-commit__btn klinx-changes-commit__btn--push",
                         disabled: msg.is_empty(),
                         onclick: {
                             move |_| {

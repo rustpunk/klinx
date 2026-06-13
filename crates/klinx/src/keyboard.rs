@@ -12,6 +12,8 @@
 /// Theme: Ctrl+Shift+T (toggle Oxide/Enamel).
 ///
 /// Attached at the AppShell level to capture shortcuts regardless of focus.
+use std::path::Path;
+
 use dioxus::prelude::*;
 
 use crate::components::activity_bar::{navigate_back, switch_context};
@@ -49,37 +51,18 @@ pub fn handle_keyboard(event: &KeyboardEvent, tab_mgr: &mut TabManagerState) -> 
         && current_context == NavigationContext::Pipeline
         && let Key::Character(ref c) = key
     {
-        match c.as_str() {
-            "f" => {
-                let current = (tab_mgr.left_panel)();
-                tab_mgr.left_panel.set(if current == LeftPanel::Search {
-                    LeftPanel::None
-                } else {
-                    LeftPanel::Search
-                });
-                return true;
-            }
-            "e" => {
-                let current = (tab_mgr.left_panel)();
-                tab_mgr.left_panel.set(if current == LeftPanel::Schemas {
-                    LeftPanel::None
-                } else {
-                    LeftPanel::Schemas
-                });
-                return true;
-            }
-            "c" => {
-                let current = (tab_mgr.left_panel)();
-                tab_mgr
-                    .left_panel
-                    .set(if current == LeftPanel::Compositions {
-                        LeftPanel::None
-                    } else {
-                        LeftPanel::Compositions
-                    });
-                return true;
-            }
-            _ => {}
+        let panel = match c.as_str() {
+            "b" => Some(LeftPanel::Explorer),
+            "f" => Some(LeftPanel::Search),
+            "e" => Some(LeftPanel::Schemas),
+            "c" => Some(LeftPanel::Compositions),
+            _ => None,
+        };
+        if let Some(target) = panel {
+            tab_mgr
+                .left_panel
+                .set((tab_mgr.left_panel)().toggled(target));
+            return true;
         }
     }
 
@@ -334,7 +317,32 @@ pub fn open_workspace(tab_mgr: &mut TabManagerState) {
         tab_mgr.active_tab_id.set(active_id);
         // Immediately persist this as the last-used workspace
         workspace::save_last_workspace(&ws.root);
+
+        // Stopgap (#39): Open Workspace must never be a silent no-op. Summarize
+        // what loaded so a fresh workspace (no restored tabs) gives feedback.
+        // Counts are computed here because schema_index/channel_state signals are
+        // populated by effects that run *after* this workspace change.
+        let summary = {
+            let pipelines = crate::components::file_explorer::model::resolve_pipelines(&ws).len();
+            let channels = workspace::discover_channels(&ws)
+                .map(|c| c.channels.len())
+                .unwrap_or(0);
+            format!(
+                "Loaded {} \u{00B7} {pipelines} pipelines, {channels} channels",
+                ws.display_name()
+            )
+        };
+
         tab_mgr.workspace.set(Some(ws));
+
+        // Fresh workspace with nothing restored: open the explorer so the tree
+        // is immediately visible instead of a blank welcome screen (#39).
+        if active_id.is_none() {
+            tab_mgr.left_panel.set(LeftPanel::Explorer);
+        }
+
+        let mut toast: Signal<Option<ToastState>> = use_context();
+        toast_success(&mut toast, summary);
     }
 }
 
@@ -345,40 +353,48 @@ pub fn open_workspace(tab_mgr: &mut TabManagerState) {
 pub fn open_file(tab_mgr: &mut TabManagerState) {
     let starting_dir = tab_mgr.workspace.peek().as_ref().map(|ws| ws.root.clone());
     if let Some(path) = file_ops::open_file_dialog(starting_dir.as_deref()) {
-        match file_ops::read_pipeline_file(&path) {
-            Ok(yaml) => {
-                // Check if already open
-                let already_open = tab_mgr.tabs.read().iter().find_map(|t| {
-                    if t.file_path.as_ref() == Some(&path) {
-                        Some(t.id)
-                    } else {
-                        None
-                    }
-                });
+        open_path(tab_mgr, &path);
+    }
+}
 
-                if let Some(existing_id) = already_open {
-                    tab_mgr.active_tab_id.set(Some(existing_id));
-                } else {
-                    // Detect workspace from file location
-                    if let Some(ws_root) = workspace::detect_workspace(&path)
-                        && tab_mgr.workspace.peek().is_none()
-                        && let Some(ws) = workspace::load_workspace(&ws_root)
-                    {
-                        // Immediately persist as last-used workspace
-                        workspace::save_last_workspace(&ws.root);
-                        tab_mgr.workspace.set(Some(ws));
-                    }
+/// Open the file at `path` as a tab, focusing the existing tab if it is already
+/// open. Shared by the Open File dialog and the workspace explorer; shows a
+/// toast on read failure.
+///
+/// When no workspace is loaded yet, the file's enclosing workspace (if any) is
+/// adopted — matching the dialog-open behaviour for files opened from outside a
+/// workspace.
+pub fn open_path(tab_mgr: &mut TabManagerState, path: &Path) {
+    // Focus an already-open tab.
+    let already_open = tab_mgr
+        .tabs
+        .read()
+        .iter()
+        .find_map(|t| (t.file_path.as_deref() == Some(path)).then_some(t.id));
+    if let Some(existing_id) = already_open {
+        tab_mgr.active_tab_id.set(Some(existing_id));
+        return;
+    }
 
-                    let new_tab = TabEntry::from_file(path, yaml);
-                    let new_id = new_tab.id;
-                    tab_mgr.tabs.write().push(new_tab);
-                    tab_mgr.active_tab_id.set(Some(new_id));
-                }
+    match file_ops::read_pipeline_file(path) {
+        Ok(yaml) => {
+            // Detect workspace from file location when none is loaded.
+            if let Some(ws_root) = workspace::detect_workspace(path)
+                && tab_mgr.workspace.peek().is_none()
+                && let Some(ws) = workspace::load_workspace(&ws_root)
+            {
+                workspace::save_last_workspace(&ws.root);
+                tab_mgr.workspace.set(Some(ws));
             }
-            Err(e) => {
-                let mut toast: Signal<Option<ToastState>> = use_context();
-                toast_error(&mut toast, e);
-            }
+
+            let new_tab = TabEntry::from_file(path.to_path_buf(), yaml);
+            let new_id = new_tab.id;
+            tab_mgr.tabs.write().push(new_tab);
+            tab_mgr.active_tab_id.set(Some(new_id));
+        }
+        Err(e) => {
+            let mut toast: Signal<Option<ToastState>> = use_context();
+            toast_error(&mut toast, e);
         }
     }
 }

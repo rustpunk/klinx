@@ -45,20 +45,20 @@ pub fn ConflictsTab() -> Element {
     let content = (file_content)();
 
     rsx! {
-        div { class: "kiln-conflicts-tab",
+        div { class: "klinx-conflicts-tab",
             if !has_conflicts {
-                div { class: "kiln-conflicts-tab__empty",
-                    span { class: "kiln-conflicts-tab__led kiln-conflicts-tab__led--ok" }
+                div { class: "klinx-conflicts-tab__empty",
+                    span { class: "klinx-conflicts-tab__led klinx-conflicts-tab__led--ok" }
                     "No merge conflicts"
                 }
             }
 
             if has_conflicts {
                 // ── Conflict file list ───────────────────────────────
-                div { class: "kiln-conflicts-sidebar",
-                    div { class: "kiln-conflicts-sidebar__header",
+                div { class: "klinx-conflicts-sidebar",
+                    div { class: "klinx-conflicts-sidebar__header",
                         "CONFLICTS"
-                        span { class: "kiln-conflicts-sidebar__count",
+                        span { class: "klinx-conflicts-sidebar__count",
                             "{conflict_list.len()}"
                         }
                     }
@@ -69,9 +69,9 @@ pub fn ConflictsTab() -> Element {
                             let is_active = selected.as_deref() == Some(&path);
                             let is_resolved = entry.resolved;
                             let class = if is_active {
-                                "kiln-conflicts-file kiln-conflicts-file--active"
+                                "klinx-conflicts-file klinx-conflicts-file--active"
                             } else {
-                                "kiln-conflicts-file"
+                                "klinx-conflicts-file"
                             };
                             let p = path.clone();
 
@@ -92,13 +92,13 @@ pub fn ConflictsTab() -> Element {
 
                                     span {
                                         class: if is_resolved {
-                                            "kiln-conflicts-file__led kiln-conflicts-file__led--resolved"
+                                            "klinx-conflicts-file__led klinx-conflicts-file__led--resolved"
                                         } else {
-                                            "kiln-conflicts-file__led kiln-conflicts-file__led--unresolved"
+                                            "klinx-conflicts-file__led klinx-conflicts-file__led--unresolved"
                                         },
                                     }
-                                    span { class: "kiln-conflicts-file__path", "{path}" }
-                                    span { class: "kiln-conflicts-file__count", "{entry.conflict_count}" }
+                                    span { class: "klinx-conflicts-file__path", "{path}" }
+                                    span { class: "klinx-conflicts-file__count", "{entry.conflict_count}" }
                                 }
                             }
                         }
@@ -106,7 +106,7 @@ pub fn ConflictsTab() -> Element {
 
                     if all_resolved {
                         button {
-                            class: "kiln-conflicts-sidebar__merge-btn",
+                            class: "klinx-conflicts-sidebar__merge-btn",
                             onclick: move |_| {
                                 complete_merge(&mut tab_mgr, &mut conflicts);
                             },
@@ -116,14 +116,14 @@ pub fn ConflictsTab() -> Element {
                 }
 
                 // ── Conflict content area ───────────────────────────
-                div { class: "kiln-conflicts-content",
+                div { class: "klinx-conflicts-content",
                     if selected.is_none() {
-                        div { class: "kiln-conflicts-content__empty",
+                        div { class: "klinx-conflicts-content__empty",
                             "Select a file to resolve its conflicts."
                         }
                     } else if !content.is_empty() {
                         // Render conflict markers with highlighting
-                        div { class: "kiln-conflicts-content__text",
+                        div { class: "klinx-conflicts-content__text",
                             for (i, line) in content.lines().enumerate() {
                                 {
                                     let line_str = line.to_string();
@@ -131,15 +131,15 @@ pub fn ConflictsTab() -> Element {
                                         || line.starts_with("=======")
                                         || line.starts_with(">>>>>>>")
                                     {
-                                        "kiln-conflict-line kiln-conflict-line--marker"
+                                        "klinx-conflict-line klinx-conflict-line--marker"
                                     } else {
-                                        "kiln-conflict-line"
+                                        "klinx-conflict-line"
                                     };
 
                                     rsx! {
                                         div { class: "{class}",
-                                            span { class: "kiln-conflict-line__num", "{i + 1}" }
-                                            span { class: "kiln-conflict-line__text", "{line_str}" }
+                                            span { class: "klinx-conflict-line__num", "{i + 1}" }
+                                            span { class: "klinx-conflict-line__text", "{line_str}" }
                                         }
                                     }
                                 }

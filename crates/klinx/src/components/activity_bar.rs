@@ -5,7 +5,7 @@
 /// Badge indicators on Git (dirty file count).
 use dioxus::prelude::*;
 
-use crate::state::{NavigationContext, TabManagerState, use_app_state};
+use crate::state::{LeftPanel, NavigationContext, TabManagerState, use_app_state};
 
 /// Maximum entries in the navigation history stack.
 const NAV_HISTORY_CAP: usize = 50;
@@ -32,8 +32,8 @@ pub fn ActivityBar() -> Element {
 
     rsx! {
         nav {
-            class: "kiln-activity-bar",
-            class: if !activity_bar_visible { "kiln-activity-bar--hidden" },
+            class: "klinx-activity-bar",
+            class: if !activity_bar_visible { "klinx-activity-bar--hidden" },
             role: "navigation",
             "aria-label": "Activity Bar",
 
@@ -51,11 +51,42 @@ pub fn ActivityBar() -> Element {
                 }
             }
 
+            // ── Workspace explorer toggle (not a context) ──
+            ExplorerEntry {}
+
             // ── Flex spacer ──
-            div { class: "kiln-activity-bar__spacer" }
+            div { class: "klinx-activity-bar__spacer" }
 
             // ── Settings (not a context) ──
             SettingsEntry {}
+        }
+    }
+}
+
+/// Workspace explorer toggle — auxiliary entry (not a navigation context).
+///
+/// Switches to the Pipeline context and toggles the file-explorer left panel.
+/// Mirrors `SettingsEntry` (an action button, not a context switch).
+#[component]
+fn ExplorerEntry() -> Element {
+    let state = use_app_state();
+    let tab_mgr = use_context::<TabManagerState>();
+    let mut left_panel = tab_mgr.left_panel;
+    let is_active = (left_panel)() == LeftPanel::Explorer
+        && (state.active_context)() == NavigationContext::Pipeline;
+
+    rsx! {
+        button {
+            class: "klinx-activity-bar__entry",
+            class: if is_active { "klinx-activity-bar__entry--active" },
+            title: "Workspace Explorer (Alt+B)",
+            onclick: move |_| {
+                switch_context(&state, &tab_mgr, NavigationContext::Pipeline);
+                left_panel.set((left_panel)().toggled(LeftPanel::Explorer));
+            },
+
+            span { class: "klinx-activity-bar__icon", "▤" }
+            span { class: "klinx-activity-bar__label", "Files" }
         }
     }
 }
@@ -70,8 +101,8 @@ fn ActivityBarEntry(context: NavigationContext, is_active: bool, badge: Option<u
 
     rsx! {
         button {
-            class: "kiln-activity-bar__entry",
-            class: if is_active { "kiln-activity-bar__entry--active" },
+            class: "klinx-activity-bar__entry",
+            class: if is_active { "klinx-activity-bar__entry--active" },
             title: "{context.label()} ({context.keyboard_hint()})",
             onclick: move |_| {
                 let current = (active_ctx)();
@@ -89,20 +120,20 @@ fn ActivityBarEntry(context: NavigationContext, is_active: bool, badge: Option<u
 
             // Icon
             span {
-                class: "kiln-activity-bar__icon",
+                class: "klinx-activity-bar__icon",
                 "{context.icon_char()}"
             }
 
             // Label
             span {
-                class: "kiln-activity-bar__label",
+                class: "klinx-activity-bar__label",
                 "{context.short_label()}"
             }
 
             // Badge (optional)
             if let Some(count) = badge {
                 span {
-                    class: "kiln-activity-bar__badge",
+                    class: "klinx-activity-bar__badge",
                     "{count}"
                 }
             }
@@ -119,7 +150,7 @@ fn SettingsEntry() -> Element {
 
     rsx! {
         button {
-            class: "kiln-activity-bar__entry kiln-activity-bar__entry--settings",
+            class: "klinx-activity-bar__entry klinx-activity-bar__entry--settings",
             title: "Settings (Ctrl+,)",
             onclick: move |_| {
                 let current = (show_settings)();
@@ -127,11 +158,11 @@ fn SettingsEntry() -> Element {
             },
 
             span {
-                class: "kiln-activity-bar__icon",
+                class: "klinx-activity-bar__icon",
                 "⚙"
             }
             span {
-                class: "kiln-activity-bar__label",
+                class: "klinx-activity-bar__label",
                 "Set."
             }
         }

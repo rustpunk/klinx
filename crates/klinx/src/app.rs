@@ -15,10 +15,11 @@ use crate::components::confirm_dialog::{ConfirmAction, ConfirmDialog, PendingCon
 use crate::components::toast::ToastState;
 use crate::components::{
     activity_bar::ActivityBar, canvas::CanvasPanel, command_palette::CommandPalette,
-    inspector::InspectorPanel, placeholder_page::PlaceholderPage, run_log::RunLogDrawer,
-    schema_panel::SchemaPanel, schematics::SchematicsPanel, search_panel::SearchPanel,
-    status_bar::StatusBar, tab_bar::TabBar, template_gallery::TemplateGallery, title_bar::TitleBar,
-    toast::ToastOverlay, welcome_screen::WelcomeScreen, yaml_sidebar::YamlSidebar,
+    file_explorer::FileExplorer, inspector::InspectorPanel, placeholder_page::PlaceholderPage,
+    run_log::RunLogDrawer, schema_panel::SchemaPanel, schematics::SchematicsPanel,
+    search_panel::SearchPanel, status_bar::StatusBar, tab_bar::TabBar,
+    template_gallery::TemplateGallery, title_bar::TitleBar, toast::ToastOverlay,
+    welcome_screen::WelcomeScreen, yaml_sidebar::YamlSidebar,
 };
 use clinker_schema::SchemaIndex;
 use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
@@ -143,7 +144,7 @@ pub fn AppShell() -> Element {
     // event-loop thread via `use_wry_event_handler` — never by querying the
     // window from the async autosave task, which is unsound on some platforms.
     // The cached value feeds session save; the restored value is applied just
-    // before the window is revealed (see `onmounted` on `.kiln-app`).
+    // before the window is revealed (see `onmounted` on `.klinx-app`).
     let desktop = use_window();
     // Geometry restored from the saved session, captured once at mount. The
     // live `window_geom` below (which feeds session save) must NOT drive the
@@ -486,14 +487,13 @@ pub fn AppShell() -> Element {
         schema_warnings,
     );
 
-    let has_active_tab = current_active.is_some();
     let current_ctx = (active_context)();
 
     rsx! {
         document::Title { "klinx" }
 
         div {
-            class: "kiln-app",
+            class: "klinx-app",
             "data-theme": (theme)().as_data_attr(),
             tabindex: "0",
             // Reveal the window once its first frame has mounted, applying any
@@ -531,12 +531,12 @@ pub fn AppShell() -> Element {
 
             // ── Body: activity bar + content area ──
             div {
-                class: "kiln-body",
+                class: "klinx-body",
 
                 ActivityBar {}
 
                 div {
-                    class: "kiln-content-area",
+                    class: "klinx-content-area",
 
                     // Tab bar: Pipeline context only
                     if current_ctx == NavigationContext::Pipeline {
@@ -545,19 +545,13 @@ pub fn AppShell() -> Element {
 
                     // Context content dispatch with cross-fade
                     div {
-                        class: "kiln-context-content",
+                        class: "klinx-context-content",
                         key: "{current_ctx.as_data_attr()}",
                         "data-context": current_ctx.as_data_attr(),
 
                         match current_ctx {
                             NavigationContext::Pipeline => rsx! {
-                                if has_active_tab {
-                                    ActiveTabContent {
-                                        key: "{current_active.map(|id| id.to_string()).unwrap_or_default()}",
-                                    }
-                                } else {
-                                    WelcomeScreen {}
-                                }
+                                PipelineContextLayout {}
                             },
                             NavigationContext::Git => rsx! {
                                 GitContextPage {}
@@ -636,23 +630,58 @@ fn GitContextPage() -> Element {
     rsx! { VersionMode {} }
 }
 
+/// Pipeline context body: the hoisted left-panel slot beside the editor, or the
+/// welcome screen when no tab is open.
+///
+/// Owns the `left_panel` / `pipeline_layout` reads so toggling a panel
+/// re-renders only this subtree, not the whole `AppShell`. The slot is hoisted
+/// out of `ActiveTabContent` so it renders even with no open tab — fixing the
+/// "Open Workspace surfaces nothing" gap (#39). Hidden in Schematics mode, which
+/// takes the full width.
+#[component]
+fn PipelineContextLayout() -> Element {
+    let state = use_app_state();
+    let tab_mgr = use_context::<TabManagerState>();
+    let lp = (tab_mgr.left_panel)();
+    let schematics = (state.pipeline_layout)() == PipelineLayoutMode::Schematics;
+    let show_panel = !schematics && lp != LeftPanel::None;
+    let active = (tab_mgr.active_tab_id)();
+
+    rsx! {
+        div { class: "klinx-pipeline-layout",
+            if show_panel {
+                match lp {
+                    LeftPanel::Explorer => rsx! { FileExplorer {} },
+                    LeftPanel::Search => rsx! { SearchPanel {} },
+                    LeftPanel::Schemas => rsx! { SchemaPanel {} },
+                    LeftPanel::Compositions => rsx! {},
+                    LeftPanel::None => rsx! {},
+                }
+            }
+            if let Some(id) = active {
+                ActiveTabContent { key: "{id}" }
+            } else {
+                WelcomeScreen {}
+            }
+        }
+    }
+}
+
 /// Active tab's content area — Pipeline context only.
 ///
-/// Renders canvas, inspector, YAML sidebar, and left panel slot.
-/// Keyed on tab ID for clean remount.
+/// Renders canvas, inspector, and YAML sidebar. Keyed on tab ID for clean
+/// remount. (The left-panel slot lives in `PipelineContextLayout`.)
 #[component]
 fn ActiveTabContent() -> Element {
     let state = use_app_state();
     let pipeline_layout = state.pipeline_layout;
     let selected_stages = state.selected_stages;
-    let tab_mgr = use_context::<TabManagerState>();
-    let left_panel = (tab_mgr.left_panel)();
 
     // Schematics layout mode: full-pipeline documentation view
     if *pipeline_layout.read() == PipelineLayoutMode::Schematics {
         return rsx! {
             div {
-                class: "kiln-main",
+                class: "klinx-main",
                 "data-layout": "schematics",
                 SchematicsPanel {}
             }
@@ -661,20 +690,8 @@ fn ActiveTabContent() -> Element {
 
     rsx! {
         div {
-            class: "kiln-main",
+            class: "klinx-main",
             "data-layout": pipeline_layout.read().as_data_attr(),
-
-            // ── Left panel slot (280px, shared between Search, Schemas, Compositions) ──
-            match left_panel {
-                LeftPanel::Search => rsx! {
-                    SearchPanel {}
-                },
-                LeftPanel::Schemas => rsx! {
-                    SchemaPanel {}
-                },
-                LeftPanel::Compositions => rsx! {},
-                LeftPanel::None => rsx! {},
-            }
 
             CanvasPanel {}
 

@@ -28,17 +28,17 @@ pub fn CxlInput(label: String, initial_value: String) -> Element {
 
     let v: CxlValidation = (validation)();
     let input_class = if v.is_valid {
-        "kiln-cxl-input"
+        "klinx-cxl-input"
     } else {
-        "kiln-cxl-input kiln-cxl-input--error"
+        "klinx-cxl-input klinx-cxl-input--error"
     };
 
     rsx! {
         div {
-            class: "kiln-cxl-field",
+            class: "klinx-cxl-field",
 
             label {
-                class: "kiln-cxl-label",
+                class: "klinx-cxl-label",
                 "{label}"
             }
 

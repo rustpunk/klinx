@@ -15,7 +15,7 @@ pub fn FieldList(fields: Vec<FieldDescriptor>, depth: u32) -> Element {
 
     rsx! {
         div {
-            class: "kiln-field-list",
+            class: "klinx-field-list",
             style: "padding-left: {indent}px;",
 
             for field in &fields {
@@ -33,12 +33,12 @@ pub fn FieldList(fields: Vec<FieldDescriptor>, depth: u32) -> Element {
 #[component]
 fn FieldRow(field: FieldDescriptor, depth: u32) -> Element {
     let type_badge = field.field_type.badge();
-    let type_class = format!("kiln-field__type--{type_badge}");
+    let type_class = format!("klinx-field__type--{type_badge}");
     let nullable_indicator = if field.nullable { "?" } else { "NN" };
     let nullable_class = if field.nullable {
-        "kiln-field__nullable--yes"
+        "klinx-field__nullable--yes"
     } else {
-        "kiln-field__nullable--no"
+        "klinx-field__nullable--no"
     };
 
     let is_attr = field.is_xml_attribute();
@@ -64,30 +64,30 @@ fn FieldRow(field: FieldDescriptor, depth: u32) -> Element {
 
     rsx! {
         div {
-            class: "kiln-field-row",
+            class: "klinx-field-row",
 
-            span { class: "kiln-field__prefix", "{prefix}" }
-            span { class: "kiln-field__name",
+            span { class: "klinx-field__prefix", "{prefix}" }
+            span { class: "klinx-field__name",
                 if is_attr { "@" } else { "" }
                 "{field.name.trim_start_matches('@')}"
             }
-            span { class: "kiln-field__type {type_class}", "{type_badge}" }
-            span { class: "kiln-field__nullable {nullable_class}", "{nullable_indicator}" }
+            span { class: "klinx-field__type {type_class}", "{type_badge}" }
+            span { class: "klinx-field__nullable {nullable_class}", "{nullable_indicator}" }
 
             if is_attr {
-                span { class: "kiln-field__tag kiln-field__tag--attr", "attr" }
+                span { class: "klinx-field__tag klinx-field__tag--attr", "attr" }
             }
 
             if has_enum {
-                span { class: "kiln-field__tag kiln-field__tag--enum", "enum:{enum_count}" }
+                span { class: "klinx-field__tag klinx-field__tag--enum", "enum:{enum_count}" }
             }
 
             if has_children {
-                span { class: "kiln-field__tag kiln-field__tag--children", "{child_count} sub" }
+                span { class: "klinx-field__tag klinx-field__tag--children", "{child_count} sub" }
             }
 
             if !desc_snippet.is_empty() {
-                span { class: "kiln-field__desc", "\"{desc_snippet}\"" }
+                span { class: "klinx-field__desc", "\"{desc_snippet}\"" }
             }
         }
 

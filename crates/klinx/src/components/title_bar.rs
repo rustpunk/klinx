@@ -35,9 +35,9 @@ pub fn TitleBar() -> Element {
     // Validation state (only relevant in Pipeline context)
     let has_errors = !(state.parse_errors)().is_empty();
     let led_class = if has_errors || !has_active_tab {
-        "kiln-led-dot kiln-led-dot--err"
+        "klinx-led-dot klinx-led-dot--err"
     } else {
-        "kiln-led-dot kiln-led-dot--ok"
+        "klinx-led-dot klinx-led-dot--ok"
     };
     let led_label = if !has_active_tab {
         ""
@@ -55,7 +55,7 @@ pub fn TitleBar() -> Element {
 
     rsx! {
         div {
-            class: "kiln-title-bar",
+            class: "klinx-title-bar",
             onmousedown: move |_| {
                 // Drag the frameless window from the title-bar region.
                 window.drag();
@@ -63,22 +63,22 @@ pub fn TitleBar() -> Element {
 
             // Brand badge — always visible
             div {
-                class: "kiln-brand",
+                class: "klinx-brand",
                 onmousedown: move |e| e.stop_propagation(),
-                span { class: "kiln-brand-label", "" }
-                span { class: "kiln-brand-value", "klinx" }
+                span { class: "klinx-brand-label", "" }
+                span { class: "klinx-brand-value", "klinx" }
             }
 
-            span { class: "kiln-title-divider" }
+            span { class: "klinx-title-divider" }
 
             // ── Pipeline context: file actions + filename ────────────────
             if current_ctx == NavigationContext::Pipeline {
                 div {
-                    class: "kiln-file-actions",
+                    class: "klinx-file-actions",
                     onmousedown: move |e| e.stop_propagation(),
 
                     button {
-                        class: "kiln-file-btn",
+                        class: "klinx-file-btn",
                         title: "New pipeline (Ctrl+N)",
                         onclick: move |_| {
                             let new_tab = TabEntry::new_untitled(&tab_mgr.tabs.read());
@@ -89,7 +89,7 @@ pub fn TitleBar() -> Element {
                         "New"
                     }
                     button {
-                        class: "kiln-file-btn",
+                        class: "klinx-file-btn",
                         title: "Open file (Ctrl+O)",
                         onclick: move |_| {
                             keyboard::open_file(&mut tab_mgr);
@@ -97,7 +97,7 @@ pub fn TitleBar() -> Element {
                         "Open"
                     }
                     button {
-                        class: "kiln-file-btn",
+                        class: "klinx-file-btn",
                         title: "Open workspace (Ctrl+Shift+O)",
                         onclick: move |_| {
                             keyboard::open_workspace(&mut tab_mgr);
@@ -106,7 +106,7 @@ pub fn TitleBar() -> Element {
                     }
                     if has_active_tab {
                         button {
-                            class: "kiln-file-btn",
+                            class: "klinx-file-btn",
                             title: "Save (Ctrl+S)",
                             onclick: move |_| {
                                 keyboard::save_active_tab(&mut tab_mgr, false);
@@ -116,31 +116,31 @@ pub fn TitleBar() -> Element {
                     }
                 }
 
-                span { class: "kiln-title-divider" }
+                span { class: "klinx-title-divider" }
             }
 
             // ── Non-Pipeline contexts: context label ────────────────────
             if current_ctx != NavigationContext::Pipeline {
                 span {
-                    class: "kiln-title-context-label",
+                    class: "klinx-title-context-label",
                     "{current_ctx.label()}"
                 }
-                span { class: "kiln-title-divider" }
+                span { class: "klinx-title-divider" }
             }
 
             // Workspace name (if in workspace mode)
             if let Some(ref name) = ws_name {
                 span {
-                    class: "kiln-title-workspace",
+                    class: "klinx-title-workspace",
                     "{name}"
                 }
-                span { class: "kiln-title-divider" }
+                span { class: "klinx-title-divider" }
             }
 
             // Pipeline context: filename with dirty indicator
             if current_ctx == NavigationContext::Pipeline {
                 span {
-                    class: "kiln-title-filename",
+                    class: "klinx-title-filename",
                     if is_dirty { "\u{25CF} " } else { "" }
                     "{filename}"
                 }
@@ -150,19 +150,19 @@ pub fn TitleBar() -> Element {
             if current_ctx == NavigationContext::Git {
                 if let Some(ref branch) = git_branch {
                     span {
-                        class: "kiln-title-branch",
+                        class: "klinx-title-branch",
                         "⑂ {branch}"
                     }
                 }
             }
 
             // Flex spacer
-            span { class: "kiln-title-spacer" }
+            span { class: "klinx-title-spacer" }
 
             // ── Pipeline context: layout mode switcher ───────────────────
             if current_ctx == NavigationContext::Pipeline && has_active_tab {
                 div {
-                    class: "kiln-layout-switcher",
+                    class: "klinx-layout-switcher",
                     onmousedown: move |e| e.stop_propagation(),
 
                     for mode in PipelineLayoutMode::ALL {
@@ -172,7 +172,7 @@ pub fn TitleBar() -> Element {
                             rsx! {
                                 button {
                                     key: "{mode.label()}",
-                                    class: "kiln-layout-btn",
+                                    class: "klinx-layout-btn",
                                     "data-active": if is_active { "true" } else { "false" },
                                     onclick: move |_| {
                                         pipeline_layout.set(mode);
@@ -188,10 +188,10 @@ pub fn TitleBar() -> Element {
             // Validation LED — always visible when Pipeline has active tab
             if current_ctx == NavigationContext::Pipeline && has_active_tab {
                 div {
-                    class: "kiln-validation-led",
+                    class: "klinx-validation-led",
                     onmousedown: move |e| e.stop_propagation(),
                     span { class: "{led_class}" }
-                    span { class: "kiln-led-label", "{led_label}" }
+                    span { class: "klinx-led-label", "{led_label}" }
                 }
             }
         }

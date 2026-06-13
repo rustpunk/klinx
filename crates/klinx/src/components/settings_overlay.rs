@@ -23,21 +23,21 @@ pub fn SettingsOverlay() -> Element {
     rsx! {
         // Backdrop
         div {
-            class: "kiln-settings-backdrop",
+            class: "klinx-settings-backdrop",
             onclick: move |_| tab_mgr.show_settings.set(false),
         }
 
         // Overlay panel
         div {
-            class: "kiln-settings-overlay",
+            class: "klinx-settings-overlay",
             onclick: move |e: MouseEvent| e.stop_propagation(),
 
             // Header
             div {
-                class: "kiln-settings-header",
-                h2 { class: "kiln-settings-title", "Settings" }
+                class: "klinx-settings-header",
+                h2 { class: "klinx-settings-title", "Settings" }
                 button {
-                    class: "kiln-settings-close",
+                    class: "klinx-settings-close",
                     onclick: move |_| tab_mgr.show_settings.set(false),
                     "✕"
                 }
@@ -45,24 +45,24 @@ pub fn SettingsOverlay() -> Element {
 
             // Content
             div {
-                class: "kiln-settings-content",
+                class: "klinx-settings-content",
 
                 // ── Appearance ─────────────────────────────────────
                 SettingsSection {
                     label: "Appearance",
                     div {
-                        class: "kiln-settings-theme-row",
-                        span { class: "kiln-settings-field__label", "Theme" }
-                        div { class: "kiln-settings-theme-toggle",
+                        class: "klinx-settings-theme-row",
+                        span { class: "klinx-settings-field__label", "Theme" }
+                        div { class: "klinx-settings-theme-toggle",
                             {
                                 let current_theme = (tab_mgr.theme)();
                                 rsx! {
                                     for variant in [KilnTheme::Oxide, KilnTheme::Enamel] {
                                         button {
                                             class: if current_theme == variant {
-                                                "kiln-settings-theme-btn kiln-settings-theme-btn--active"
+                                                "klinx-settings-theme-btn klinx-settings-theme-btn--active"
                                             } else {
-                                                "kiln-settings-theme-btn"
+                                                "klinx-settings-theme-btn"
                                             },
                                             onclick: move |_| tab_mgr.theme.set(variant),
                                             {match variant {
@@ -160,7 +160,7 @@ pub fn SettingsOverlay() -> Element {
                     }
                 } else {
                     div {
-                        class: "kiln-settings-empty",
+                        class: "klinx-settings-empty",
                         "No workspace loaded. Open a workspace to configure settings."
                     }
                 }
@@ -168,9 +168,9 @@ pub fn SettingsOverlay() -> Element {
 
             // Footer
             div {
-                class: "kiln-settings-footer",
+                class: "klinx-settings-footer",
                 span {
-                    class: "kiln-settings-hint",
+                    class: "klinx-settings-hint",
                     "Edit kiln.toml directly for advanced configuration."
                 }
             }
@@ -183,8 +183,8 @@ pub fn SettingsOverlay() -> Element {
 fn SettingsSection(label: &'static str, children: Element) -> Element {
     rsx! {
         div {
-            class: "kiln-settings-section",
-            h3 { class: "kiln-settings-section__label", "{label}" }
+            class: "klinx-settings-section",
+            h3 { class: "klinx-settings-section__label", "{label}" }
             {children}
         }
     }
@@ -195,9 +195,9 @@ fn SettingsSection(label: &'static str, children: Element) -> Element {
 fn SettingsField(label: String, value: String) -> Element {
     rsx! {
         div {
-            class: "kiln-settings-field",
-            span { class: "kiln-settings-field__label", "{label}" }
-            span { class: "kiln-settings-field__value", "{value}" }
+            class: "klinx-settings-field",
+            span { class: "klinx-settings-field__label", "{label}" }
+            span { class: "klinx-settings-field__value", "{value}" }
         }
     }
 }

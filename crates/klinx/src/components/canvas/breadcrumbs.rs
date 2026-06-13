@@ -13,11 +13,11 @@ pub fn BreadcrumbBar(frames: Vec<String>) -> Element {
 
     rsx! {
         div {
-            class: "kiln-breadcrumb-bar",
+            class: "klinx-breadcrumb-bar",
 
             // Root breadcrumb — clicking returns to top-level
             span {
-                class: "kiln-breadcrumb kiln-breadcrumb--clickable",
+                class: "klinx-breadcrumb klinx-breadcrumb--clickable",
                 onclick: move |_| {
                     let mut stack = state.composition_drill_stack;
                     stack.write().clear();
@@ -26,16 +26,16 @@ pub fn BreadcrumbBar(frames: Vec<String>) -> Element {
             }
 
             for (depth, alias) in frames.iter().enumerate() {
-                span { class: "kiln-breadcrumb-sep", " > " }
+                span { class: "klinx-breadcrumb-sep", " > " }
                 {
                     let is_last = depth == frames.len() - 1;
                     let target_depth = depth + 1;
                     rsx! {
                         span {
                             class: if is_last {
-                                "kiln-breadcrumb kiln-breadcrumb--current"
+                                "klinx-breadcrumb klinx-breadcrumb--current"
                             } else {
-                                "kiln-breadcrumb kiln-breadcrumb--clickable"
+                                "klinx-breadcrumb klinx-breadcrumb--clickable"
                             },
                             onclick: move |_| {
                                 if !is_last {

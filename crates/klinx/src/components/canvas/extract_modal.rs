@@ -19,18 +19,18 @@ pub fn ExtractModal(on_close: EventHandler<()>) -> Element {
 
     rsx! {
         div {
-            class: "kiln-confirm-backdrop",
+            class: "klinx-confirm-backdrop",
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "kiln-confirm-dialog",
+                class: "klinx-confirm-dialog",
                 onclick: move |e: MouseEvent| e.stop_propagation(),
 
                 h3 { "Extract as Composition" }
 
                 p { "Extracting {count} selected node(s) into a reusable composition." }
 
-                div { class: "kiln-extract-field",
+                div { class: "klinx-extract-field",
                     label { "Composition name:" }
                     input {
                         r#type: "text",
@@ -39,7 +39,7 @@ pub fn ExtractModal(on_close: EventHandler<()>) -> Element {
                     }
                 }
 
-                div { class: "kiln-extract-field",
+                div { class: "klinx-extract-field",
                     label { "Output path:" }
                     input {
                         r#type: "text",
@@ -48,7 +48,7 @@ pub fn ExtractModal(on_close: EventHandler<()>) -> Element {
                     }
                 }
 
-                div { class: "kiln-extract-nodes",
+                div { class: "klinx-extract-nodes",
                     label { "Selected nodes:" }
                     ul {
                         for node_name in &selected {
@@ -57,9 +57,9 @@ pub fn ExtractModal(on_close: EventHandler<()>) -> Element {
                     }
                 }
 
-                div { class: "kiln-confirm-actions",
+                div { class: "klinx-confirm-actions",
                     button {
-                        class: "kiln-btn kiln-btn--primary",
+                        class: "klinx-btn klinx-btn--primary",
                         onclick: {
                             let on_close = on_close;
                             move |_| {
@@ -71,7 +71,7 @@ pub fn ExtractModal(on_close: EventHandler<()>) -> Element {
                         "Extract"
                     }
                     button {
-                        class: "kiln-btn",
+                        class: "klinx-btn",
                         onclick: move |_| on_close.call(()),
                         "Cancel"
                     }

@@ -8,28 +8,28 @@ use dioxus::prelude::*;
 pub fn PlaceholderPage(name: &'static str, description: &'static str) -> Element {
     rsx! {
         div {
-            class: "kiln-placeholder-page",
+            class: "klinx-placeholder-page",
 
             div {
-                class: "kiln-placeholder-card",
+                class: "klinx-placeholder-card",
 
                 div {
-                    class: "kiln-placeholder-icon",
+                    class: "klinx-placeholder-icon",
                     "◈"
                 }
 
                 h2 {
-                    class: "kiln-placeholder-title",
+                    class: "klinx-placeholder-title",
                     "{name}"
                 }
 
                 p {
-                    class: "kiln-placeholder-desc",
+                    class: "klinx-placeholder-desc",
                     "{description}"
                 }
 
                 div {
-                    class: "kiln-placeholder-status",
+                    class: "klinx-placeholder-status",
                     "Coming soon"
                 }
             }

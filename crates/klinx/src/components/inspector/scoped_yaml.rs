@@ -31,28 +31,28 @@ pub fn ScopedYaml(stage_id: String) -> Element {
 
     rsx! {
         div {
-            class: "kiln-inspector-yaml",
+            class: "klinx-inspector-yaml",
 
             div {
-                class: "kiln-section-header",
-                span { class: "kiln-diamond", "\u{25C6}" }
-                span { class: "kiln-section-title", "{section_title}" }
-                span { class: "kiln-section-rule" }
+                class: "klinx-section-header",
+                span { class: "klinx-diamond", "\u{25C6}" }
+                span { class: "klinx-section-title", "{section_title}" }
+                span { class: "klinx-section-rule" }
             }
 
             div {
-                class: "kiln-yaml-code-area kiln-inspector-yaml-area",
+                class: "klinx-yaml-code-area klinx-inspector-yaml-area",
 
                 // Gutter — absolute line numbers
                 div {
-                    class: "kiln-yaml-gutter",
+                    class: "klinx-yaml-gutter",
                     for (i, _) in scoped_lines.iter().enumerate() {
                         {
                             let line_num = start + i;
                             rsx! {
                                 div {
                                     key: "gutter-{i}",
-                                    class: "kiln-yaml-line-num",
+                                    class: "klinx-yaml-line-num",
                                     "{line_num}"
                                 }
                             }
@@ -62,7 +62,7 @@ pub fn ScopedYaml(stage_id: String) -> Element {
 
                 // Code column
                 div {
-                    class: "kiln-yaml-code",
+                    class: "klinx-yaml-code",
                     for (i, line_tokens) in scoped_lines.iter().enumerate() {
                         YamlLine {
                             key: "scoped-{i}",

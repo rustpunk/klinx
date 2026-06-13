@@ -129,7 +129,7 @@ fn run() {
                 .with_min_inner_size(LogicalSize::new(800, 600))
                 // Start hidden to avoid a white/unstyled flash on cold start.
                 // AppShell restores saved geometry and reveals the window once
-                // its first frame has mounted (see the `onmounted` on `.kiln-app`).
+                // its first frame has mounted (see the `onmounted` on `.klinx-app`).
                 .with_visible(false),
         )
         .with_disable_context_menu(true)

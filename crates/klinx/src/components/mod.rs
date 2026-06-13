@@ -2,6 +2,7 @@ pub mod activity_bar;
 pub mod canvas;
 pub mod command_palette;
 pub mod confirm_dialog;
+pub mod file_explorer;
 pub mod inspector;
 pub mod placeholder_page;
 pub mod run_log;

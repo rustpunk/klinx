@@ -46,29 +46,29 @@ pub fn TemplateGallery() -> Element {
     rsx! {
         // Backdrop
         div {
-            class: "kiln-gallery-backdrop",
+            class: "klinx-gallery-backdrop",
             onclick: close,
         }
 
         // Gallery overlay
         div {
-            class: "kiln-gallery",
+            class: "klinx-gallery",
             onclick: move |e: MouseEvent| e.stop_propagation(),
 
             // ── Header ──────────────────────────────────────────────
-            div { class: "kiln-gallery__header",
-                span { class: "kiln-gallery__title", "NEW FROM TEMPLATE" }
+            div { class: "klinx-gallery__header",
+                span { class: "klinx-gallery__title", "NEW FROM TEMPLATE" }
                 button {
-                    class: "kiln-gallery__close",
+                    class: "klinx-gallery__close",
                     onclick: close,
                     "×"
                 }
             }
 
             // ── Search ──────────────────────────────────────────────
-            div { class: "kiln-gallery__search",
+            div { class: "klinx-gallery__search",
                 input {
-                    class: "kiln-gallery__search-input",
+                    class: "klinx-gallery__search-input",
                     r#type: "text",
                     placeholder: "Search templates...",
                     value: "{search}",
@@ -77,13 +77,13 @@ pub fn TemplateGallery() -> Element {
             }
 
             // ── Format tabs ─────────────────────────────────────────
-            div { class: "kiln-gallery__tabs",
+            div { class: "klinx-gallery__tabs",
                 for cat in template::FORMAT_CATEGORIES {
                     button {
                         class: if current_filter == *cat {
-                            "kiln-gallery-tab kiln-gallery-tab--active"
+                            "klinx-gallery-tab klinx-gallery-tab--active"
                         } else {
-                            "kiln-gallery-tab"
+                            "klinx-gallery-tab"
                         },
                         onclick: {
                             let cat = cat.to_string();
@@ -95,9 +95,9 @@ pub fn TemplateGallery() -> Element {
             }
 
             // ── Card grid ───────────────────────────────────────────
-            div { class: "kiln-gallery__grid",
+            div { class: "klinx-gallery__grid",
                 if filtered.is_empty() {
-                    div { class: "kiln-gallery__empty",
+                    div { class: "klinx-gallery__empty",
                         "No templates match the current filter."
                     }
                 }
@@ -138,28 +138,28 @@ fn TemplateCard(template: Template, on_use: EventHandler<String>) -> Element {
         TemplateSource::Bundled => "built-in",
         TemplateSource::Workspace => "workspace",
     };
-    let format_class = format!("kiln-gallery-card--{format}");
+    let format_class = format!("klinx-gallery-card--{format}");
     let raw_yaml = template.raw_yaml.clone();
 
     rsx! {
         div {
-            class: "kiln-gallery-card {format_class}",
+            class: "klinx-gallery-card {format_class}",
 
-            div { class: "kiln-gallery-card__header",
-                span { class: "kiln-gallery-card__name", "{name}" }
-                span { class: "kiln-gallery-card__source", "{source_label}" }
+            div { class: "klinx-gallery-card__header",
+                span { class: "klinx-gallery-card__name", "{name}" }
+                span { class: "klinx-gallery-card__source", "{source_label}" }
             }
 
-            div { class: "kiln-gallery-card__desc", "{desc}" }
+            div { class: "klinx-gallery-card__desc", "{desc}" }
 
-            div { class: "kiln-gallery-card__tags",
+            div { class: "klinx-gallery-card__tags",
                 for tag in tags {
-                    span { class: "kiln-gallery-card__tag", "{tag}" }
+                    span { class: "klinx-gallery-card__tag", "{tag}" }
                 }
             }
 
             button {
-                class: "kiln-gallery-card__use-btn",
+                class: "klinx-gallery-card__use-btn",
                 onclick: move |_| on_use.call(raw_yaml.clone()),
                 "Use Template"
             }

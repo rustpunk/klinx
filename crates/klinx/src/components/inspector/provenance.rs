@@ -45,28 +45,28 @@ pub fn ProvenancePanel(node_name: String, param_name: String) -> Element {
 
     rsx! {
         div {
-            class: "kiln-provenance-panel",
+            class: "klinx-provenance-panel",
 
             div {
-                class: "kiln-provenance-header",
-                span { class: "kiln-provenance-value", "{value_display}" }
+                class: "klinx-provenance-header",
+                span { class: "klinx-provenance-value", "{value_display}" }
             }
 
             div {
-                class: "kiln-provenance-label",
+                class: "klinx-provenance-label",
                 "Provenance:"
             }
 
             div {
-                class: "kiln-provenance-layers",
+                class: "klinx-provenance-layers",
                 for (i, layer) in layers.iter().enumerate() {
                     {
                         let kind_label = layer_kind_label(layer.kind);
                         let won_marker = if layer.won { "[x]" } else { "[ ]" };
                         let layer_class = if layer.won {
-                            "kiln-provenance-layer kiln-provenance-layer--won"
+                            "klinx-provenance-layer klinx-provenance-layer--won"
                         } else {
-                            "kiln-provenance-layer kiln-provenance-layer--shadowed"
+                            "klinx-provenance-layer klinx-provenance-layer--shadowed"
                         };
                         let span_display = format!(
                             "offset:{}..{}",
@@ -78,11 +78,11 @@ pub fn ProvenancePanel(node_name: String, param_name: String) -> Element {
                             div {
                                 key: "prov-{i}",
                                 class: "{layer_class}",
-                                span { class: "kiln-provenance-marker", "{won_marker}" }
-                                span { class: "kiln-provenance-kind", "{kind_label}" }
-                                span { class: "kiln-provenance-span", "{span_display}" }
+                                span { class: "klinx-provenance-marker", "{won_marker}" }
+                                span { class: "klinx-provenance-kind", "{kind_label}" }
+                                span { class: "klinx-provenance-span", "{span_display}" }
                                 if !layer.won {
-                                    span { class: "kiln-provenance-shadowed-label", "(shadowed)" }
+                                    span { class: "klinx-provenance-shadowed-label", "(shadowed)" }
                                 }
                             }
                         }

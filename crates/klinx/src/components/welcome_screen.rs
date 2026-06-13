@@ -14,30 +14,30 @@ pub fn WelcomeScreen() -> Element {
 
     rsx! {
         div {
-            class: "kiln-welcome",
+            class: "klinx-welcome",
 
             // Brand badge (stacked)
             div {
-                class: "kiln-welcome-brand",
-                div { class: "kiln-welcome-brand-top", "" }
-                div { class: "kiln-welcome-brand-bottom", "KLINX" }
+                class: "klinx-welcome-brand",
+                div { class: "klinx-welcome-brand-top", "" }
+                div { class: "klinx-welcome-brand-bottom", "KLINX" }
             }
 
             // Subtitle
             div {
-                class: "kiln-welcome-subtitle",
+                class: "klinx-welcome-subtitle",
                 "pipeline configuration IDE"
             }
 
             // Rust line divider
-            hr { class: "kiln-rust-line" }
+            hr { class: "klinx-rust-line" }
 
             // Action buttons
             div {
-                class: "kiln-welcome-actions",
+                class: "klinx-welcome-actions",
 
                 button {
-                    class: "kiln-welcome-btn",
+                    class: "klinx-welcome-btn",
                     onclick: move |_| {
                         keyboard::open_file(&mut tab_mgr);
                     },
@@ -45,7 +45,7 @@ pub fn WelcomeScreen() -> Element {
                 }
 
                 button {
-                    class: "kiln-welcome-btn",
+                    class: "klinx-welcome-btn",
                     onclick: move |_| {
                         keyboard::open_workspace(&mut tab_mgr);
                     },
@@ -53,7 +53,7 @@ pub fn WelcomeScreen() -> Element {
                 }
 
                 button {
-                    class: "kiln-welcome-btn",
+                    class: "klinx-welcome-btn",
                     onclick: move |_| {
                         let new_tab = TabEntry::new_untitled(&tab_mgr.tabs.read());
                         let new_id = new_tab.id;
@@ -66,10 +66,10 @@ pub fn WelcomeScreen() -> Element {
 
             // Shortcut hints
             div {
-                class: "kiln-welcome-shortcuts",
-                div { span { class: "kiln-welcome-key", "Ctrl+O" } " open file" }
-                div { span { class: "kiln-welcome-key", "Ctrl+Shift+O" } " open workspace" }
-                div { span { class: "kiln-welcome-key", "Ctrl+N" } " new pipeline" }
+                class: "klinx-welcome-shortcuts",
+                div { span { class: "klinx-welcome-key", "Ctrl+O" } " open file" }
+                div { span { class: "klinx-welcome-key", "Ctrl+Shift+O" } " open workspace" }
+                div { span { class: "klinx-welcome-key", "Ctrl+N" } " new pipeline" }
             }
         }
     }

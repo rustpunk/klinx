@@ -19,14 +19,14 @@ pub enum ActiveDrawer {
 pub fn DrawerToggleBar(active: ActiveDrawer, on_toggle: EventHandler<ActiveDrawer>) -> Element {
     rsx! {
         div {
-            class: "kiln-drawer-bar",
+            class: "klinx-drawer-bar",
 
             // Run button — phosphor accent
             DrawerButton {
                 icon: "\u{25B8}",  // ▸
                 label: "Run",
                 badge: "\u{2014}", // —
-                accent: "var(--kiln-phosphor)",
+                accent: "var(--klinx-phosphor)",
                 is_active: active == ActiveDrawer::Run,
                 onclick: move |_| {
                     if active == ActiveDrawer::Run {
@@ -38,14 +38,14 @@ pub fn DrawerToggleBar(active: ActiveDrawer, on_toggle: EventHandler<ActiveDrawe
             }
 
             // Divider
-            span { class: "kiln-drawer-divider" }
+            span { class: "klinx-drawer-divider" }
 
             // Docs button — verdigris/bpAccent
             DrawerButton {
                 icon: "\u{25C7}",  // ◇
                 label: "Docs",
                 badge: "\u{2014}",
-                accent: "var(--kiln-verdigris)",
+                accent: "var(--klinx-verdigris)",
                 is_active: active == ActiveDrawer::Docs,
                 onclick: move |_| {
                     if active == ActiveDrawer::Docs {
@@ -57,14 +57,14 @@ pub fn DrawerToggleBar(active: ActiveDrawer, on_toggle: EventHandler<ActiveDrawe
             }
 
             // Divider
-            span { class: "kiln-drawer-divider" }
+            span { class: "klinx-drawer-divider" }
 
             // Notes button — iron accent
             DrawerButton {
                 icon: "\u{270E}",  // ✎
                 label: "Notes",
                 badge: "0",
-                accent: "var(--kiln-iron)",
+                accent: "var(--klinx-iron)",
                 is_active: active == ActiveDrawer::Notes,
                 onclick: move |_| {
                     if active == ActiveDrawer::Notes {
@@ -90,7 +90,7 @@ fn DrawerButton(
 ) -> Element {
     rsx! {
         button {
-            class: "kiln-drawer-btn",
+            class: "klinx-drawer-btn",
             "data-active": if is_active { "true" } else { "false" },
             style: if is_active {
                 format!("color: {accent}; border-bottom-color: {accent}; \
@@ -100,9 +100,9 @@ fn DrawerButton(
             },
             onclick: move |e| onclick.call(e),
 
-            span { class: "kiln-drawer-btn-icon", "{icon}" }
-            span { class: "kiln-drawer-btn-label", "{label}" }
-            span { class: "kiln-drawer-btn-badge", "{badge}" }
+            span { class: "klinx-drawer-btn-icon", "{icon}" }
+            span { class: "klinx-drawer-btn-label", "{label}" }
+            span { class: "klinx-drawer-btn-badge", "{badge}" }
         }
     }
 }

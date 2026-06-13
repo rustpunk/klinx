@@ -49,19 +49,19 @@ pub fn PrPane(on_close: EventHandler<()>) -> Element {
     // Show success screen if PR was created
     if let Some(ref url) = created {
         return rsx! {
-            div { class: "kiln-pr-success",
-                div { class: "kiln-pr-success__icon", "✓" }
-                div { class: "kiln-pr-success__title", "PULL REQUEST CREATED" }
-                div { class: "kiln-pr-success__meta",
+            div { class: "klinx-pr-success",
+                div { class: "klinx-pr-success__icon", "✓" }
+                div { class: "klinx-pr-success__title", "PULL REQUEST CREATED" }
+                div { class: "klinx-pr-success__meta",
                     "{provider.label()} · {source_branch} → {target_branch}"
                 }
                 a {
-                    class: "kiln-pr-success__url",
+                    class: "klinx-pr-success__url",
                     href: "{url}",
                     "{url}"
                 }
                 button {
-                    class: "kiln-pr-success__close",
+                    class: "klinx-pr-success__close",
                     onclick: move |_| on_close.call(()),
                     "Done"
                 }
@@ -70,33 +70,33 @@ pub fn PrPane(on_close: EventHandler<()>) -> Element {
     }
 
     rsx! {
-        div { class: "kiln-pr-pane",
-            div { class: "kiln-pr-pane__header",
-                span { class: "kiln-pr-pane__title", "CREATE PULL REQUEST" }
+        div { class: "klinx-pr-pane",
+            div { class: "klinx-pr-pane__header",
+                span { class: "klinx-pr-pane__title", "CREATE PULL REQUEST" }
                 button {
-                    class: "kiln-pr-pane__close",
+                    class: "klinx-pr-pane__close",
                     onclick: move |_| on_close.call(()),
                     "×"
                 }
             }
 
             // Provider indicator
-            div { class: "kiln-pr-pane__provider",
-                span { class: "kiln-pr-pane__provider-label",
+            div { class: "klinx-pr-pane__provider",
+                span { class: "klinx-pr-pane__provider-label",
                     "Platform: {provider.label()}"
                 }
             }
 
             // Source → Target
-            div { class: "kiln-pr-pane__branches",
-                div { class: "kiln-pr-pane__branch",
-                    span { class: "kiln-pr-pane__branch-icon", "⑂" }
-                    span { class: "kiln-pr-pane__branch-name", "{source_branch}" }
+            div { class: "klinx-pr-pane__branches",
+                div { class: "klinx-pr-pane__branch",
+                    span { class: "klinx-pr-pane__branch-icon", "⑂" }
+                    span { class: "klinx-pr-pane__branch-name", "{source_branch}" }
                 }
-                span { class: "kiln-pr-pane__arrow", "→" }
-                div { class: "kiln-pr-pane__branch",
+                span { class: "klinx-pr-pane__arrow", "→" }
+                div { class: "klinx-pr-pane__branch",
                     input {
-                        class: "kiln-pr-pane__branch-input",
+                        class: "klinx-pr-pane__branch-input",
                         r#type: "text",
                         value: "{target_branch}",
                         oninput: move |e: FormEvent| target_branch.set(e.value()),
@@ -105,10 +105,10 @@ pub fn PrPane(on_close: EventHandler<()>) -> Element {
             }
 
             // Title
-            div { class: "kiln-pr-pane__field",
-                label { class: "kiln-pr-pane__label", "TITLE" }
+            div { class: "klinx-pr-pane__field",
+                label { class: "klinx-pr-pane__label", "TITLE" }
                 input {
-                    class: "kiln-pr-pane__input",
+                    class: "klinx-pr-pane__input",
                     r#type: "text",
                     value: "{title}",
                     oninput: move |e: FormEvent| title.set(e.value()),
@@ -116,10 +116,10 @@ pub fn PrPane(on_close: EventHandler<()>) -> Element {
             }
 
             // Description
-            div { class: "kiln-pr-pane__field",
-                label { class: "kiln-pr-pane__label", "DESCRIPTION" }
+            div { class: "klinx-pr-pane__field",
+                label { class: "klinx-pr-pane__label", "DESCRIPTION" }
                 textarea {
-                    class: "kiln-pr-pane__textarea",
+                    class: "klinx-pr-pane__textarea",
                     placeholder: "Describe your changes...",
                     value: "{body}",
                     oninput: move |e: FormEvent| body.set(e.value()),
@@ -127,9 +127,9 @@ pub fn PrPane(on_close: EventHandler<()>) -> Element {
             }
 
             // Options
-            div { class: "kiln-pr-pane__options",
+            div { class: "klinx-pr-pane__options",
                 label {
-                    class: "kiln-pr-pane__checkbox",
+                    class: "klinx-pr-pane__checkbox",
                     input {
                         r#type: "checkbox",
                         checked: (draft)(),
@@ -140,9 +140,9 @@ pub fn PrPane(on_close: EventHandler<()>) -> Element {
             }
 
             // Actions
-            div { class: "kiln-pr-pane__actions",
+            div { class: "klinx-pr-pane__actions",
                 button {
-                    class: "kiln-pr-pane__create-btn",
+                    class: "klinx-pr-pane__create-btn",
                     disabled: (title)().is_empty() || (creating)(),
                     onclick: {
                         let ws_root = ws.as_ref().map(|w| w.root.clone());
@@ -175,7 +175,7 @@ pub fn PrPane(on_close: EventHandler<()>) -> Element {
                     if (draft)() { "Create Draft PR" } else { "Create Pull Request" }
                 }
                 button {
-                    class: "kiln-pr-pane__cancel-btn",
+                    class: "klinx-pr-pane__cancel-btn",
                     onclick: move |_| on_close.call(()),
                     "Cancel"
                 }

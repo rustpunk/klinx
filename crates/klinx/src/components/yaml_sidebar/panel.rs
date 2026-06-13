@@ -67,27 +67,27 @@ pub fn YamlSidebar() -> Element {
 
     rsx! {
         div {
-            class: "kiln-yaml-sidebar",
+            class: "klinx-yaml-sidebar",
 
             // Section header with blame toggle
             div {
-                class: "kiln-section-header",
-                span { class: "kiln-diamond", "\u{25C6}" }
-                span { class: "kiln-section-title", "{section_title}" }
-                span { class: "kiln-section-rule" }
+                class: "klinx-section-header",
+                span { class: "klinx-diamond", "\u{25C6}" }
+                span { class: "klinx-section-title", "{section_title}" }
+                span { class: "klinx-section-rule" }
 
                 BlameToggle {}
             }
 
             // Code area: blame gutter + line numbers + editor
             div {
-                class: "kiln-yaml-code-area",
+                class: "klinx-yaml-code-area",
 
                 BlameGutter { line_count }
 
                 // Line-number gutter
                 div {
-                    class: "kiln-yaml-gutter",
+                    class: "klinx-yaml-gutter",
                     for i in 0..line_count {
                         {
                             let line_num = i + 1;
@@ -98,7 +98,7 @@ pub fn YamlSidebar() -> Element {
                             rsx! {
                                 div {
                                     key: "gutter-{i}",
-                                    class: "kiln-yaml-line-num",
+                                    class: "klinx-yaml-line-num",
                                     "data-selected": if in_range { "true" },
                                     "{line_num}"
                                 }
@@ -120,7 +120,7 @@ pub fn YamlSidebar() -> Element {
             // Parse error bar
             if !errors.is_empty() {
                 div {
-                    class: "kiln-yaml-errors",
+                    class: "klinx-yaml-errors",
                     for (i, err) in errors.iter().enumerate() {
                         {
                             let err_text = err.clone();
@@ -128,13 +128,13 @@ pub fn YamlSidebar() -> Element {
                             rsx! {
                                 div {
                                     key: "err-{i}",
-                                    class: "kiln-yaml-error",
+                                    class: "klinx-yaml-error",
                                     span {
-                                        class: "kiln-yaml-error-text",
+                                        class: "klinx-yaml-error-text",
                                         "{err_display}"
                                     }
                                     button {
-                                        class: "kiln-yaml-error-copy",
+                                        class: "klinx-yaml-error-copy",
                                         title: "Copy error to clipboard",
                                         onclick: move |_| {
                                             let text = err_text.clone();
@@ -171,9 +171,9 @@ fn BlameToggle() -> Element {
         rsx! {
             button {
                 class: if show_blame {
-                    "kiln-blame-toggle kiln-blame-toggle--active"
+                    "klinx-blame-toggle klinx-blame-toggle--active"
                 } else {
-                    "kiln-blame-toggle"
+                    "klinx-blame-toggle"
                 },
                 onclick: move |_| {
                     blame_visible.set(!show_blame);
@@ -207,7 +207,7 @@ fn BlameGutter(line_count: usize) -> Element {
 
     rsx! {
         div {
-            class: "kiln-blame-gutter",
+            class: "klinx-blame-gutter",
             for i in 0..line_count {
                 {
                     let bl = (blame_data)();
@@ -229,13 +229,13 @@ fn BlameGutter(line_count: usize) -> Element {
                         rsx! {
                             div {
                                 key: "blame-{i}",
-                                class: "kiln-blame-line",
+                                class: "klinx-blame-line",
                                 if is_group_start {
-                                    span { class: "kiln-blame-author", "{author}" }
-                                    span { class: "kiln-blame-time", "{time}" }
-                                    span { class: "kiln-blame-hash", "{hash}" }
+                                    span { class: "klinx-blame-author", "{author}" }
+                                    span { class: "klinx-blame-time", "{time}" }
+                                    span { class: "klinx-blame-hash", "{hash}" }
                                 } else {
-                                    span { class: "kiln-blame-continuation", "│" }
+                                    span { class: "klinx-blame-continuation", "│" }
                                 }
                             }
                         }
@@ -243,8 +243,8 @@ fn BlameGutter(line_count: usize) -> Element {
                         rsx! {
                             div {
                                 key: "blame-{i}",
-                                class: "kiln-blame-line",
-                                span { class: "kiln-blame-uncommitted", "uncommitted" }
+                                class: "klinx-blame-line",
+                                span { class: "klinx-blame-uncommitted", "uncommitted" }
                             }
                         }
                     }

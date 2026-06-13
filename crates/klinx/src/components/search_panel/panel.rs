@@ -82,34 +82,34 @@ pub fn SearchPanel() -> Element {
 
     rsx! {
         div {
-            class: "kiln-search-panel",
+            class: "klinx-search-panel",
 
             // ── Header ──────────────────────────────────────────────────
-            div { class: "kiln-search-panel__header",
-                span { class: "kiln-search-panel__title", "SEARCH" }
+            div { class: "klinx-search-panel__header",
+                span { class: "klinx-search-panel__title", "SEARCH" }
                 button {
-                    class: "kiln-search-panel__close",
+                    class: "klinx-search-panel__close",
                     onclick: move |_| tab_mgr.left_panel.set(LeftPanel::None),
                     "×"
                 }
             }
 
             // ── Mode tabs ───────────────────────────────────────────────
-            div { class: "kiln-search-panel__tabs",
+            div { class: "klinx-search-panel__tabs",
                 button {
                     class: if current_mode == SearchMode::Text {
-                        "kiln-search-mode-tab kiln-search-mode-tab--active"
+                        "klinx-search-mode-tab klinx-search-mode-tab--active"
                     } else {
-                        "kiln-search-mode-tab"
+                        "klinx-search-mode-tab"
                     },
                     onclick: move |_| mode.set(SearchMode::Text),
                     "Text"
                 }
                 button {
                     class: if current_mode == SearchMode::Structural {
-                        "kiln-search-mode-tab kiln-search-mode-tab--active"
+                        "klinx-search-mode-tab klinx-search-mode-tab--active"
                     } else {
-                        "kiln-search-mode-tab"
+                        "klinx-search-mode-tab"
                     },
                     onclick: move |_| mode.set(SearchMode::Structural),
                     "Structural"
@@ -118,16 +118,16 @@ pub fn SearchPanel() -> Element {
 
             // ── Text search input + toggles ─────────────────────────────
             if current_mode == SearchMode::Text {
-                div { class: "kiln-search-panel__input-row",
+                div { class: "klinx-search-panel__input-row",
                     button {
-                        class: "kiln-search-toggle kiln-search-toggle--expand",
+                        class: "klinx-search-toggle klinx-search-toggle--expand",
                         onclick: move |_| show_replace.set(!is_replace_visible),
                         title: "Toggle find and replace",
                         if is_replace_visible { "▾" } else { "▸" }
                     }
 
                     input {
-                        class: "kiln-search-panel__input",
+                        class: "klinx-search-panel__input",
                         r#type: "text",
                         placeholder: "Search across pipelines...",
                         value: "{current_query}",
@@ -139,9 +139,9 @@ pub fn SearchPanel() -> Element {
 
                     button {
                         class: if (use_regex)() {
-                            "kiln-search-toggle kiln-search-toggle--active"
+                            "klinx-search-toggle klinx-search-toggle--active"
                         } else {
-                            "kiln-search-toggle"
+                            "klinx-search-toggle"
                         },
                         onclick: move |_| {
                             use_regex.set(!(use_regex)());
@@ -152,9 +152,9 @@ pub fn SearchPanel() -> Element {
                     }
                     button {
                         class: if (case_sensitive)() {
-                            "kiln-search-toggle kiln-search-toggle--active"
+                            "klinx-search-toggle klinx-search-toggle--active"
                         } else {
-                            "kiln-search-toggle"
+                            "klinx-search-toggle"
                         },
                         onclick: move |_| {
                             case_sensitive.set(!(case_sensitive)());
@@ -165,9 +165,9 @@ pub fn SearchPanel() -> Element {
                     }
                     button {
                         class: if (whole_word)() {
-                            "kiln-search-toggle kiln-search-toggle--active"
+                            "klinx-search-toggle klinx-search-toggle--active"
                         } else {
-                            "kiln-search-toggle"
+                            "klinx-search-toggle"
                         },
                         onclick: move |_| {
                             whole_word.set(!(whole_word)());
@@ -179,9 +179,9 @@ pub fn SearchPanel() -> Element {
                 }
 
                 if is_replace_visible {
-                    div { class: "kiln-search-panel__replace-row",
+                    div { class: "klinx-search-panel__replace-row",
                         input {
-                            class: "kiln-search-panel__input kiln-search-panel__input--replace",
+                            class: "klinx-search-panel__input klinx-search-panel__input--replace",
                             r#type: "text",
                             placeholder: "Replace...",
                             value: "{replace_text}",
@@ -193,23 +193,23 @@ pub fn SearchPanel() -> Element {
 
             // ── Structural search input + tag pills ─────────────────────
             if current_mode == SearchMode::Structural {
-                div { class: "kiln-search-panel__structural",
+                div { class: "klinx-search-panel__structural",
                     // Tag pills for active filters
                     {
                         let tags = (structural_tags)();
                         rsx! {
                             if !tags.is_empty() {
-                                div { class: "kiln-structural-tags",
+                                div { class: "klinx-structural-tags",
                                     for (_i, tag) in tags.iter().enumerate() {
                                         {
                                             let key = tag.key.clone();
                                             let value = tag.value.clone();
                                             rsx! {
                                                 span {
-                                                    class: "kiln-structural-tag",
-                                                    span { class: "kiln-structural-tag__key", "{key}" }
-                                                    span { class: "kiln-structural-tag__sep", ":" }
-                                                    span { class: "kiln-structural-tag__value", "{value}" }
+                                                    class: "klinx-structural-tag",
+                                                    span { class: "klinx-structural-tag__key", "{key}" }
+                                                    span { class: "klinx-structural-tag__sep", ":" }
+                                                    span { class: "klinx-structural-tag__value", "{value}" }
                                                 }
                                             }
                                         }
@@ -220,7 +220,7 @@ pub fn SearchPanel() -> Element {
                     }
 
                     input {
-                        class: "kiln-search-panel__input",
+                        class: "klinx-search-panel__input",
                         r#type: "text",
                         placeholder: "input:name field:email expr:lower(...",
                         value: "{structural_query}",
@@ -230,10 +230,10 @@ pub fn SearchPanel() -> Element {
                         },
                     }
 
-                    div { class: "kiln-structural-hint",
+                    div { class: "klinx-structural-hint",
                         "Keys: "
                         for (i, key) in STRUCTURAL_KEYS.iter().enumerate() {
-                            span { class: "kiln-structural-hint__key", "{key}" }
+                            span { class: "klinx-structural-hint__key", "{key}" }
                             if i < STRUCTURAL_KEYS.len() - 1 {
                                 " "
                             }
@@ -243,13 +243,13 @@ pub fn SearchPanel() -> Element {
             }
 
             // ── Results ─────────────────────────────────────────────────
-            div { class: "kiln-search-panel__results",
+            div { class: "klinx-search-panel__results",
                 if current_mode == SearchMode::Text {
                     {
                         let r = (results)();
                         if !current_query.is_empty() && r.is_empty() {
                             rsx! {
-                                div { class: "kiln-search-panel__empty",
+                                div { class: "klinx-search-panel__empty",
                                     "No results found."
                                 }
                             }
@@ -274,7 +274,7 @@ pub fn SearchPanel() -> Element {
                         let sq = (structural_query)();
                         if !sq.is_empty() && sr.is_empty() {
                             rsx! {
-                                div { class: "kiln-search-panel__empty",
+                                div { class: "klinx-search-panel__empty",
                                     "No structural matches found."
                                 }
                             }
@@ -302,8 +302,8 @@ fn StructuralResults(results: Vec<StructuralSearchMatch>) -> Element {
     );
 
     rsx! {
-        div { class: "kiln-structural-results",
-            div { class: "kiln-search-results__summary", "{summary}" }
+        div { class: "klinx-structural-results",
+            div { class: "klinx-search-results__summary", "{summary}" }
 
             for m in results {
                 {
@@ -312,22 +312,22 @@ fn StructuralResults(results: Vec<StructuralSearchMatch>) -> Element {
                     let stype = m.stage_type.clone();
                     let detail = m.matched_detail.clone();
                     let accent = match stype.as_str() {
-                        "input" => "kiln-structural-match--input",
-                        "transform" => "kiln-structural-match--transform",
-                        "output" => "kiln-structural-match--output",
+                        "input" => "klinx-structural-match--input",
+                        "transform" => "klinx-structural-match--transform",
+                        "output" => "klinx-structural-match--output",
                         _ => "",
                     };
 
                     rsx! {
                         div {
-                            class: "kiln-structural-match {accent}",
-                            div { class: "kiln-structural-match__header",
-                                span { class: "kiln-structural-match__led" }
-                                span { class: "kiln-structural-match__name", "{name}" }
-                                span { class: "kiln-structural-match__type", "{stype}" }
+                            class: "klinx-structural-match {accent}",
+                            div { class: "klinx-structural-match__header",
+                                span { class: "klinx-structural-match__led" }
+                                span { class: "klinx-structural-match__name", "{name}" }
+                                span { class: "klinx-structural-match__type", "{stype}" }
                             }
-                            div { class: "kiln-structural-match__path", "{path}" }
-                            div { class: "kiln-structural-match__detail", "{detail}" }
+                            div { class: "klinx-structural-match__path", "{path}" }
+                            div { class: "klinx-structural-match__detail", "{detail}" }
                         }
                     }
                 }

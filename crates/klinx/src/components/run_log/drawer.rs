@@ -114,12 +114,12 @@ pub fn RunLogDrawer() -> Element {
 
     rsx! {
         div {
-            class: "kiln-run-log",
+            class: "klinx-run-log",
             "data-expanded": if (state.run_log_expanded)() { "true" } else { "false" },
 
             // ─── Tab bar (always visible) ────────────────────────────────
             div {
-                class: "kiln-run-log-tab",
+                class: "klinx-run-log-tab",
                 onclick: move |_| {
                     // Separate let bindings: release the immutable peek borrow
                     // before taking the mutable borrow for set() (borrow rules).
@@ -129,29 +129,29 @@ pub fn RunLogDrawer() -> Element {
                 },
 
                 // Status LED
-                span { class: "kiln-run-log-led" }
+                span { class: "klinx-run-log-led" }
                 // Label
-                span { class: "kiln-run-log-label", "RUN LOG" }
+                span { class: "klinx-run-log-label", "RUN LOG" }
                 // Expand / collapse chevron
                 span {
-                    class: "kiln-run-log-chevron",
+                    class: "klinx-run-log-chevron",
                     if (state.run_log_expanded)() { "▲" } else { "▼" }
                 }
             }
 
             // ─── Log content (visible when expanded) ─────────────────────
             div {
-                class: "kiln-run-log-content",
+                class: "klinx-run-log-content",
 
                 for (i, line) in demo_log().iter().enumerate() {
                     div {
                         key: "log-{i}",
-                        class: "kiln-log-line",
+                        class: "klinx-log-line",
                         "data-level": line.level.data_attr(),
 
-                        span { class: "kiln-log-ts",  "{line.timestamp}" }
-                        span { class: "kiln-log-tag", "{line.level.tag()}" }
-                        span { class: "kiln-log-msg", "{line.message}" }
+                        span { class: "klinx-log-ts",  "{line.timestamp}" }
+                        span { class: "klinx-log-tag", "{line.level.tag()}" }
+                        span { class: "klinx-log-msg", "{line.message}" }
                     }
                 }
             }

@@ -28,9 +28,9 @@ pub fn LogTab() -> Element {
     let commit_list = (commits)();
 
     rsx! {
-        div { class: "kiln-log-tab",
+        div { class: "klinx-log-tab",
             if commit_list.is_empty() {
-                div { class: "kiln-log-tab__empty",
+                div { class: "klinx-log-tab__empty",
                     "No commits found."
                 }
             }
@@ -47,19 +47,19 @@ pub fn LogTab() -> Element {
                     let time = relative_time(commit.timestamp);
 
                     rsx! {
-                        div { class: "kiln-log-entry",
-                            div { class: "kiln-log-entry__graph",
-                                span { class: "kiln-log-entry__dot", "●" }
-                                div { class: "kiln-log-entry__line" }
+                        div { class: "klinx-log-entry",
+                            div { class: "klinx-log-entry__graph",
+                                span { class: "klinx-log-entry__dot", "●" }
+                                div { class: "klinx-log-entry__line" }
                             }
-                            div { class: "kiln-log-entry__info",
-                                div { class: "kiln-log-entry__header",
-                                    span { class: "kiln-log-entry__hash", "{short_hash}" }
-                                    span { class: "kiln-log-entry__subject", "{subject}" }
+                            div { class: "klinx-log-entry__info",
+                                div { class: "klinx-log-entry__header",
+                                    span { class: "klinx-log-entry__hash", "{short_hash}" }
+                                    span { class: "klinx-log-entry__subject", "{subject}" }
                                 }
-                                div { class: "kiln-log-entry__meta",
-                                    span { class: "kiln-log-entry__author", "{author}" }
-                                    span { class: "kiln-log-entry__time", " · {time}" }
+                                div { class: "klinx-log-entry__meta",
+                                    span { class: "klinx-log-entry__author", "{author}" }
+                                    span { class: "klinx-log-entry__time", " · {time}" }
                                 }
                             }
                         }
