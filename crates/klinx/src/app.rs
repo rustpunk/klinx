@@ -1,7 +1,3 @@
-use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
-use dioxus::desktop::tao::event::Event;
-use dioxus::desktop::{WindowEvent, use_window, use_wry_event_handler};
-use dioxus::prelude::*;
 /// Root application shell: owns all reactive signals.
 ///
 /// Per-tab state is stored as plain data in `TabEntry::snapshot`. AppShell
@@ -15,8 +11,6 @@ use dioxus::prelude::*;
 /// Navigation uses a two-level model:
 /// - `NavigationContext` selects the active page (Pipeline, Channels, Git, Docs, Runs)
 /// - `PipelineLayoutMode` selects the view within Pipeline (Canvas, Hybrid, Editor)
-use klinx_git::GitOps;
-
 use crate::components::confirm_dialog::{ConfirmAction, ConfirmDialog, PendingConfirm};
 use crate::components::toast::ToastState;
 use crate::components::{
@@ -27,14 +21,17 @@ use crate::components::{
     toast::ToastOverlay, welcome_screen::WelcomeScreen, yaml_sidebar::YamlSidebar,
 };
 use clinker_schema::SchemaIndex;
+use dioxus::desktop::tao::dpi::{PhysicalPosition, PhysicalSize};
+use dioxus::desktop::tao::event::Event;
+use dioxus::desktop::{WindowEvent, use_window, use_wry_event_handler};
+use dioxus::prelude::*;
 
 use crate::keyboard::handle_keyboard;
-use crate::perf::perf_trace;
 use crate::state::{
     AppState, ChannelViewMode, KilnTheme, LeftPanel, NavigationContext, PipelineLayoutMode,
     TabManagerState, use_app_state,
 };
-use crate::sync::{EditSource, ParseResult, serialize_yaml, try_parse_yaml};
+use crate::sync::EditSource;
 use crate::tab::{TabEntry, TabId};
 use crate::workspace;
 
@@ -49,7 +46,7 @@ pub fn AppShell() -> Element {
     let mut parse_errors = use_signal(Vec::new);
     let mut edit_source = use_signal(|| EditSource::None);
     let mut selected_stages = use_signal(std::collections::HashSet::<String>::new);
-    let mut schema_warnings = use_signal(Vec::new);
+    let schema_warnings = use_signal(Vec::new);
     let mut partial_pipeline = use_signal(|| None);
     // Debounced parse: keystrokes coalesce into one parse ~150ms after typing
     // stops. The debounce effect (below) bumps `parse_trigger`, which the parse
@@ -107,12 +104,12 @@ pub fn AppShell() -> Element {
 
     // ── Left panel + schema index + template gallery ──────────────────────
     let left_panel: Signal<LeftPanel> = use_signal(|| LeftPanel::None);
-    let mut schema_index: Signal<SchemaIndex> = use_signal(SchemaIndex::default);
+    let schema_index: Signal<SchemaIndex> = use_signal(SchemaIndex::default);
     let show_template_gallery: Signal<bool> = use_signal(|| false);
-    let mut git_state: Signal<Option<klinx_git::RepoStatus>> = use_signal(|| None);
+    let git_state: Signal<Option<klinx_git::RepoStatus>> = use_signal(|| None);
     let show_command_palette: Signal<bool> = use_signal(|| false);
     let show_settings: Signal<bool> = use_signal(|| false);
-    let mut channel_state: Signal<Option<crate::state::ChannelState>> = use_signal(|| None);
+    let channel_state: Signal<Option<crate::state::ChannelState>> = use_signal(|| None);
     let theme: Signal<KilnTheme> = use_signal(|| {
         session_data
             .peek()
@@ -171,57 +168,14 @@ pub fn AppShell() -> Element {
         });
     }
 
-    // ── Git: detect repo and compute status on workspace change ──────────
-    {
-        use_effect(move || {
-            let ws = (workspace)();
-            if let Some(ref ws) = ws {
-                match klinx_git::GitCliOps::discover(&ws.root) {
-                    Ok(ops) => {
-                        if let Ok(status) = ops.status() {
-                            git_state.set(Some(status));
-                        }
-                    }
-                    Err(_) => git_state.set(None),
-                }
-            } else {
-                git_state.set(None);
-            }
-        });
-    }
+    // ── Git: discover repo + compute status, and run the FS watcher ──────
+    crate::hooks::use_git_state(workspace, git_state);
 
     // ── Schema index: rebuild when workspace changes ─────────────────────
-    {
-        use_effect(move || {
-            let ws = (workspace)();
-            if let Some(ref ws) = ws {
-                let (index, _errors) = ws.build_schema_index();
-                schema_index.set(index);
-            } else {
-                schema_index.set(SchemaIndex::default());
-            }
-        });
-    }
+    crate::hooks::use_schema_index(workspace, schema_index);
 
-    // ── Channel state: discover channels when workspace changes ────────
-    {
-        use_effect(move || {
-            let ws = (workspace)();
-            if let Some(ref ws) = ws {
-                let mut state = workspace::discover_channels(ws);
-                // Restore persisted channel selection
-                if let Some(ref mut cs) = state
-                    && let Some(ref chan_persist) = ws.state.channels
-                {
-                    cs.active_channel = chan_persist.active.clone();
-                    cs.recent_channels = chan_persist.recent.clone();
-                }
-                channel_state.set(state);
-            } else {
-                channel_state.set(None);
-            }
-        });
-    }
+    // ── Channel state: discover channels + restore persisted selection ───
+    crate::hooks::use_channels(workspace, channel_state);
 
     // ── Workspace available: re-parse active tab to resolve compositions ──
     // On startup, tabs may restore before the workspace signal is set.
@@ -238,78 +192,24 @@ pub fn AppShell() -> Element {
         });
     }
 
-    // ── Filesystem watcher: auto-refresh git status + schema index ─────
-    // Spawns a background watcher on the workspace root. Debounced 500ms.
-    {
-        use_effect(move || {
-            let ws = (workspace)();
-            let Some(ref ws) = ws else { return };
-
-            let root = ws.root.clone();
-            let Some((_watcher, rx)) = crate::fs_watcher::start_watcher(&root) else {
-                return;
-            };
-
-            // Spawn a polling loop that checks for debounced changes
-            // and refreshes git/schema state.
-            let _root2 = root.clone();
-            std::thread::spawn(move || {
-                while let Ok(paths) = rx.recv() {
-                    if crate::fs_watcher::has_git_relevant_changes(&paths) {
-                        // Refresh git status — we can't write to signals from a
-                        // non-Dioxus thread directly. The git state is read-refreshed
-                        // on next render cycle via the workspace effect above.
-                        // For now, this ensures the watcher is running — the actual
-                        // refresh is triggered by re-reading workspace signal.
-                    }
-                }
-            });
-        });
-    }
-
-    // ── Session persistence: save on quit + periodic autosave ─────────────
-    // use_drop fires when AppShell's scope drops (window close, app exit).
-    use_drop({
-        let tabs = tabs;
-        let channel_state = channel_state;
-        move || {
-            workspace::save_full_session(
-                &workspace.peek(),
-                &tabs.peek(),
-                *active_tab_id.peek(),
-                *active_context.peek(),
-                *pipeline_layout.peek(),
-                *activity_bar_visible.peek(),
-                &channel_state.peek(),
-                *theme.peek(),
-                window_geom.peek().clone(),
-            );
-        }
-    });
-
-    // Periodic autosave: flush state to disk every 5 seconds.
-    // Catches all state changes even if the user never switches tabs.
-    // Worst case on force-kill: lose last 5 seconds of layout/tab state.
-    use_future(move || {
-        let tabs = tabs;
-        let channel_state = channel_state;
-        async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                workspace::save_full_session(
-                    &workspace.peek(),
-                    &tabs.peek(),
-                    *active_tab_id.peek(),
-                    *active_context.peek(),
-                    *pipeline_layout.peek(),
-                    *activity_bar_visible.peek(),
-                    &channel_state.peek(),
-                    *theme.peek(),
-                    window_geom.peek().clone(),
-                );
-            }
-        }
-    });
+    // ── Session persistence: save on quit, 5s autosave, tab-snapshot sync ─
+    crate::hooks::use_session_persistence(
+        workspace,
+        tabs,
+        active_tab_id,
+        active_context,
+        pipeline_layout,
+        activity_bar_visible,
+        channel_state,
+        theme,
+        window_geom,
+        yaml_text,
+        pipeline,
+        partial_pipeline,
+        parse_errors,
+        selected_stages,
+        edit_source,
+    );
 
     // ── Toast + confirm dialog ───────────────────────────────────────────
     let toast_message: Signal<Option<ToastState>> = use_signal(|| None);
@@ -504,119 +404,20 @@ pub fn AppShell() -> Element {
         });
     }
 
-    // ── Sync effects: YAML ↔ pipeline model ──────────────────────────────
-    {
-        let mut pipeline = pipeline;
-        let mut partial_pipeline = partial_pipeline;
-        let mut parse_errors = parse_errors;
-
-        use_effect(move || {
-            // Debounced trigger (keystrokes) + edit_source (immediate parse for
-            // programmatic Yaml transitions: tab load, workspace re-resolve).
-            let _ = (parse_trigger)();
-            let source = (edit_source)();
-
-            if source != EditSource::Yaml {
-                return;
-            }
-
-            // Read text non-reactively: this effect fires only on the debounced
-            // trigger / source change (never per keystroke) and always sees the
-            // latest text, so there is no stale-text race.
-            let text = yaml_text.peek().clone();
-            let ws_root = workspace.read().as_ref().map(|ws| ws.root.clone());
-
-            let parse_result = perf_trace!(
-                try_parse_yaml(&text, ws_root.as_deref()),
-                "try_parse_yaml: {} bytes",
-                text.len()
-            );
-
-            match parse_result {
-                ParseResult::Complete(resolved) => {
-                    pipeline.set(Some(resolved.resolved));
-                    partial_pipeline.set(None);
-                    parse_errors.set(Vec::new());
-                }
-                ParseResult::Partial(partial) => {
-                    pipeline.set(None);
-                    partial_pipeline.set(Some(partial.clone()));
-                    parse_errors.set(partial.errors);
-                }
-                ParseResult::Failed(errors) => {
-                    partial_pipeline.set(None);
-                    parse_errors.set(errors);
-                }
-            }
-        });
-    }
-
-    {
-        let mut yaml_text = yaml_text;
-        let mut parse_errors = parse_errors;
-
-        use_effect(move || {
-            let source = (edit_source)();
-            let pl_val = (pipeline)();
-
-            if source != EditSource::Inspector {
-                return;
-            }
-
-            if let Some(ref config) = pl_val {
-                let yaml = serialize_yaml(config);
-                yaml_text.set(yaml);
-                parse_errors.set(Vec::new());
-            }
-        });
-    }
-
-    // ── Schema validation: run when pipeline or schema index changes ──────
-    {
-        use_effect(move || {
-            let pl = (pipeline)();
-            let idx = (schema_index)();
-            let ws = (workspace)();
-
-            if let (Some(config), Some(ws)) = (pl.as_ref(), ws.as_ref()) {
-                let warnings = clinker_schema::validate_pipeline(config, &idx, &ws.root);
-                schema_warnings.set(warnings);
-            } else {
-                schema_warnings.set(Vec::new());
-            }
-        });
-    }
-
-    // ── Sync active tab snapshot from signals (debounced) ────────────────
-    // Keeps the active tab snapshot current for is_dirty()/save. Subscribes to
-    // the parse OUTPUTS (pipeline/partial/errors) — which the parse effect above
-    // already debounces — plus selection, so `tabs` is written ~once per typing
-    // pause instead of per keystroke (no tab-bar re-render on every character).
-    // yaml_text/edit_source are read non-reactively. The dirty dot therefore
-    // appears ~150ms after typing starts; save/close paths call
-    // `flush_active_snapshot` first so they never act on stale text (keyboard.rs).
-    {
-        use_effect(move || {
-            let pl = (pipeline)();
-            let pp = (partial_pipeline)();
-            let errs = (parse_errors)();
-            let sel = selected_stages.read().iter().next().cloned();
-
-            if let Some(active_id) = (active_tab_id)() {
-                let text = yaml_text.peek().clone();
-                let src = *edit_source.peek();
-                let mut tabs_w = tabs.write();
-                if let Some(tab) = tabs_w.iter_mut().find(|t| t.id == active_id) {
-                    tab.snapshot.yaml_text = text;
-                    tab.snapshot.pipeline = pl;
-                    tab.snapshot.partial_pipeline = pp;
-                    tab.snapshot.parse_errors = errs;
-                    tab.snapshot.edit_source = src;
-                    tab.snapshot.selected_stage = sel;
-                }
-            }
-        });
-    }
+    // ── Edit-sync: YAML ↔ pipeline ↔ schema validation ───────────────────
+    // The EditSource guards inside this hook break the YAML↔inspector feedback
+    // loop; the debounce effect above re-arms the parse via `parse_trigger`.
+    crate::hooks::use_pipeline_sync(
+        parse_trigger,
+        edit_source,
+        yaml_text,
+        workspace,
+        pipeline,
+        partial_pipeline,
+        parse_errors,
+        schema_index,
+        schema_warnings,
+    );
 
     let has_active_tab = current_active.is_some();
     let current_ctx = (active_context)();
