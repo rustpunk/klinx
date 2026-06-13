@@ -136,12 +136,25 @@ fn try_patch(current_yaml: &str, config: &PipelineConfig) -> Option<String> {
             out.push_str(&current_yaml[rs..re]);
         } else {
             // Changed node: re-serialize just this one as a list item at the
-            // same indent. Its own inline comments normalize away — acceptable,
-            // it is the node being edited — while neighbours stay verbatim.
+            // same indent. Its own inline comments on data lines normalize away
+            // — acceptable, it is the node being edited.
+            //
+            // A node's source region `[rs..re)` runs up to the next node's
+            // start (or the block end), so it also absorbs any blank lines and
+            // standalone comment lines that sit *between* this node's body and
+            // the next node (an inter-node comment is visually "before the next
+            // node" but byte-wise "after this node"). Those belong to the user,
+            // not to this node's serialization — re-serializing the whole region
+            // would silently delete them (issue #29 is a data-loss fix; dropping
+            // a comment is the same class of regression). So split off the
+            // trailing run of blank/comment lines and keep it verbatim; only the
+            // node's own data lines are replaced.
+            let gutter = node_trailing_gutter(current_yaml, rs, re);
             out.push_str(&serialize_node_as_list_item(
                 &config.nodes[i].value,
                 node_base_indent(current_yaml, rs),
             ));
+            out.push_str(&current_yaml[gutter..re]);
         }
     }
 
@@ -166,14 +179,20 @@ pub fn serialize_yaml_full(config: &PipelineConfig) -> String {
         Err(e) => return format!("# Serialization error: {e}\n"),
     };
 
-    if config.nodes.is_empty() {
-        return meta;
-    }
-
-    let mut nodes_block = String::from("nodes:\n");
-    for node in &config.nodes {
-        nodes_block.push_str(&serialize_node_as_list_item(&node.value, 0));
-    }
+    // `nodes:` is a required key on `PipelineConfig` — the engine rejects a
+    // document that omits it (`SerdeMissingField: nodes`). An empty node set
+    // must therefore still emit an explicit `nodes: []` so the output re-parses;
+    // returning the node-less `meta` would produce YAML the engine refuses to
+    // load, breaking the round-trip on this fallback path.
+    let nodes_block = if config.nodes.is_empty() {
+        String::from("nodes: []\n")
+    } else {
+        let mut block = String::from("nodes:\n");
+        for node in &config.nodes {
+            block.push_str(&serialize_node_as_list_item(&node.value, 0));
+        }
+        block
+    };
 
     // Insert the `nodes:` block directly after the `pipeline:` mapping so the
     // document reads in the canonical order (pipeline → nodes → error_handling
@@ -231,6 +250,35 @@ fn node_base_indent(text: &str, line_start_off: usize) -> usize {
         .unwrap_or(text.len());
     let line = &text[line_start_off..line_end];
     line.len() - line.trim_start().len()
+}
+
+/// Byte offset within node region `[rs..re)` at which the trailing run of
+/// blank and comment-only lines begins — i.e. the boundary between the node's
+/// own data lines and the inter-node gutter (blank lines + standalone comments)
+/// that precede the next node.
+///
+/// Walks the region's lines and tracks the offset just past the last
+/// data-bearing line; lines whose trimmed content is empty or starts with `#`
+/// after that point form the trailing gutter. The node's body is `[rs..gutter)`;
+/// `[gutter..re)` is preserved verbatim when the node is re-serialized so the
+/// user's inter-node comments and spacing survive. If the whole region is data
+/// (no trailing gutter), returns `re`.
+fn node_trailing_gutter(text: &str, rs: usize, re: usize) -> usize {
+    let region = &text[rs..re];
+    // Walk lines, remembering the start offset of the last data-bearing line's
+    // *successor* — that is where the trailing gutter begins.
+    let mut gutter = rs;
+    let mut at = rs;
+    for line in region.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let is_blank_or_comment = trimmed.is_empty() || trimmed.starts_with('#');
+        at += line.len();
+        if !is_blank_or_comment {
+            // Data line: the gutter (if any) starts after this line.
+            gutter = at;
+        }
+    }
+    gutter
 }
 
 /// From a byte offset inside the `nodes:` block, find where the block ends.
@@ -484,5 +532,67 @@ _notes:
         let cfg = parse_config(FIXTURE).expect("fixture parses");
         let out = patch_yaml_preserving_nodes(FIXTURE, &cfg);
         assert_eq!(out, FIXTURE, "a no-op edit must not perturb the document");
+    }
+
+    /// Editing a node must NOT delete an inter-node comment that sits between
+    /// the edited node's body and the next node. A node's source region runs up
+    /// to the next node's line-start, so such a comment is byte-wise inside the
+    /// edited node's region even though it visually belongs "before the next
+    /// node"; re-serializing the whole region used to drop it. Edit the FIRST
+    /// node (whose region contains the `# comment between nodes` line) and
+    /// assert the comment survives.
+    #[test]
+    fn editing_a_node_preserves_following_inter_node_comment() {
+        let mut edited = parse_config(FIXTURE).expect("fixture parses");
+        edited.set_stage_notes("raw", Some(serde_json::json!({ "edited": true })));
+        let patched = patch_yaml_preserving_nodes(FIXTURE, &edited);
+
+        assert!(
+            patched.contains("# comment between nodes"),
+            "an inter-node comment after the edited node must survive:\n{patched}"
+        );
+        let after = parse_config(&patched).expect("patched re-parses");
+        assert_eq!(node_names(&after), node_names(&edited));
+        assert_eq!(
+            after.stage_notes("raw"),
+            Some(&serde_json::json!({ "edited": true }))
+        );
+    }
+
+    /// Editing the LAST node must preserve a trailing comment that follows it
+    /// with no top-level sibling key after (the region extends to EOF). The
+    /// trailing-gutter split keeps that comment verbatim.
+    #[test]
+    fn editing_last_node_preserves_trailing_comment() {
+        let src = "pipeline:\n  name: demo\nnodes:\n  - type: source\n    name: a\n    \
+config:\n      name: a\n      type: csv\n      path: a.csv\n      schema:\n        \
+- { name: id, type: string }\n# trailing comment after last node\n";
+        let mut edited = parse_config(src).expect("fixture parses");
+        edited.set_stage_notes("a", Some(serde_json::json!({ "n": 1 })));
+        let patched = patch_yaml_preserving_nodes(src, &edited);
+
+        assert!(
+            patched.contains("# trailing comment after last node"),
+            "a trailing comment after the last (edited) node must survive:\n{patched}"
+        );
+        assert_eq!(parse_config(&patched).expect("re-parses").nodes.len(), 1);
+    }
+
+    /// The full-rebuild fallback must emit an explicit `nodes: []` for an empty
+    /// node set so the output still re-parses — `nodes:` is a required engine
+    /// key, and node-less output would fail to load (the very class of failure
+    /// this module exists to prevent).
+    #[test]
+    fn full_serializer_emits_empty_nodes_block() {
+        let src = "pipeline:\n  name: demo\nnodes: []\nerror_handling:\n  strategy: continue\n";
+        let cfg = parse_config(src).expect("empty-nodes fixture parses");
+        assert!(cfg.nodes.is_empty());
+        let out = serialize_yaml_full(&cfg);
+        assert!(
+            out.contains("nodes: []") || out.contains("nodes:\n"),
+            "must emit a nodes key for an empty node set:\n{out}"
+        );
+        let reparsed = parse_config(&out).expect("empty-nodes fallback output re-parses");
+        assert!(reparsed.nodes.is_empty());
     }
 }
