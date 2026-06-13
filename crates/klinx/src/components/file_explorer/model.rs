@@ -22,6 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clinker_schema::SchemaIndex;
+use klinx_git::{FileStatus, StatusKind};
 
 use crate::state::ChannelState;
 use crate::workspace::Workspace;
@@ -376,6 +377,47 @@ pub fn expand_sections(tree: &ExplorerTree) -> HashSet<NodeId> {
         .collect()
 }
 
+// ── Row decorations ────────────────────────────────────────────────────────
+
+/// Git status for a file row, matched against the repo's changed-file list.
+///
+/// `git_files` holds only the changed files (added/modified/deleted/untracked),
+/// so it is short and a linear scan is cheap. Its paths are relative to the
+/// **git repo root**, which may be an ancestor of the workspace root when the
+/// workspace is nested inside a larger repo (e.g. `examples/pipelines/` within
+/// this repo). A suffix match (`Path::ends_with`, which compares whole
+/// components) therefore matches correctly regardless of that offset — the same
+/// rule [`crate::components::tab_bar`] uses for tab badges. `strip_prefix(ws.root)`
+/// would *not* work here: it yields workspace-relative paths, a different base.
+///
+/// Returns `None` for non-file rows (sections, groups/directories).
+///
+/// Known limitations (all shared with the tab bar, and all rooted in the git
+/// layer rather than here — precise matching is deferred to a follow-up that
+/// would unify both call sites):
+/// - A *short* repo-relative path (e.g. a single component when the workspace
+///   **is** the repo root) can suffix-match a same-named file in a deeper
+///   directory, tinting it spuriously. An exact match would need the repo root
+///   *and* a canonicalized workspace root (the workspace root is stored
+///   un-canonicalized), so suffix matching is the robust choice here.
+/// - Renamed files do not match: `klinx-git` parses `git status --porcelain`
+///   rename lines as the single string `"old -> new"`, which is no row's path.
+/// - Files inside a freshly-created directory do not match: porcelain reports
+///   the directory (`?? dir/`), not its individual files (no `-uall`).
+///
+/// In practice the explorer lists files that exist on disk, so the reachable
+/// states are Modified / Added / Untracked.
+pub fn row_git_status(row: &FlatNode, git_files: &[FileStatus]) -> Option<StatusKind> {
+    if !matches!(row.kind, NodeKind::File { .. }) {
+        return None;
+    }
+    let path = row.path.as_deref()?;
+    git_files
+        .iter()
+        .find(|f| path.ends_with(&f.path))
+        .map(|f| f.status)
+}
+
 // ── Glob matcher ─────────────────────────────────────────────────────────
 //
 // A tiny `read_dir`-based matcher for the include/exclude patterns the manifest
@@ -673,5 +715,75 @@ mod tests {
             NodeId::File(PathBuf::from("/a/b.yaml")).to_string(),
             "file:/a/b.yaml"
         );
+    }
+
+    fn file_row(abs: &str) -> FlatNode {
+        FlatNode {
+            id: NodeId::File(PathBuf::from(abs)),
+            depth: 1,
+            kind: NodeKind::File { openable: true },
+            label: file_label(Path::new(abs)),
+            path: Some(PathBuf::from(abs)),
+            expandable: false,
+        }
+    }
+
+    #[test]
+    fn git_status_matches_repo_relative_suffix() {
+        // Workspace nested under the repo root: `git status` paths are relative
+        // to the repo root, not the workspace, so matching is suffix-based.
+        let files = vec![
+            FileStatus {
+                path: PathBuf::from("examples/pipelines/customer_etl.yaml"),
+                status: StatusKind::Modified,
+            },
+            FileStatus {
+                path: PathBuf::from("examples/pipelines/new_pipe.yaml"),
+                status: StatusKind::Untracked,
+            },
+        ];
+
+        let row = file_row("/home/me/repo/examples/pipelines/customer_etl.yaml");
+        assert_eq!(row_git_status(&row, &files), Some(StatusKind::Modified));
+
+        let row = file_row("/home/me/repo/examples/pipelines/new_pipe.yaml");
+        assert_eq!(row_git_status(&row, &files), Some(StatusKind::Untracked));
+
+        // Unchanged file → no decoration.
+        let row = file_row("/home/me/repo/examples/pipelines/audit_join.yaml");
+        assert_eq!(row_git_status(&row, &files), None);
+
+        // Same filename under a different directory must NOT false-match —
+        // `ends_with` compares whole components, not raw string suffixes.
+        let row = file_row("/home/me/repo/examples/other/customer_etl.yaml");
+        assert_eq!(row_git_status(&row, &files), None);
+    }
+
+    #[test]
+    fn git_status_workspace_is_repo_root() {
+        // Workspace == repo root: a single-component repo-relative path matches.
+        let files = vec![FileStatus {
+            path: PathBuf::from("customer_etl.yaml"),
+            status: StatusKind::Added,
+        }];
+        let row = file_row("/ws/customer_etl.yaml");
+        assert_eq!(row_git_status(&row, &files), Some(StatusKind::Added));
+    }
+
+    #[test]
+    fn git_status_none_for_non_file_rows() {
+        let files = vec![FileStatus {
+            path: PathBuf::from("Pipelines"),
+            status: StatusKind::Modified,
+        }];
+        let section = FlatNode {
+            id: NodeId::Section(SectionKind::Pipelines),
+            depth: 0,
+            kind: NodeKind::Section(SectionKind::Pipelines),
+            label: "Pipelines".into(),
+            path: None,
+            expandable: true,
+        };
+        assert_eq!(row_git_status(&section, &files), None);
     }
 }

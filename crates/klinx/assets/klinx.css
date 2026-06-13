@@ -1427,8 +1427,51 @@ input:-webkit-autofill:focus {
 }
 
 .klinx-file-explorer__label {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--klinx-row-git, inherit);
+}
+
+/* Git status letter badge (A/M/D/R/U), right of the filename; shares the row's
+   git tint via the custom property set on the row modifier below. */
+.klinx-file-explorer__git {
+  flex: 0 0 auto;
+  padding-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--klinx-row-git, inherit);
+}
+
+/* Git tints reuse the version-mode status palette. Untracked maps to green
+   (git's own colour for new files) rather than the changes-tab's dim grey: in
+   the explorer most rows are already grey, so dim grey would make an untracked
+   file indistinguishable from a tracked, unchanged one. */
+.klinx-file-explorer__row--modified  { --klinx-row-git: var(--klinx-hazard); }
+.klinx-file-explorer__row--added,
+.klinx-file-explorer__row--untracked { --klinx-row-git: var(--klinx-ok-green); }
+.klinx-file-explorer__row--deleted   { --klinx-row-git: var(--klinx-oxide-red); }
+.klinx-file-explorer__row--renamed   { --klinx-row-git: var(--klinx-verdigris); }
+
+/* A file open in a tab gets a faint left rail; the active tab's file gets a
+   stronger verdigris rail + selection background (mirrors the active-tab top
+   accent). `--active` is declared after `--open` so it wins when both apply. */
+.klinx-file-explorer__row--open {
+  box-shadow: inset 2px 0 0 var(--klinx-border-strong);
+}
+.klinx-file-explorer__row--active {
+  background: var(--klinx-border-strong);
+  color: var(--klinx-bone);
+  box-shadow: inset 2px 0 0 var(--klinx-verdigris);
+}
+
+/* On the selected row the filename returns to high-contrast bone: a git tint
+   over the selection background can be too low-contrast (e.g. green on
+   border-strong, worst in the Enamel theme). The coloured status-letter badge
+   still carries the git state. */
+.klinx-file-explorer__row--active .klinx-file-explorer__label {
+  color: inherit;
 }
 
 .klinx-file-explorer__empty {
