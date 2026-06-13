@@ -51,6 +51,12 @@ pub fn AppShell() -> Element {
     let mut selected_stages = use_signal(std::collections::HashSet::<String>::new);
     let mut schema_warnings = use_signal(Vec::new);
     let mut partial_pipeline = use_signal(|| None);
+    // Debounced parse: keystrokes coalesce into one parse ~150ms after typing
+    // stops. The debounce effect (below) bumps `parse_trigger`, which the parse
+    // effect keys on; `debounce_gen` identifies the latest pending keystroke so
+    // only the most recent debounce task fires.
+    let mut parse_trigger = use_signal(|| 0u64);
+    let mut debounce_gen = use_signal(|| 0u64);
     let channel_view_mode = use_signal(|| ChannelViewMode::Raw);
     let compiled_plan: Signal<Option<std::sync::Arc<clinker_core::plan::CompiledPlan>>> =
         use_signal(|| None);
@@ -473,6 +479,31 @@ pub fn AppShell() -> Element {
         theme,
     };
 
+    // ── Debounce: bump `parse_trigger` ~150ms after the last YAML keystroke ─
+    // The textarea echoes keystrokes natively, so trailing the parse has no
+    // perceptible cost but collapses a burst of keystrokes into one
+    // parse+validate+canvas-rebuild.
+    {
+        use_effect(move || {
+            let _ = (yaml_text)(); // re-arm on every keystroke
+            // Only debounce-parse YAML-sourced edits; inspector-driven yaml_text
+            // writes carry EditSource::Inspector and must not schedule a parse.
+            if *edit_source.peek() != EditSource::Yaml {
+                return;
+            }
+            let generation = *debounce_gen.peek() + 1;
+            debounce_gen.set(generation);
+            spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                // Fire only if no newer keystroke arrived during the wait.
+                if *debounce_gen.peek() == generation {
+                    let next = *parse_trigger.peek() + 1;
+                    parse_trigger.set(next);
+                }
+            });
+        });
+    }
+
     // ── Sync effects: YAML ↔ pipeline model ──────────────────────────────
     {
         let mut pipeline = pipeline;
@@ -480,13 +511,19 @@ pub fn AppShell() -> Element {
         let mut parse_errors = parse_errors;
 
         use_effect(move || {
+            // Debounced trigger (keystrokes) + edit_source (immediate parse for
+            // programmatic Yaml transitions: tab load, workspace re-resolve).
+            let _ = (parse_trigger)();
             let source = (edit_source)();
-            let text = (yaml_text)();
 
             if source != EditSource::Yaml {
                 return;
             }
 
+            // Read text non-reactively: this effect fires only on the debounced
+            // trigger / source change (never per keystroke) and always sees the
+            // latest text, so there is no stale-text race.
+            let text = yaml_text.peek().clone();
             let ws_root = workspace.read().as_ref().map(|ws| ws.root.clone());
 
             let parse_result = perf_trace!(
@@ -550,19 +587,24 @@ pub fn AppShell() -> Element {
         });
     }
 
-    // ── Sync active tab snapshot from signals periodically ───────────────
-    // Keep the active tab's snapshot in sync with live signal values
-    // so is_dirty() and save work correctly.
+    // ── Sync active tab snapshot from signals (debounced) ────────────────
+    // Keeps the active tab snapshot current for is_dirty()/save. Subscribes to
+    // the parse OUTPUTS (pipeline/partial/errors) — which the parse effect above
+    // already debounces — plus selection, so `tabs` is written ~once per typing
+    // pause instead of per keystroke (no tab-bar re-render on every character).
+    // yaml_text/edit_source are read non-reactively. The dirty dot therefore
+    // appears ~150ms after typing starts; save/close paths call
+    // `flush_active_snapshot` first so they never act on stale text (keyboard.rs).
     {
         use_effect(move || {
-            let text = (yaml_text)();
             let pl = (pipeline)();
             let pp = (partial_pipeline)();
             let errs = (parse_errors)();
-            let src = (edit_source)();
             let sel = selected_stages.read().iter().next().cloned();
 
             if let Some(active_id) = (active_tab_id)() {
+                let text = yaml_text.peek().clone();
+                let src = *edit_source.peek();
                 let mut tabs_w = tabs.write();
                 if let Some(tab) = tabs_w.iter_mut().find(|t| t.id == active_id) {
                     tab.snapshot.yaml_text = text;

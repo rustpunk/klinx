@@ -19,7 +19,7 @@ use crate::components::confirm_dialog::PendingConfirm;
 use crate::components::toast::{ToastState, toast_error, toast_success};
 use crate::file_ops;
 use crate::state::{AppState, LeftPanel, NavigationContext, PipelineLayoutMode, TabManagerState};
-use crate::sync::serialize_yaml;
+use crate::sync::{ParseResult, serialize_yaml, try_parse_yaml};
 use crate::tab::{TabEntry, TabId};
 use crate::workspace;
 
@@ -383,6 +383,51 @@ pub fn open_file(tab_mgr: &mut TabManagerState) {
     }
 }
 
+/// Reconcile `tab_id`'s snapshot with the live editor signals (parsing
+/// synchronously) — but only when it is the active tab.
+///
+/// The parse→snapshot sync (`app.rs`) is debounced, so a save or close issued
+/// within the ~150ms debounce window would otherwise read stale snapshot text or
+/// a stale serialized pipeline. Save and close paths call this first so they act
+/// on the latest text. Only the active tab has live signals diverging from its
+/// snapshot; non-active tabs already hold an authoritative snapshot (synced on
+/// tab switch), so this is a no-op for them.
+pub fn flush_snapshot_if_active(tab_mgr: &mut TabManagerState, tab_id: TabId) {
+    if (tab_mgr.active_tab_id)() != Some(tab_id) {
+        return;
+    }
+
+    // `consume_context` (not the `use_context` hook): this runs from event
+    // handlers, not during render, so a positional hook here would corrupt the
+    // caller scope's hook ordering.
+    let app = *consume_context::<Signal<AppState>>().read();
+
+    let text = app.yaml_text.peek().clone();
+    let src = *app.edit_source.peek();
+    let sel = app.selected_stages.peek().iter().next().cloned();
+    let ws_root = tab_mgr.workspace.peek().as_ref().map(|ws| ws.root.clone());
+
+    // Mirror the parse effect so the snapshot matches what the debounce would
+    // eventually produce.
+    let (pipeline, partial_pipeline, parse_errors) = match try_parse_yaml(&text, ws_root.as_deref())
+    {
+        ParseResult::Complete(resolved) => (Some(resolved.resolved), None, Vec::new()),
+        ParseResult::Partial(partial) => (None, Some(partial.clone()), partial.errors),
+        ParseResult::Failed(errors) => (None, None, errors),
+    };
+
+    let mut tabs = tab_mgr.tabs;
+    let mut tabs_w = tabs.write();
+    if let Some(tab) = tabs_w.iter_mut().find(|t| t.id == tab_id) {
+        tab.snapshot.yaml_text = text;
+        tab.snapshot.pipeline = pipeline;
+        tab.snapshot.partial_pipeline = partial_pipeline;
+        tab.snapshot.parse_errors = parse_errors;
+        tab.snapshot.edit_source = src;
+        tab.snapshot.selected_stage = sel;
+    }
+}
+
 /// Save the active tab to disk. Handles save-as for untitled tabs.
 /// Auto-creates the workspace (kiln.toml) on first save.
 pub fn save_active_tab(tab_mgr: &mut TabManagerState, force_save_as: bool) {
@@ -396,6 +441,10 @@ pub fn save_active_tab(tab_mgr: &mut TabManagerState, force_save_as: bool) {
 
 /// Save a specific tab by ID.
 fn save_tab_by_id(tab_mgr: &mut TabManagerState, tab_id: TabId, force_save_as: bool) {
+    // Ensure the snapshot reflects the latest keystrokes before we read it
+    // (the snapshot sync is debounced).
+    flush_snapshot_if_active(tab_mgr, tab_id);
+
     let mut tabs = tab_mgr.tabs;
 
     // Get current YAML + file path from snapshot
@@ -458,6 +507,10 @@ fn save_tab_by_id(tab_mgr: &mut TabManagerState, tab_id: TabId, force_save_as: b
 
 /// Request to close a tab — shows confirm dialog if dirty.
 pub fn request_close_tab(tab_mgr: &mut TabManagerState, tab_id: TabId) {
+    // Reconcile the snapshot first so a close issued mid-debounce sees the real
+    // dirty state (otherwise the last <150ms of edits could be silently dropped).
+    flush_snapshot_if_active(tab_mgr, tab_id);
+
     let is_dirty = tab_mgr
         .tabs
         .read()

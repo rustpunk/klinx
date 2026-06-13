@@ -19,13 +19,20 @@ use super::tokenizer::tokenize;
 #[component]
 pub fn YamlSidebar() -> Element {
     let state = use_app_state();
-    let raw_text = (state.yaml_text)();
     let errors = (state.parse_errors)();
-    let raw_lines = perf_trace!(tokenize(&raw_text), "tokenize: {} bytes", raw_text.len());
-    let raw_line_count = raw_lines.len().max(1);
 
-    // Compute selected stage's YAML line range for highlighting.
-    let selected_range: Option<(usize, usize)> = {
+    // Tokenize only when the YAML text changes — not on every re-render (e.g.
+    // selection or error-bar churn). `tokenize` is a pure fn of the text.
+    let raw_lines = use_memo(move || {
+        let text = (state.yaml_text)();
+        perf_trace!(tokenize(&text), "tokenize: {} bytes", text.len())
+    });
+    let line_count = raw_lines.read().len().max(1);
+
+    // Selected stage's YAML line range — recomputed only when the text,
+    // selection, or parsed pipeline changes.
+    let selected_range = use_memo(move || -> Option<(usize, usize)> {
+        let text = (state.yaml_text)();
         let stages = state.selected_stages.read();
         let single_selected = if stages.len() == 1 {
             stages.iter().next().cloned()
@@ -35,19 +42,19 @@ pub fn YamlSidebar() -> Element {
         drop(stages);
         let pipeline_guard = (state.pipeline).read();
         match (single_selected.as_deref(), pipeline_guard.as_ref()) {
-            (Some(stage_id), Some(config)) => {
-                let ranges = crate::sync::compute_yaml_ranges(&raw_text, config);
-                ranges.get(stage_id).copied()
-            }
+            (Some(stage_id), Some(config)) => crate::sync::compute_yaml_ranges(&text, config)
+                .get(stage_id)
+                .copied(),
             _ => None,
         }
-    };
+    });
+    let sel_range = selected_range();
 
     // Schema warnings for YAML squiggles
     let _warnings = (state.schema_warnings)();
 
-    let (text, lines, line_count, is_editable) =
-        (raw_text.clone(), raw_lines, raw_line_count, true);
+    let text = (state.yaml_text)();
+    let is_editable = true;
 
     // Blame visibility state — provided as context for blame sub-components.
     let blame_visible = use_signal(|| false);
@@ -81,7 +88,7 @@ pub fn YamlSidebar() -> Element {
                     for i in 0..line_count {
                         {
                             let line_num = i + 1;
-                            let in_range = selected_range
+                            let in_range = sel_range
                                 .is_some_and(|(s, e)| line_num >= s && line_num <= e);
                             // Check for schema warnings on this line
                             let _has_warning = false; // TODO: map warnings to line numbers
@@ -104,10 +111,10 @@ pub fn YamlSidebar() -> Element {
                     // Syntax-highlighted overlay (read-only visual layer)
                     div {
                         class: "kiln-yaml-highlight",
-                        for (i, line_tokens) in lines.iter().enumerate() {
+                        for (i, line_tokens) in raw_lines.read().iter().enumerate() {
                             {
                                 let line_num = i + 1;
-                                let in_range = selected_range
+                                let in_range = sel_range
                                     .is_some_and(|(s, e)| line_num >= s && line_num <= e);
                                 rsx! {
                                     div {
@@ -137,8 +144,13 @@ pub fn YamlSidebar() -> Element {
                             spellcheck: "false",
                             value: "{text}",
                             oninput: move |e: FormEvent| {
+                                // Keep yaml_text immediate (textarea echo + undo);
+                                // only flip edit_source on a real transition so it
+                                // doesn't churn the parse/snapshot effects per key.
                                 let mut src = state.edit_source;
-                                src.set(EditSource::Yaml);
+                                if *src.peek() != EditSource::Yaml {
+                                    src.set(EditSource::Yaml);
+                                }
                                 let mut yaml = state.yaml_text;
                                 yaml.set(e.value());
                             },
