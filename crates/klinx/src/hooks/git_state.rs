@@ -52,7 +52,6 @@ pub fn use_git_state(
 
         // Spawn a polling loop that checks for debounced changes
         // and refreshes git/schema state.
-        let _root2 = root.clone();
         std::thread::spawn(move || {
             while let Ok(paths) = rx.recv() {
                 if crate::fs_watcher::has_git_relevant_changes(&paths) {
