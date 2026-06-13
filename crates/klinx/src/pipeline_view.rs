@@ -5,7 +5,7 @@
 /// to a [`StageKind`] via an exhaustive `match` in [`stage_kind_for_node`], so
 /// adding a new variant to `PipelineNode` is a compile-time break. Composition
 /// currently renders as a placeholder badge pending full sub-canvas rendering.
-use clinker_core::config::composition::CompositionFile;
+use clinker_core::config::composition::{CompositionFile, OutputAlias, PortDecl};
 use clinker_core::config::node_header::NodeInput;
 use clinker_core::config::{PipelineConfig, PipelineNode};
 use clinker_core::yaml::Spanned;
@@ -23,6 +23,8 @@ pub enum StageKind {
     Combine,
     Output,
     Composition,
+    InputPort,
+    OutputPort,
     Error,
 }
 
@@ -37,6 +39,8 @@ impl StageKind {
             StageKind::Combine => "combine",
             StageKind::Output => "output",
             StageKind::Composition => "composition",
+            StageKind::InputPort => "input-port",
+            StageKind::OutputPort => "output-port",
             StageKind::Error => "error",
         }
     }
@@ -51,6 +55,8 @@ impl StageKind {
             StageKind::Combine => "COMBINE",
             StageKind::Output => "OUTPUT",
             StageKind::Composition => "COMPOSITION",
+            StageKind::InputPort => "INPUT",
+            StageKind::OutputPort => "OUTPUT",
             StageKind::Error => "ERROR",
         }
     }
@@ -387,12 +393,179 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
 
 /// Derive a canvas view for a composition file (`*.comp.yaml`).
 ///
-/// Renders the composition's body nodes as a DAG via [`derive_view_from_nodes`].
-/// Input/output *ports* (declared in the `_compose` signature, not nodes) are
-/// not yet drawn as boundary nodes — that's a future enhancement; the body's
-/// internal node graph is what this surfaces today.
+/// Draws the composition's `_compose` contract as boundary nodes around the
+/// body DAG: each declared input port is a left-column node feeding the body
+/// nodes that reference it, and each output port is a right-column node fed by
+/// the body node named in its `internal_ref`. Body nodes render exactly as in a
+/// pipeline (via [`build_stage_view`]); ports and body share one index space so
+/// the barycenter [`layout_positions`] pass lays them out together.
 pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
-    derive_view_from_nodes(&comp.nodes)
+    use std::collections::HashMap;
+
+    let sig = &comp.signature;
+    let body = &comp.nodes;
+    let n_in = sig.inputs.len();
+    let n_body = body.len();
+    let n_out = sig.outputs.len();
+    let total = n_in + n_body + n_out;
+
+    // Two SEPARATE namespaces, mirroring the engine: composition input-port
+    // names and body-internal node names are distinct, and a body node may
+    // legally share a name with a port. `port_idx` is fixed; `body_idx` is
+    // filled in declaration order. A body node's `input:` reference resolves to
+    // an already-declared body node first, else an input port — so a forward or
+    // self reference never resolves (and never indexes an unset column). A
+    // single shared map would let a body node overwrite a same-named port and
+    // index its own not-yet-finalized column → out-of-bounds panic on the
+    // unvalidated YAML the canvas renders live.
+    let mut port_idx: HashMap<&str, usize> = HashMap::with_capacity(n_in);
+    for (i, port) in sig.inputs.keys().enumerate() {
+        port_idx.insert(port.as_str(), i);
+    }
+    let mut body_idx: HashMap<&str, usize> = HashMap::with_capacity(n_body);
+
+    // Resolve a body input reference to its unified index: an already-declared
+    // body node first, otherwise an input port.
+    let resolve = |name: &str, body_idx: &HashMap<&str, usize>| -> Option<usize> {
+        body_idx
+            .get(name)
+            .copied()
+            .or_else(|| port_idx.get(name).copied())
+    };
+
+    // Unified index space: [0, n_in) input ports (column 0), [n_in, n_in+n_body)
+    // body nodes, [n_in+n_body, total) output ports. `cols`/`predecessors` are
+    // sized once over that space; ports default to column 0 / no predecessors.
+    let mut cols: Vec<usize> = vec![0; total];
+    let mut connections: Vec<(usize, usize)> = Vec::new();
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); total];
+
+    for (bi, spanned) in body.iter().enumerate() {
+        let idx = n_in + bi;
+        let node = &spanned.value;
+
+        // Resolved predecessors: input ports + upstream body nodes.
+        let mut preds: Vec<usize> = Vec::new();
+        match node {
+            PipelineNode::Source { .. } => {}
+            PipelineNode::Merge { header, .. } => {
+                for ni in &header.inputs {
+                    if let Some(p) = resolve(node_input_name(&ni.value), &body_idx) {
+                        preds.push(p);
+                    }
+                }
+            }
+            PipelineNode::Combine { header, .. } => {
+                for ni in header.input.values() {
+                    if let Some(p) = resolve(node_input_name(&ni.value), &body_idx) {
+                        preds.push(p);
+                    }
+                }
+            }
+            PipelineNode::Transform { header, .. }
+            | PipelineNode::Aggregate { header, .. }
+            | PipelineNode::Route { header, .. }
+            | PipelineNode::Output { header, .. }
+            | PipelineNode::Composition { header, .. } => {
+                if let Some(p) = resolve(node_input_name(&header.input.value), &body_idx) {
+                    preds.push(p);
+                }
+            }
+        }
+
+        // Column = 1 + max predecessor column; a Source anchors at 0, an
+        // unresolved reference at 1. Every `p` is a port or an earlier body
+        // node, so `cols[p]` is always already set.
+        cols[idx] = if matches!(node, PipelineNode::Source { .. }) {
+            0
+        } else {
+            preds.iter().map(|&p| cols[p] + 1).max().unwrap_or(1)
+        };
+        for &p in &preds {
+            connections.push((p, idx));
+            predecessors[idx].push(p);
+        }
+
+        // Insert AFTER the column is computed so a self reference can't resolve
+        // to this node's own (not-yet-finalized) index.
+        body_idx.insert(node.name(), idx);
+    }
+
+    // Output ports share one column to the right of the whole body, each fed by
+    // the body node named in its `internal_ref` ("node.channel" -> node part).
+    // An output whose ref names no body node is still drawn, just unconnected.
+    let out_col = cols[n_in..n_in + n_body].iter().copied().max().unwrap_or(0) + 1;
+    for (oi, alias) in sig.outputs.values().enumerate() {
+        let out_idx = n_in + n_body + oi;
+        cols[out_idx] = out_col;
+        let producer = alias.internal_ref.value.split('.').next().unwrap_or("");
+        if let Some(&from) = body_idx.get(producer) {
+            connections.push((from, out_idx));
+            predecessors[out_idx].push(from);
+        }
+    }
+
+    let positions = layout_positions(&cols, &predecessors);
+
+    let mut stages: Vec<StageView> = Vec::with_capacity(total);
+    for (i, (port, decl)) in sig.inputs.iter().enumerate() {
+        let (x, y) = positions[i];
+        stages.push(input_port_stage(port, decl, x, y));
+    }
+    for (bi, spanned) in body.iter().enumerate() {
+        let (x, y) = positions[n_in + bi];
+        stages.push(build_stage_view(&spanned.value, x, y));
+    }
+    for (oi, (port, alias)) in sig.outputs.iter().enumerate() {
+        let (x, y) = positions[n_in + n_body + oi];
+        stages.push(output_port_stage(port, alias, x, y));
+    }
+
+    PipelineView {
+        stages,
+        connections,
+    }
+}
+
+/// Synthetic boundary node for a composition input port.
+fn input_port_stage(name: &str, decl: &PortDecl, x: f32, y: f32) -> StageView {
+    let subtitle = match &decl.schema {
+        Some(schema) => {
+            let n = schema.columns.len();
+            format!("{n} field{}", if n == 1 { "" } else { "s" })
+        }
+        None => "any shape".to_string(),
+    };
+    StageView {
+        // `port:` prefix with a colon — invalid in body-node identifiers — so a
+        // port id can never collide with a body node's id (its raw name), which
+        // is the RSX key and selection identity.
+        id: format!("port:in:{name}"),
+        label: name.to_string(),
+        kind: StageKind::InputPort,
+        subtitle,
+        canvas_x: x,
+        canvas_y: y,
+        cxl_source: None,
+        description: decl.description.clone(),
+        error_message: None,
+    }
+}
+
+/// Synthetic boundary node for a composition output port.
+fn output_port_stage(name: &str, alias: &OutputAlias, x: f32, y: f32) -> StageView {
+    StageView {
+        // See `input_port_stage`: colon-prefixed id avoids body-node id clashes.
+        id: format!("port:out:{name}"),
+        label: name.to_string(),
+        kind: StageKind::OutputPort,
+        subtitle: format!("\u{2190} {}", alias.internal_ref.value),
+        canvas_x: x,
+        canvas_y: y,
+        cxl_source: None,
+        description: alias.description.clone(),
+        error_message: None,
+    }
 }
 
 /// Variant-dispatched [`StageView`] constructor. Every arm is exhaustive;
@@ -1045,6 +1218,172 @@ nodes:
         );
         // Badge text is the authoritative kind label.
         assert_eq!(StageKind::Composition.badge_label(), "COMPOSITION");
+    }
+
+    fn parse_comp(yaml: &str) -> CompositionFile {
+        use clinker_core::span::FileId;
+        use std::num::NonZeroU32;
+        CompositionFile::parse(
+            yaml,
+            FileId::new(NonZeroU32::new(1).expect("nonzero")),
+            std::path::PathBuf::new(),
+        )
+        .expect("composition parses")
+    }
+
+    #[test]
+    fn composition_view_draws_contract_ports() {
+        let yaml = r#"_compose:
+  name: t
+  inputs:
+    orders:
+      schema:
+        - { name: amount, type: float }
+  outputs:
+    result: b
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: a
+    input: orders
+    config:
+      cxl: |
+        emit doubled = amount * 2.0
+  - type: transform
+    name: b
+    input: a
+    config:
+      cxl: |
+        emit plus = doubled + 1.0
+"#;
+        let view = derive_composition_view(&parse_comp(yaml));
+        // 1 input port + 2 body + 1 output port.
+        assert_eq!(view.stages.len(), 4);
+
+        let input = view
+            .stages
+            .iter()
+            .find(|s| s.kind == StageKind::InputPort)
+            .expect("input port present");
+        assert_eq!(input.label, "orders");
+        assert_eq!(
+            input.canvas_x, LEFT_MARGIN,
+            "input port in the leftmost column"
+        );
+
+        let output = view
+            .stages
+            .iter()
+            .find(|s| s.kind == StageKind::OutputPort)
+            .expect("output port present");
+        assert_eq!(output.label, "result");
+        // Output port is to the right of every body node.
+        let max_body_x = view
+            .stages
+            .iter()
+            .filter(|s| matches!(s.kind, StageKind::Transform))
+            .map(|s| s.canvas_x)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            output.canvas_x > max_body_x,
+            "output port in the rightmost column"
+        );
+
+        // Edges: input->a, a->b, b->output all present (by stage index).
+        let idx = |label: &str| view.stages.iter().position(|s| s.label == label).unwrap();
+        let (i_in, i_a, i_b, i_out) = (idx("orders"), idx("a"), idx("b"), idx("result"));
+        assert!(view.connections.contains(&(i_in, i_a)));
+        assert!(view.connections.contains(&(i_a, i_b)));
+        assert!(view.connections.contains(&(i_b, i_out)));
+    }
+
+    #[test]
+    fn composition_view_port_name_collision_does_not_panic() {
+        // Regression: a body node sharing a name with an input port previously
+        // panicked (a single shared name map let the body node overwrite the
+        // port entry and index its own not-yet-set column). Ports and body
+        // names are separate namespaces; the view must render without panicking.
+        let yaml = r#"_compose:
+  name: t
+  inputs:
+    dup:
+      schema:
+        - { name: amount, type: float }
+  outputs: {}
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: dup
+    input: dup
+    config:
+      cxl: |
+        emit doubled = amount * 2.0
+  - type: transform
+    name: consumer
+    input: dup
+    config:
+      cxl: |
+        emit plus = doubled + 1.0
+"#;
+        let view = derive_composition_view(&parse_comp(yaml));
+        // 1 input port + 2 body nodes, no outputs — and no panic.
+        assert_eq!(view.stages.len(), 3);
+        // The port and the same-named body node are distinct stages with
+        // distinct ids (the port id is colon-prefixed, the body keeps its name).
+        let ids: Vec<&str> = view.stages.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"port:in:dup"));
+        assert_eq!(
+            ids.iter().filter(|id| **id == "dup").count(),
+            1,
+            "the body node keeps its raw-name id"
+        );
+        // The body `dup` resolves `input: dup` to the input port (the only
+        // `dup` declared when its column is computed), so the port feeds it.
+        let port = view
+            .stages
+            .iter()
+            .position(|s| s.id == "port:in:dup")
+            .unwrap();
+        let body_dup = view.stages.iter().position(|s| s.id == "dup").unwrap();
+        assert!(view.connections.contains(&(port, body_dup)));
+    }
+
+    #[test]
+    fn composition_view_dangling_output_is_drawn_unconnected() {
+        // An output whose `internal_ref` names no body node is still drawn as a
+        // boundary card — just with no incoming edge (graceful, not dropped).
+        let yaml = r#"_compose:
+  name: t
+  inputs:
+    src:
+      schema:
+        - { name: v, type: float }
+  outputs:
+    missing: nonexistent_node
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: a
+    input: src
+    config:
+      cxl: |
+        emit w = v + 1.0
+"#;
+        let view = derive_composition_view(&parse_comp(yaml));
+        // 1 input + 1 body + 1 output port, all drawn.
+        assert_eq!(view.stages.len(), 3);
+        let out_pos = view
+            .stages
+            .iter()
+            .position(|s| s.kind == StageKind::OutputPort)
+            .expect("output port drawn");
+        assert!(
+            !view.connections.iter().any(|&(_, to)| to == out_pos),
+            "output whose ref names no body node is drawn but unconnected"
+        );
     }
 }
 
