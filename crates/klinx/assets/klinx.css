@@ -4241,7 +4241,9 @@ input:-webkit-autofill:focus {
   background: linear-gradient(rgba(183, 65, 14, 0.08), rgba(183, 65, 14, 0.08)),
     var(--kiln-char);
   padding: 6px 12px;
-  max-height: 80px;
+  /* Tall enough for the engine's `-->` source snippet + the klinx hint above
+     it; scrolls past that rather than swallowing more of the editor overlay. */
+  max-height: 180px;
   overflow-y: auto;
 }
 
@@ -4259,6 +4261,12 @@ input:-webkit-autofill:focus {
   flex: 1;
   user-select: text;
   cursor: text;
+  /* Engine parse errors are multi-line snippets with caret diagrams whose
+     alignment is load-bearing; without `pre-wrap` the newlines collapse to
+     spaces and the snippet renders as one unreadable run. `pre-wrap` keeps the
+     newlines + indentation while still wrapping lines too long for the bar. */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .kiln-yaml-error-copy {
