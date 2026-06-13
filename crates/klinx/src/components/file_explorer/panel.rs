@@ -10,12 +10,13 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
+use klinx_git::StatusKind;
 
 use crate::state::{LeftPanel, TabManagerState};
 
 use super::model::{
     ExplorerTree, ExplorerView, FlatNode, NodeId, NodeKind, build_filesystem, build_sectioned,
-    expand_sections, flatten,
+    expand_sections, flatten, row_git_status,
 };
 
 /// The workspace file explorer component.
@@ -53,6 +54,43 @@ pub fn FileExplorer() -> Element {
     // Cheap: re-flatten on every expand/collapse or tree change.
     let rows = use_memo(move || flatten(&tree.read(), &expanded.read()));
 
+    // ── Row decorations ──────────────────────────────────────────────────
+    // Each memo recomputes only when its own source changes, so editing YAML
+    // or expanding a node never rebuilds the others (and a Memo only re-renders
+    // subscribers when its output actually changes).
+
+    // Changed files from git status; suffix-matched per row by
+    // `model::row_git_status`. Holds only changed files, so the scan is cheap.
+    let git_files = use_memo(move || {
+        tab_mgr
+            .git_state
+            .read()
+            .as_ref()
+            .map(|gs| gs.files.clone())
+            .unwrap_or_default()
+    });
+
+    // Absolute paths of every file-backed open tab.
+    let open_paths = use_memo(move || {
+        tab_mgr
+            .tabs
+            .read()
+            .iter()
+            .filter_map(|t| t.file_path.clone())
+            .collect::<HashSet<PathBuf>>()
+    });
+
+    // Absolute path of the active tab's file, if it is file-backed.
+    let active_path = use_memo(move || {
+        let active = (tab_mgr.active_tab_id)()?;
+        tab_mgr
+            .tabs
+            .read()
+            .iter()
+            .find(|t| t.id == active)
+            .and_then(|t| t.file_path.clone())
+    });
+
     // Read (not clone) the workspace — `()` would clone the whole struct every
     // render; we only need the display name.
     let workspace_name = tab_mgr
@@ -62,6 +100,10 @@ pub fn FileExplorer() -> Element {
         .map(|ws| ws.display_name())
         .unwrap_or_else(|| "No workspace".to_string());
     let current_view = (view)();
+
+    let git_files = git_files.read();
+    let open_paths = open_paths.read();
+    let active_path = active_path.read();
 
     rsx! {
         div { class: "klinx-file-explorer",
@@ -105,19 +147,38 @@ pub fn FileExplorer() -> Element {
                     div { class: "klinx-file-explorer__empty", "No files discovered." }
                 } else {
                     for row in rows.read().iter() {
-                        ExplorerRow {
-                            key: "{row.id}",
-                            row: row.clone(),
-                            is_expanded: expanded.read().contains(&row.id),
-                            on_toggle: move |id: NodeId| {
-                                let mut set = expanded.write();
-                                if !set.remove(&id) {
-                                    set.insert(id);
+                        {
+                            let git_status = row_git_status(row, &git_files);
+                            // Open/active apply to file leaves only.
+                            let file_path = match row.kind {
+                                NodeKind::File { .. } => row.path.as_deref(),
+                                _ => None,
+                            };
+                            let is_open = file_path.is_some_and(|p| open_paths.contains(p));
+                            // `is_some_and` (not a bare `==`) guards against a
+                            // non-file row's `None` path matching an untitled
+                            // tab's `None` active path.
+                            let is_active =
+                                file_path.is_some_and(|p| Some(p) == active_path.as_deref());
+                            rsx! {
+                                ExplorerRow {
+                                    key: "{row.id}",
+                                    row: row.clone(),
+                                    is_expanded: expanded.read().contains(&row.id),
+                                    git_status,
+                                    is_open,
+                                    is_active,
+                                    on_toggle: move |id: NodeId| {
+                                        let mut set = expanded.write();
+                                        if !set.remove(&id) {
+                                            set.insert(id);
+                                        }
+                                    },
+                                    on_open: move |p: PathBuf| {
+                                        crate::keyboard::open_path(&mut tab_mgr, &p);
+                                    },
                                 }
-                            },
-                            on_open: move |p: PathBuf| {
-                                crate::keyboard::open_path(&mut tab_mgr, &p);
-                            },
+                            }
                         }
                     }
                 }
@@ -132,6 +193,9 @@ pub fn FileExplorer() -> Element {
 fn ExplorerRow(
     row: FlatNode,
     is_expanded: bool,
+    git_status: Option<StatusKind>,
+    is_open: bool,
+    is_active: bool,
     on_toggle: EventHandler<NodeId>,
     on_open: EventHandler<PathBuf>,
 ) -> Element {
@@ -153,6 +217,22 @@ fn ExplorerRow(
     if is_file && !openable {
         classes.push_str(" klinx-file-explorer__row--disabled");
     }
+    if let Some(status) = git_status {
+        classes.push(' ');
+        classes.push_str(match status {
+            StatusKind::Modified => "klinx-file-explorer__row--modified",
+            StatusKind::Added => "klinx-file-explorer__row--added",
+            StatusKind::Deleted => "klinx-file-explorer__row--deleted",
+            StatusKind::Renamed => "klinx-file-explorer__row--renamed",
+            StatusKind::Untracked => "klinx-file-explorer__row--untracked",
+        });
+    }
+    if is_open {
+        classes.push_str(" klinx-file-explorer__row--open");
+    }
+    if is_active {
+        classes.push_str(" klinx-file-explorer__row--active");
+    }
 
     let id = row.id.clone();
     let path = row.path.clone();
@@ -172,6 +252,9 @@ fn ExplorerRow(
             },
             span { class: "klinx-file-explorer__chevron", "{chevron}" }
             span { class: "klinx-file-explorer__label", "{row.label}" }
+            if let Some(status) = git_status {
+                span { class: "klinx-file-explorer__git", "{status.letter()}" }
+            }
         }
     }
 }
