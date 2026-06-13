@@ -335,11 +335,10 @@ pub fn open_workspace(tab_mgr: &mut TabManagerState) {
 
         tab_mgr.workspace.set(Some(ws));
 
-        // Fresh workspace with nothing restored: open the explorer so the tree
-        // is immediately visible instead of a blank welcome screen (#39).
-        if active_id.is_none() {
-            tab_mgr.left_panel.set(LeftPanel::Explorer);
-        }
+        // Surface the workspace tree on every Open Workspace — the whole point of
+        // #39. Done whether or not tabs were restored (a restored tab would
+        // otherwise leave the explorer closed and the workspace unnavigable).
+        tab_mgr.left_panel.set(LeftPanel::Explorer);
 
         let mut toast: Signal<Option<ToastState>> = use_context();
         toast_success(&mut toast, summary);

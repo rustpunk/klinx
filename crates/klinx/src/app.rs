@@ -123,7 +123,17 @@ pub fn AppShell() -> Element {
     });
 
     // ── Left panel + schema index + template gallery ──────────────────────
-    let left_panel: Signal<LeftPanel> = use_signal(|| LeftPanel::None);
+    // Default the workspace explorer OPEN whenever a workspace is loaded (incl.
+    // session restore at startup, which bypasses `keyboard::open_workspace`), so
+    // a restored session is never a blank editor with no way to navigate (#39).
+    // `workspace` (above) is already initialized here. No workspace → collapsed.
+    let left_panel: Signal<LeftPanel> = use_signal(|| {
+        if workspace.peek().is_some() {
+            LeftPanel::Explorer
+        } else {
+            LeftPanel::None
+        }
+    });
     let schema_index: Signal<SchemaIndex> = use_signal(SchemaIndex::default);
     let show_template_gallery: Signal<bool> = use_signal(|| false);
     let git_state: Signal<Option<klinx_git::RepoStatus>> = use_signal(|| None);
