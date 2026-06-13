@@ -15,8 +15,12 @@ pub enum EditSource {
 }
 
 /// Parse a YAML string into a `PipelineConfig`.
+///
+/// On failure the raw engine error is passed through [`crate::parse_diagnostics`]
+/// so a recognizable mistake (e.g. a mapping key that lost its colon) gains a
+/// hint pointing at the true culprit line before it reaches the editor.
 pub fn parse_yaml(yaml: &str) -> Result<PipelineConfig, Vec<String>> {
-    parse_config(yaml).map_err(|e| vec![e.to_string()])
+    parse_config(yaml).map_err(|e| crate::parse_diagnostics::refine(yaml, vec![e.to_string()]))
 }
 
 /// Compatibility shim — same as `parse_yaml`.
@@ -51,8 +55,11 @@ pub fn try_parse_yaml(yaml: &str, workspace_root: Option<&Path>) -> ParseResult 
         return ParseResult::Complete(resolved);
     }
     match clinker_core::partial::parse_partial_config(yaml) {
-        Ok(partial) => ParseResult::Partial(partial),
-        Err(e) => ParseResult::Failed(vec![e]),
+        Ok(mut partial) => {
+            partial.errors = crate::parse_diagnostics::refine(yaml, partial.errors);
+            ParseResult::Partial(partial)
+        }
+        Err(e) => ParseResult::Failed(crate::parse_diagnostics::refine(yaml, vec![e])),
     }
 }
 

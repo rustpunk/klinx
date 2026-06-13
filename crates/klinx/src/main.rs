@@ -56,6 +56,7 @@ mod fs_watcher;
 mod hooks;
 mod keyboard;
 mod notes;
+mod parse_diagnostics;
 mod perf;
 mod pipeline_view;
 mod search;
