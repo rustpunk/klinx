@@ -19,7 +19,7 @@ use crate::components::confirm_dialog::PendingConfirm;
 use crate::components::toast::{ToastState, toast_error, toast_success};
 use crate::file_ops;
 use crate::state::{AppState, LeftPanel, NavigationContext, PipelineLayoutMode, TabManagerState};
-use crate::sync::{ParseResult, serialize_yaml, try_parse_yaml};
+use crate::sync::{ParseResult, try_parse_yaml};
 use crate::tab::{TabEntry, TabId};
 use crate::workspace;
 
@@ -454,10 +454,14 @@ fn save_tab_by_id(tab_mgr: &mut TabManagerState, tab_id: TabId, force_save_as: b
             return;
         };
 
-        let yaml = match tab.snapshot.pipeline {
-            Some(ref config) => serialize_yaml(config),
-            None => tab.snapshot.yaml_text.clone(),
-        };
+        // Persist the authoritative editor buffer verbatim. `snapshot.yaml_text`
+        // is the full document — it carries the real `nodes:` block, kept node-
+        // intact by the inspector→YAML span patch (`use_pipeline_sync`).
+        // Serializing `snapshot.pipeline` instead would re-emit node-less YAML
+        // (`PipelineConfig.nodes` is `#[serde(skip_serializing)]`) and destroy
+        // every node on disk — issue #29. Inspector edits are already reflected
+        // into `yaml_text`, so the buffer is always the correct source of truth.
+        let yaml = tab.snapshot.yaml_text.clone();
 
         (yaml, tab.file_path.clone())
     };

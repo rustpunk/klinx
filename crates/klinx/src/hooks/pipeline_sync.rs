@@ -22,8 +22,9 @@ use clinker_core::partial::PartialPipelineConfig;
 use clinker_schema::{SchemaIndex, SchemaWarning};
 
 use crate::perf::perf_trace;
-use crate::sync::{EditSource, ParseResult, serialize_yaml, try_parse_yaml};
+use crate::sync::{EditSource, ParseResult, try_parse_yaml};
 use crate::workspace::Workspace;
+use crate::yaml_patch::patch_yaml_preserving_nodes;
 
 /// Wire up the YAML <-> pipeline <-> schema-validation edit-sync effects.
 ///
@@ -98,7 +99,22 @@ pub fn use_pipeline_sync(
             }
 
             if let Some(ref config) = pl_val {
-                let yaml = serialize_yaml(config);
+                // `yaml_text` is the authoritative full document — it carries
+                // the real `nodes:` block (which the engine serializer drops,
+                // issue #29). Patch the edited node's region in place instead
+                // of regenerating from `config`, so every other node's text and
+                // the user's comments survive verbatim.
+                //
+                // Read the current text with `peek()` (non-reactive): this
+                // effect must not subscribe to `yaml_text`, or writing it here
+                // would re-fire the effect in a loop. The `EditSource` guards
+                // (this `source != Inspector` early-return, plus the parse
+                // effect's `source != Yaml` guard and the debounce's Yaml-only
+                // re-arm) keep the YAML↔inspector loop broken; setting
+                // `yaml_text` under `EditSource::Inspector` does not schedule a
+                // parse, so the patched text is not fought by a re-parse.
+                let current = yaml_text.peek().clone();
+                let yaml = patch_yaml_preserving_nodes(&current, config);
                 yaml_text.set(yaml);
                 parse_errors.set(Vec::new());
             }

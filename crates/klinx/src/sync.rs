@@ -56,12 +56,6 @@ pub fn try_parse_yaml(yaml: &str, workspace_root: Option<&Path>) -> ParseResult 
     }
 }
 
-/// Serialize a `PipelineConfig` back to YAML text.
-pub fn serialize_yaml(config: &PipelineConfig) -> String {
-    clinker_core::yaml::to_string(config)
-        .unwrap_or_else(|e| format!("# Serialization error: {e}\n"))
-}
-
 /// Compute YAML line ranges for each named stage (best-effort).
 pub fn compute_yaml_ranges(yaml: &str, config: &PipelineConfig) -> HashMap<String, (usize, usize)> {
     let mut ranges = HashMap::new();
