@@ -15,6 +15,7 @@ clinker-channel.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true
+saphyr-parser-bw.workspace = true
 indexmap.workspace = true
 petgraph.workspace = true
 blake3.workspace = true
