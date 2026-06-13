@@ -255,7 +255,7 @@ mod tests {
         // that drifts the schema breaks the build here rather than silently
         // shipping a sample that fails to open. `CARGO_MANIFEST_DIR` is
         // `<repo>/crates/klinx`; the workspace lives two levels up.
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/pipelines")
             .canonicalize()
             .expect("examples/pipelines should exist relative to crates/klinx");
@@ -263,7 +263,7 @@ mod tests {
         // Composition / channel / schema overlays carry their own top-level
         // shapes (`_compose` / `_channel` / `_schema`) that `parse_config` does
         // not accept; only full pipeline documents are gated here.
-        fn is_non_pipeline_yaml(path: &std::path::Path) -> bool {
+        fn is_non_pipeline_yaml(path: &Path) -> bool {
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -274,7 +274,7 @@ mod tests {
                 || name.ends_with(".schema.yaml")
         }
 
-        fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             for entry in fs::read_dir(dir)
                 .expect("read_dir on examples subtree")
                 .flatten()
