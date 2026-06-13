@@ -1,10 +1,11 @@
 use dioxus::prelude::*;
 
+use crate::perf::perf_trace;
 use crate::state::use_app_state;
 // The blame components read git state from the tab manager directly.
 use crate::state::TabManagerState;
-use crate::sync::EditSource;
 
+use super::highlight::EditorPane;
 use super::tokenizer::tokenize;
 
 /// Full-height YAML sidebar with syntax-highlighted overlay and editable textarea.
@@ -18,13 +19,20 @@ use super::tokenizer::tokenize;
 #[component]
 pub fn YamlSidebar() -> Element {
     let state = use_app_state();
-    let raw_text = (state.yaml_text)();
     let errors = (state.parse_errors)();
-    let raw_lines = tokenize(&raw_text);
-    let raw_line_count = raw_lines.len().max(1);
 
-    // Compute selected stage's YAML line range for highlighting.
-    let selected_range: Option<(usize, usize)> = {
+    // Tokenize only when the YAML text changes — not on every re-render (e.g.
+    // selection or error-bar churn). `tokenize` is a pure fn of the text.
+    let raw_lines = use_memo(move || {
+        let text = (state.yaml_text)();
+        perf_trace!(tokenize(&text), "tokenize: {} bytes", text.len())
+    });
+    let line_count = raw_lines.read().len().max(1);
+
+    // Selected stage's YAML line range — recomputed only when the text,
+    // selection, or parsed pipeline changes.
+    let selected_range = use_memo(move || -> Option<(usize, usize)> {
+        let text = (state.yaml_text)();
         let stages = state.selected_stages.read();
         let single_selected = if stages.len() == 1 {
             stages.iter().next().cloned()
@@ -34,19 +42,18 @@ pub fn YamlSidebar() -> Element {
         drop(stages);
         let pipeline_guard = (state.pipeline).read();
         match (single_selected.as_deref(), pipeline_guard.as_ref()) {
-            (Some(stage_id), Some(config)) => {
-                let ranges = crate::sync::compute_yaml_ranges(&raw_text, config);
-                ranges.get(stage_id).copied()
-            }
+            (Some(stage_id), Some(config)) => crate::sync::compute_yaml_ranges(&text, config)
+                .get(stage_id)
+                .copied(),
             _ => None,
         }
-    };
+    });
+    let sel_range = selected_range();
 
     // Schema warnings for YAML squiggles
     let _warnings = (state.schema_warnings)();
 
-    let (text, lines, line_count, is_editable) =
-        (raw_text.clone(), raw_lines, raw_line_count, true);
+    let is_editable = true;
 
     // Blame visibility state — provided as context for blame sub-components.
     let blame_visible = use_signal(|| false);
@@ -80,7 +87,7 @@ pub fn YamlSidebar() -> Element {
                     for i in 0..line_count {
                         {
                             let line_num = i + 1;
-                            let in_range = selected_range
+                            let in_range = sel_range
                                 .is_some_and(|(s, e)| line_num >= s && line_num <= e);
                             // Check for schema warnings on this line
                             let _has_warning = false; // TODO: map warnings to line numbers
@@ -96,60 +103,13 @@ pub fn YamlSidebar() -> Element {
                     }
                 }
 
-                // Editor container: syntax overlay + textarea stacked
-                div {
-                    class: "kiln-yaml-editor",
-
-                    // Syntax-highlighted overlay (read-only visual layer)
-                    div {
-                        class: "kiln-yaml-highlight",
-                        for (i, line_tokens) in lines.iter().enumerate() {
-                            {
-                                let line_num = i + 1;
-                                let in_range = selected_range
-                                    .is_some_and(|(s, e)| line_num >= s && line_num <= e);
-                                rsx! {
-                                    div {
-                                        key: "line-{i}",
-                                        class: "kiln-yaml-line",
-                                        "data-selected": if in_range { "true" },
-                                        for (j, token) in line_tokens.iter().enumerate() {
-                                            span {
-                                                key: "tok-{i}-{j}",
-                                                "data-token": token.kind.as_data_attr(),
-                                                "{token.text}"
-                                            }
-                                        }
-                                        if line_tokens.iter().all(|t| t.text.is_empty()) {
-                                            "\u{00A0}"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Transparent textarea (captures input)
-                    if is_editable {
-                        textarea {
-                            class: "kiln-yaml-textarea",
-                            spellcheck: "false",
-                            value: "{text}",
-                            oninput: move |e: FormEvent| {
-                                let mut src = state.edit_source;
-                                src.set(EditSource::Yaml);
-                                let mut yaml = state.yaml_text;
-                                yaml.set(e.value());
-                            },
-                        }
-                    } else {
-                        textarea {
-                            class: "kiln-yaml-textarea kiln-yaml-textarea--readonly",
-                            spellcheck: "false",
-                            readonly: true,
-                            value: "{text}",
-                        }
-                    }
+                // Editor container: virtualized syntax overlay + textarea.
+                // Lives in its own component so scrolling re-renders only the
+                // editor, not the gutters.
+                EditorPane {
+                    lines: raw_lines,
+                    selected_range: sel_range,
+                    editable: is_editable,
                 }
             }
 

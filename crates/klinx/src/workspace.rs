@@ -504,6 +504,7 @@ pub fn save_full_session(
     activity_bar_visible: bool,
     channel_state: &Option<ChannelState>,
     theme: KilnTheme,
+    window: Option<WindowGeometry>,
 ) {
     let Some(ws) = workspace else { return };
 
@@ -522,6 +523,7 @@ pub fn save_full_session(
         activity_bar_visible,
         channel_state,
         theme,
+        window,
     );
     save_workspace_state(&ws.root, &state);
     save_last_workspace(&ws.root);
@@ -558,6 +560,7 @@ pub fn build_state_snapshot(
     activity_bar_visible: bool,
     channel_state: &Option<ChannelState>,
     theme: KilnTheme,
+    window: Option<WindowGeometry>,
 ) -> WorkspaceState {
     let open_paths: Vec<String> = tabs
         .iter()
@@ -572,7 +575,7 @@ pub fn build_state_snapshot(
 
     WorkspaceState {
         version: 1,
-        window: None, // TODO: save window geometry
+        window,
         navigation: Some(NavigationPersistence {
             active_context: context.as_data_attr().to_string(),
             pipeline_layout_mode: pipeline_layout.as_data_attr().to_string(),

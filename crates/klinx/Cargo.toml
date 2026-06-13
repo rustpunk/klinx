@@ -28,6 +28,13 @@ tokio.workspace = true
 notify.workspace = true
 klinx-git.workspace = true
 rfd.workspace = true
+dioxus-nox-virtualize = "0.13"
+
+[features]
+# Opt-in, zero-cost-when-disabled timing traces for performance work.
+# Build with `--features perf-trace` to print tokenize/parse timings to stderr.
+# See docs/perf.md.
+perf-trace = []
 
 [dev-dependencies]
 chrono.workspace = true

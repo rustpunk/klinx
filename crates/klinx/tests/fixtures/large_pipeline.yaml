@@ -1,0 +1,4708 @@
+# Synthetic large pipeline for performance measurement (see docs/perf.md).
+# A long linear chain of transform stages: stresses the YAML tokenizer, the
+# editor's per-line DOM rendering, and the parse/canvas fan-out. Regenerate
+# with the snippet in docs/perf.md.
+pipeline:
+  name: perf-large
+
+nodes:
+  - type: source
+    name: source
+    config:
+      name: source
+      type: csv
+      path: "./data/input.csv"
+      options:
+        has_header: true
+      schema:
+        - { name: status, type: string }
+        - { name: amount, type: int }
+        - { name: region, type: string }
+
+  - type: transform
+    name: stage_0001
+    input: source
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0002
+    input: stage_0001
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0003
+    input: stage_0002
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0004
+    input: stage_0003
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0005
+    input: stage_0004
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0006
+    input: stage_0005
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0007
+    input: stage_0006
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0008
+    input: stage_0007
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0009
+    input: stage_0008
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0010
+    input: stage_0009
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0011
+    input: stage_0010
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0012
+    input: stage_0011
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0013
+    input: stage_0012
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0014
+    input: stage_0013
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0015
+    input: stage_0014
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0016
+    input: stage_0015
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0017
+    input: stage_0016
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0018
+    input: stage_0017
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0019
+    input: stage_0018
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0020
+    input: stage_0019
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0021
+    input: stage_0020
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0022
+    input: stage_0021
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0023
+    input: stage_0022
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0024
+    input: stage_0023
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0025
+    input: stage_0024
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0026
+    input: stage_0025
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0027
+    input: stage_0026
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0028
+    input: stage_0027
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0029
+    input: stage_0028
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0030
+    input: stage_0029
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0031
+    input: stage_0030
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0032
+    input: stage_0031
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0033
+    input: stage_0032
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0034
+    input: stage_0033
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0035
+    input: stage_0034
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0036
+    input: stage_0035
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0037
+    input: stage_0036
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0038
+    input: stage_0037
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0039
+    input: stage_0038
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0040
+    input: stage_0039
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0041
+    input: stage_0040
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0042
+    input: stage_0041
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0043
+    input: stage_0042
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0044
+    input: stage_0043
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0045
+    input: stage_0044
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0046
+    input: stage_0045
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0047
+    input: stage_0046
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0048
+    input: stage_0047
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0049
+    input: stage_0048
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0050
+    input: stage_0049
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0051
+    input: stage_0050
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0052
+    input: stage_0051
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0053
+    input: stage_0052
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0054
+    input: stage_0053
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0055
+    input: stage_0054
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0056
+    input: stage_0055
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0057
+    input: stage_0056
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0058
+    input: stage_0057
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0059
+    input: stage_0058
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0060
+    input: stage_0059
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0061
+    input: stage_0060
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0062
+    input: stage_0061
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0063
+    input: stage_0062
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0064
+    input: stage_0063
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0065
+    input: stage_0064
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0066
+    input: stage_0065
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0067
+    input: stage_0066
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0068
+    input: stage_0067
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0069
+    input: stage_0068
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0070
+    input: stage_0069
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0071
+    input: stage_0070
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0072
+    input: stage_0071
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0073
+    input: stage_0072
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0074
+    input: stage_0073
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0075
+    input: stage_0074
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0076
+    input: stage_0075
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0077
+    input: stage_0076
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0078
+    input: stage_0077
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0079
+    input: stage_0078
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0080
+    input: stage_0079
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0081
+    input: stage_0080
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0082
+    input: stage_0081
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0083
+    input: stage_0082
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0084
+    input: stage_0083
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0085
+    input: stage_0084
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0086
+    input: stage_0085
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0087
+    input: stage_0086
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0088
+    input: stage_0087
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0089
+    input: stage_0088
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0090
+    input: stage_0089
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0091
+    input: stage_0090
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0092
+    input: stage_0091
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0093
+    input: stage_0092
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0094
+    input: stage_0093
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0095
+    input: stage_0094
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0096
+    input: stage_0095
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0097
+    input: stage_0096
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0098
+    input: stage_0097
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0099
+    input: stage_0098
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0100
+    input: stage_0099
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0101
+    input: stage_0100
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0102
+    input: stage_0101
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0103
+    input: stage_0102
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0104
+    input: stage_0103
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0105
+    input: stage_0104
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0106
+    input: stage_0105
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0107
+    input: stage_0106
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0108
+    input: stage_0107
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0109
+    input: stage_0108
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0110
+    input: stage_0109
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0111
+    input: stage_0110
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0112
+    input: stage_0111
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0113
+    input: stage_0112
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0114
+    input: stage_0113
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0115
+    input: stage_0114
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0116
+    input: stage_0115
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0117
+    input: stage_0116
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0118
+    input: stage_0117
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0119
+    input: stage_0118
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0120
+    input: stage_0119
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0121
+    input: stage_0120
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0122
+    input: stage_0121
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0123
+    input: stage_0122
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0124
+    input: stage_0123
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0125
+    input: stage_0124
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0126
+    input: stage_0125
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0127
+    input: stage_0126
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0128
+    input: stage_0127
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0129
+    input: stage_0128
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0130
+    input: stage_0129
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0131
+    input: stage_0130
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0132
+    input: stage_0131
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0133
+    input: stage_0132
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0134
+    input: stage_0133
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0135
+    input: stage_0134
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0136
+    input: stage_0135
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0137
+    input: stage_0136
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0138
+    input: stage_0137
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0139
+    input: stage_0138
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0140
+    input: stage_0139
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0141
+    input: stage_0140
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0142
+    input: stage_0141
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0143
+    input: stage_0142
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0144
+    input: stage_0143
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0145
+    input: stage_0144
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0146
+    input: stage_0145
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0147
+    input: stage_0146
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0148
+    input: stage_0147
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0149
+    input: stage_0148
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0150
+    input: stage_0149
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0151
+    input: stage_0150
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0152
+    input: stage_0151
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0153
+    input: stage_0152
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0154
+    input: stage_0153
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0155
+    input: stage_0154
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0156
+    input: stage_0155
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0157
+    input: stage_0156
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0158
+    input: stage_0157
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0159
+    input: stage_0158
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0160
+    input: stage_0159
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0161
+    input: stage_0160
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0162
+    input: stage_0161
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0163
+    input: stage_0162
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0164
+    input: stage_0163
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0165
+    input: stage_0164
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0166
+    input: stage_0165
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0167
+    input: stage_0166
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0168
+    input: stage_0167
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0169
+    input: stage_0168
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0170
+    input: stage_0169
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0171
+    input: stage_0170
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0172
+    input: stage_0171
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0173
+    input: stage_0172
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0174
+    input: stage_0173
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0175
+    input: stage_0174
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0176
+    input: stage_0175
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0177
+    input: stage_0176
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0178
+    input: stage_0177
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0179
+    input: stage_0178
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0180
+    input: stage_0179
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0181
+    input: stage_0180
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0182
+    input: stage_0181
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0183
+    input: stage_0182
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0184
+    input: stage_0183
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0185
+    input: stage_0184
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0186
+    input: stage_0185
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0187
+    input: stage_0186
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0188
+    input: stage_0187
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0189
+    input: stage_0188
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0190
+    input: stage_0189
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0191
+    input: stage_0190
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0192
+    input: stage_0191
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0193
+    input: stage_0192
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0194
+    input: stage_0193
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0195
+    input: stage_0194
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0196
+    input: stage_0195
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0197
+    input: stage_0196
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0198
+    input: stage_0197
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0199
+    input: stage_0198
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0200
+    input: stage_0199
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0201
+    input: stage_0200
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0202
+    input: stage_0201
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0203
+    input: stage_0202
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0204
+    input: stage_0203
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0205
+    input: stage_0204
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0206
+    input: stage_0205
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0207
+    input: stage_0206
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0208
+    input: stage_0207
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0209
+    input: stage_0208
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0210
+    input: stage_0209
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0211
+    input: stage_0210
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0212
+    input: stage_0211
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0213
+    input: stage_0212
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0214
+    input: stage_0213
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0215
+    input: stage_0214
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0216
+    input: stage_0215
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0217
+    input: stage_0216
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0218
+    input: stage_0217
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0219
+    input: stage_0218
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0220
+    input: stage_0219
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0221
+    input: stage_0220
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0222
+    input: stage_0221
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0223
+    input: stage_0222
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0224
+    input: stage_0223
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0225
+    input: stage_0224
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0226
+    input: stage_0225
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0227
+    input: stage_0226
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0228
+    input: stage_0227
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0229
+    input: stage_0228
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0230
+    input: stage_0229
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0231
+    input: stage_0230
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0232
+    input: stage_0231
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0233
+    input: stage_0232
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0234
+    input: stage_0233
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0235
+    input: stage_0234
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0236
+    input: stage_0235
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0237
+    input: stage_0236
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0238
+    input: stage_0237
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0239
+    input: stage_0238
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0240
+    input: stage_0239
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0241
+    input: stage_0240
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0242
+    input: stage_0241
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0243
+    input: stage_0242
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0244
+    input: stage_0243
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0245
+    input: stage_0244
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0246
+    input: stage_0245
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0247
+    input: stage_0246
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0248
+    input: stage_0247
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0249
+    input: stage_0248
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0250
+    input: stage_0249
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0251
+    input: stage_0250
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0252
+    input: stage_0251
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0253
+    input: stage_0252
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0254
+    input: stage_0253
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0255
+    input: stage_0254
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0256
+    input: stage_0255
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0257
+    input: stage_0256
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0258
+    input: stage_0257
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0259
+    input: stage_0258
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0260
+    input: stage_0259
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0261
+    input: stage_0260
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0262
+    input: stage_0261
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0263
+    input: stage_0262
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0264
+    input: stage_0263
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0265
+    input: stage_0264
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0266
+    input: stage_0265
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0267
+    input: stage_0266
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0268
+    input: stage_0267
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0269
+    input: stage_0268
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0270
+    input: stage_0269
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0271
+    input: stage_0270
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0272
+    input: stage_0271
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0273
+    input: stage_0272
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0274
+    input: stage_0273
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0275
+    input: stage_0274
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0276
+    input: stage_0275
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0277
+    input: stage_0276
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0278
+    input: stage_0277
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0279
+    input: stage_0278
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0280
+    input: stage_0279
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0281
+    input: stage_0280
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0282
+    input: stage_0281
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0283
+    input: stage_0282
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0284
+    input: stage_0283
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0285
+    input: stage_0284
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0286
+    input: stage_0285
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0287
+    input: stage_0286
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0288
+    input: stage_0287
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0289
+    input: stage_0288
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0290
+    input: stage_0289
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0291
+    input: stage_0290
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0292
+    input: stage_0291
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0293
+    input: stage_0292
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0294
+    input: stage_0293
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0295
+    input: stage_0294
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0296
+    input: stage_0295
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0297
+    input: stage_0296
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0298
+    input: stage_0297
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0299
+    input: stage_0298
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0300
+    input: stage_0299
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0301
+    input: stage_0300
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0302
+    input: stage_0301
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0303
+    input: stage_0302
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0304
+    input: stage_0303
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0305
+    input: stage_0304
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0306
+    input: stage_0305
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0307
+    input: stage_0306
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0308
+    input: stage_0307
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0309
+    input: stage_0308
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0310
+    input: stage_0309
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0311
+    input: stage_0310
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0312
+    input: stage_0311
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0313
+    input: stage_0312
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0314
+    input: stage_0313
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0315
+    input: stage_0314
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0316
+    input: stage_0315
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0317
+    input: stage_0316
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0318
+    input: stage_0317
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0319
+    input: stage_0318
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0320
+    input: stage_0319
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0321
+    input: stage_0320
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0322
+    input: stage_0321
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0323
+    input: stage_0322
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0324
+    input: stage_0323
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0325
+    input: stage_0324
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0326
+    input: stage_0325
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0327
+    input: stage_0326
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0328
+    input: stage_0327
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0329
+    input: stage_0328
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0330
+    input: stage_0329
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0331
+    input: stage_0330
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0332
+    input: stage_0331
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0333
+    input: stage_0332
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0334
+    input: stage_0333
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0335
+    input: stage_0334
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0336
+    input: stage_0335
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0337
+    input: stage_0336
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0338
+    input: stage_0337
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0339
+    input: stage_0338
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0340
+    input: stage_0339
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0341
+    input: stage_0340
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0342
+    input: stage_0341
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0343
+    input: stage_0342
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0344
+    input: stage_0343
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0345
+    input: stage_0344
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0346
+    input: stage_0345
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0347
+    input: stage_0346
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0348
+    input: stage_0347
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0349
+    input: stage_0348
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0350
+    input: stage_0349
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0351
+    input: stage_0350
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0352
+    input: stage_0351
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0353
+    input: stage_0352
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0354
+    input: stage_0353
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0355
+    input: stage_0354
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0356
+    input: stage_0355
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0357
+    input: stage_0356
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0358
+    input: stage_0357
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0359
+    input: stage_0358
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0360
+    input: stage_0359
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0361
+    input: stage_0360
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0362
+    input: stage_0361
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0363
+    input: stage_0362
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0364
+    input: stage_0363
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0365
+    input: stage_0364
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0366
+    input: stage_0365
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0367
+    input: stage_0366
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0368
+    input: stage_0367
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0369
+    input: stage_0368
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0370
+    input: stage_0369
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0371
+    input: stage_0370
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0372
+    input: stage_0371
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0373
+    input: stage_0372
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0374
+    input: stage_0373
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0375
+    input: stage_0374
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0376
+    input: stage_0375
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0377
+    input: stage_0376
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0378
+    input: stage_0377
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0379
+    input: stage_0378
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0380
+    input: stage_0379
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0381
+    input: stage_0380
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0382
+    input: stage_0381
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0383
+    input: stage_0382
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0384
+    input: stage_0383
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0385
+    input: stage_0384
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0386
+    input: stage_0385
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0387
+    input: stage_0386
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0388
+    input: stage_0387
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0389
+    input: stage_0388
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0390
+    input: stage_0389
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0391
+    input: stage_0390
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0392
+    input: stage_0391
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0393
+    input: stage_0392
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0394
+    input: stage_0393
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0395
+    input: stage_0394
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0396
+    input: stage_0395
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0397
+    input: stage_0396
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0398
+    input: stage_0397
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0399
+    input: stage_0398
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0400
+    input: stage_0399
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0401
+    input: stage_0400
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0402
+    input: stage_0401
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0403
+    input: stage_0402
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0404
+    input: stage_0403
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0405
+    input: stage_0404
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0406
+    input: stage_0405
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0407
+    input: stage_0406
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0408
+    input: stage_0407
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0409
+    input: stage_0408
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0410
+    input: stage_0409
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0411
+    input: stage_0410
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0412
+    input: stage_0411
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0413
+    input: stage_0412
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0414
+    input: stage_0413
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0415
+    input: stage_0414
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0416
+    input: stage_0415
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0417
+    input: stage_0416
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0418
+    input: stage_0417
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0419
+    input: stage_0418
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0420
+    input: stage_0419
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0421
+    input: stage_0420
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0422
+    input: stage_0421
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0423
+    input: stage_0422
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0424
+    input: stage_0423
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0425
+    input: stage_0424
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0426
+    input: stage_0425
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0427
+    input: stage_0426
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0428
+    input: stage_0427
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0429
+    input: stage_0428
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0430
+    input: stage_0429
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0431
+    input: stage_0430
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0432
+    input: stage_0431
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0433
+    input: stage_0432
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0434
+    input: stage_0433
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0435
+    input: stage_0434
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0436
+    input: stage_0435
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0437
+    input: stage_0436
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0438
+    input: stage_0437
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0439
+    input: stage_0438
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0440
+    input: stage_0439
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0441
+    input: stage_0440
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0442
+    input: stage_0441
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0443
+    input: stage_0442
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0444
+    input: stage_0443
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0445
+    input: stage_0444
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0446
+    input: stage_0445
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0447
+    input: stage_0446
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0448
+    input: stage_0447
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0449
+    input: stage_0448
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0450
+    input: stage_0449
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0451
+    input: stage_0450
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0452
+    input: stage_0451
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0453
+    input: stage_0452
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0454
+    input: stage_0453
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0455
+    input: stage_0454
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0456
+    input: stage_0455
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0457
+    input: stage_0456
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0458
+    input: stage_0457
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0459
+    input: stage_0458
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0460
+    input: stage_0459
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0461
+    input: stage_0460
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0462
+    input: stage_0461
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0463
+    input: stage_0462
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0464
+    input: stage_0463
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0465
+    input: stage_0464
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0466
+    input: stage_0465
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0467
+    input: stage_0466
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0468
+    input: stage_0467
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0469
+    input: stage_0468
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0470
+    input: stage_0469
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0471
+    input: stage_0470
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0472
+    input: stage_0471
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0473
+    input: stage_0472
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0474
+    input: stage_0473
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0475
+    input: stage_0474
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0476
+    input: stage_0475
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0477
+    input: stage_0476
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0478
+    input: stage_0477
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0479
+    input: stage_0478
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0480
+    input: stage_0479
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0481
+    input: stage_0480
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0482
+    input: stage_0481
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0483
+    input: stage_0482
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0484
+    input: stage_0483
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0485
+    input: stage_0484
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0486
+    input: stage_0485
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0487
+    input: stage_0486
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0488
+    input: stage_0487
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0489
+    input: stage_0488
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0490
+    input: stage_0489
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0491
+    input: stage_0490
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0492
+    input: stage_0491
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0493
+    input: stage_0492
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0494
+    input: stage_0493
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0495
+    input: stage_0494
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0496
+    input: stage_0495
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0497
+    input: stage_0496
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0498
+    input: stage_0497
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0499
+    input: stage_0498
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0500
+    input: stage_0499
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0501
+    input: stage_0500
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0502
+    input: stage_0501
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0503
+    input: stage_0502
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0504
+    input: stage_0503
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0505
+    input: stage_0504
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0506
+    input: stage_0505
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0507
+    input: stage_0506
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0508
+    input: stage_0507
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0509
+    input: stage_0508
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0510
+    input: stage_0509
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0511
+    input: stage_0510
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0512
+    input: stage_0511
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0513
+    input: stage_0512
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0514
+    input: stage_0513
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0515
+    input: stage_0514
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0516
+    input: stage_0515
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0517
+    input: stage_0516
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0518
+    input: stage_0517
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0519
+    input: stage_0518
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: transform
+    name: stage_0520
+    input: stage_0519
+    config:
+      cxl: |
+        filter amount > 0
+        emit doubled = amount * 2
+        emit tag = status + "-" + region
+
+  - type: output
+    name: result
+    input: stage_0520
+    config:
+      name: result
+      type: csv
+      path: "./output/result.csv"

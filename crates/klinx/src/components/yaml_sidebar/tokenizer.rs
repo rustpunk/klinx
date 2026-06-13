@@ -5,7 +5,7 @@
 ///
 /// Future versions will use serde-saphyr for incremental parsing.
 /// A single coloured span within a YAML line.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
     pub text: String,
