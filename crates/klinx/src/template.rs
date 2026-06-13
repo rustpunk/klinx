@@ -247,6 +247,81 @@ mod tests {
     }
 
     #[test]
+    fn test_vendored_example_pipelines_parse_against_engine() {
+        // Klinx ships an on-disk sample workspace at repo-root `examples/` so
+        // users can Open Workspace → Open File on real pipeline YAML. This gate
+        // parses every vendored pipeline through the same path the IDE uses to
+        // open a file (`crate::sync::parse_yaml`), so a future engine `rev` bump
+        // that drifts the schema breaks the build here rather than silently
+        // shipping a sample that fails to open. `CARGO_MANIFEST_DIR` is
+        // `<repo>/crates/klinx`; the workspace lives two levels up.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/pipelines")
+            .canonicalize()
+            .expect("examples/pipelines should exist relative to crates/klinx");
+
+        // Composition / channel / schema overlays carry their own top-level
+        // shapes (`_compose` / `_channel` / `_schema`) that `parse_config` does
+        // not accept; only full pipeline documents are gated here.
+        fn is_non_pipeline_yaml(path: &std::path::Path) -> bool {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            name == "channel.yaml"
+                || name.ends_with(".comp.yaml")
+                || name.ends_with(".channel.yaml")
+                || name.ends_with(".schema.yaml")
+        }
+
+        fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in fs::read_dir(dir)
+                .expect("read_dir on examples subtree")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("yaml")
+                    && !is_non_pipeline_yaml(&path)
+                {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut pipelines = Vec::new();
+        collect(&root, &mut pipelines);
+        pipelines.sort();
+
+        // A path mistake (wrong relative offset, renamed dir) must fail loudly
+        // rather than vacuously pass on an empty set. The vendored workspace has
+        // 8 top-level pipelines plus retract-demo/pipeline.yaml = 9.
+        assert!(
+            pipelines.len() >= 9,
+            "expected at least 9 pipeline YAMLs under {}, found {} — check path \
+             resolution",
+            root.display(),
+            pipelines.len()
+        );
+
+        let mut failures = Vec::new();
+        for path in &pipelines {
+            let yaml =
+                fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            if let Err(errors) = crate::sync::parse_yaml(&yaml) {
+                failures.push(format!("{}: {errors:?}", path.display()));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "vendored example pipeline(s) failed to parse against the pinned \
+             engine:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
     fn test_strip_template_block() {
         let yaml = r#"_template:
   name: "Test"

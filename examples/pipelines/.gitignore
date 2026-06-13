@@ -1,0 +1,5 @@
+# Generated/stateful artifacts produced when running pipelines from this sample
+# workspace (QA runs, `Open Workspace` + execute). Ignored so they never dirty
+# git working state.
+output/
+.kiln-state.json
