@@ -234,7 +234,13 @@ nodes:
             "valid composition should not error: {errors:?}"
         );
         let view = view.expect("composition should yield a DAG view");
-        assert_eq!(view.stages.len(), 1, "one body node (enrich_combine)");
+        // 2 input ports (orders, products) + 1 body node (enrich_combine) +
+        // 1 output port (enriched) = 4 boundary-and-body stages.
+        assert_eq!(
+            view.stages.len(),
+            4,
+            "2 input ports + 1 body node + 1 output port"
+        );
     }
 
     #[test]
@@ -246,8 +252,12 @@ nodes:
     }
 
     /// Every bundled example composition must parse cleanly against the pinned
-    /// engine schema and render at least one node — guards the example workspace
+    /// engine schema and render the full contract — guards the example workspace
     /// against silent schema drift (the reason the originals stopped rendering).
+    ///
+    /// The exact stage count is derived per file from the parsed signature +
+    /// body (`inputs + body nodes + outputs`) rather than hardcoded, so adding
+    /// an example composition keeps the assertion specific without edits here.
     #[test]
     fn bundled_example_compositions_parse_and_render() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -263,7 +273,22 @@ nodes:
             let (view, errors) = parse_composition(&yaml);
             assert!(errors.is_empty(), "{path:?} must parse cleanly: {errors:?}");
             let view = view.expect("composition view");
-            assert!(!view.stages.is_empty(), "{path:?} must render >=1 node");
+
+            // Expected = input ports + body nodes + output ports, computed from
+            // the same parse the renderer consumes.
+            let comp = CompositionFile::parse(
+                &yaml,
+                FileId::new(NonZeroU32::new(1).expect("nonzero")),
+                std::path::PathBuf::new(),
+            )
+            .expect("composition re-parses for count check");
+            let expected =
+                comp.signature.inputs.len() + comp.nodes.len() + comp.signature.outputs.len();
+            assert_eq!(
+                view.stages.len(),
+                expected,
+                "{path:?} must render every input port, body node, and output port"
+            );
             checked += 1;
         }
         assert!(

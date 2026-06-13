@@ -211,6 +211,8 @@
 [data-stage-kind="source"]    { --klinx-stage-accent: var(--klinx-accent-source); }
 [data-stage-kind="transform"] { --klinx-stage-accent: var(--klinx-accent-transform); }
 [data-stage-kind="output"]    { --klinx-stage-accent: var(--klinx-accent-output); }
+[data-stage-kind="input-port"]  { --klinx-stage-accent: var(--klinx-accent-source); }
+[data-stage-kind="output-port"] { --klinx-stage-accent: var(--klinx-accent-output); }
 [data-stage-kind="error"]     { --klinx-stage-accent: #CC3333; }
 
 /* Enamel node cards — light plate surface replaces dark char surface */
@@ -4147,6 +4149,23 @@ input:-webkit-autofill:focus {
 .klinx-node--composition.klinx-node--selected {
   border-color: var(--klinx-verdigris) !important;
   border-style: dashed;
+}
+
+/* ── 8b-port. Composition contract ports — dashed boundary cards ──────────── */
+/* Input/output ports are the composition's `_compose` contract, not real body
+   nodes; a dashed boundary reads them as the interface rather than a solid
+   internal stage. Only the side/bottom strokes go dashed so the inline accent
+   top border (--klinx-stage-accent) stays solid like every other node. The base
+   `.klinx-node` clip-path erodes corners for the solid-card look; ports reset it
+   to `none` so the dashed outline draws as a clean, unclipped rectangle (itself
+   a second boundary cue). No background override — a fixed rgba tint is
+   invisible on the Enamel light theme. */
+.klinx-node[data-stage-kind="input-port"],
+.klinx-node[data-stage-kind="output-port"] {
+  border-left-style: dashed;
+  border-right-style: dashed;
+  border-bottom-style: dashed;
+  clip-path: none;
 }
 
 /* Expand/drill indicator — bottom-right corner */
