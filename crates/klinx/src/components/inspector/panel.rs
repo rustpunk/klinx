@@ -438,3 +438,269 @@ pub fn InspectorPanel(stage_id: String) -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clinker_plan::config::{PipelineNode, parse_config};
+
+    /// Parse a one-operator pipeline and return the named node, so the inspector
+    /// helpers can be exercised against real `ReshapeBody` / `CullBody` /
+    /// `EnvelopeBody` values (the same `parse_config` path the live panel reads).
+    fn node_from(yaml: &str, name: &str) -> PipelineNode {
+        let config = parse_config(yaml).expect("fixture parses");
+        config
+            .nodes
+            .into_iter()
+            .map(|s| s.value)
+            .find(|n| n.name() == name)
+            .unwrap_or_else(|| panic!("node {name} present"))
+    }
+
+    /// A source feeding a Reshape whose single rule applies the given action
+    /// block (`mutate:` / `synthesize:` YAML, or empty for a trigger-only rule).
+    fn reshape_with_rule_actions(actions_yaml: &str) -> PipelineNode {
+        let yaml = format!(
+            r#"
+pipeline:
+  name: reshape_actions_fixture
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - {{ name: gid, type: string }}
+        - {{ name: v, type: int }}
+  - type: reshape
+    name: synth
+    input: src
+    config:
+      partition_by: [gid]
+      rules:
+        - name: r1
+          when: "v > 0"
+{actions_yaml}
+"#
+        );
+        node_from(&yaml, "synth")
+    }
+
+    /// `reshape_rule_actions` names the action set across all four mutate ×
+    /// synthesize combinations: neither (trigger-only), mutate-only,
+    /// synthesize-only, and both (in that display order).
+    #[test]
+    fn reshape_rule_actions_covers_all_combinations() {
+        // The helper reads a single `ReshapeRule`; pull rule 0 out of each fixture.
+        let rule = |node: &PipelineNode| match node {
+            PipelineNode::Reshape { config, .. } => config.rules[0].clone(),
+            other => panic!("expected reshape, got {}", other.type_tag()),
+        };
+
+        // Neither action block → trigger-only.
+        let none = reshape_with_rule_actions("");
+        assert_eq!(reshape_rule_actions(&rule(&none)), "trigger-only");
+
+        // mutate only.
+        let mutate_only = reshape_with_rule_actions(
+            "          mutate:\n            set:\n              v: \"v + 1\"",
+        );
+        assert_eq!(reshape_rule_actions(&rule(&mutate_only)), "mutate");
+
+        // synthesize only.
+        let synth_only =
+            reshape_with_rule_actions("          synthesize:\n            copy_from: trigger");
+        assert_eq!(reshape_rule_actions(&rule(&synth_only)), "synthesize");
+
+        // both → "mutate + synthesize" (mutate listed first).
+        let both = reshape_with_rule_actions(
+            "          mutate:\n            set:\n              v: \"v + 1\"\n          synthesize:\n            copy_from: trigger",
+        );
+        assert_eq!(reshape_rule_actions(&rule(&both)), "mutate + synthesize");
+    }
+
+    /// A Cull whose `order_by` is the given YAML block (or empty for unset),
+    /// used to exercise `order_by_summary` for asc / desc / empty.
+    fn cull_with_order_by(order_by_yaml: &str) -> PipelineNode {
+        let yaml = format!(
+            r#"
+pipeline:
+  name: cull_order_fixture
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - {{ name: gid, type: string }}
+        - {{ name: ts, type: int }}
+  - type: cull
+    name: prune
+    input: src
+    config:
+      partition_by: [gid]
+      removed_to: dropped
+{order_by_yaml}      rules:
+        - name: drop_small
+          drop_group_when: "count(*) < 2"
+"#
+        );
+        node_from(&yaml, "prune")
+    }
+
+    /// Pull a Cull body's `order_by` out for the summary helper.
+    fn cull_order_by(node: &PipelineNode) -> Vec<clinker_plan::config::SortField> {
+        match node {
+            PipelineNode::Cull { config, .. } => config.order_by.clone(),
+            other => panic!("expected cull, got {}", other.type_tag()),
+        }
+    }
+
+    /// `order_by_summary` renders asc / desc per field and an em dash when unset.
+    #[test]
+    fn order_by_summary_renders_directions_and_empty() {
+        // Empty → em dash.
+        let empty = cull_with_order_by("");
+        assert_eq!(order_by_summary(&cull_order_by(&empty)), "\u{2014}");
+
+        // Explicit asc.
+        let asc = cull_with_order_by("      order_by:\n        - { field: ts, order: asc }\n");
+        assert_eq!(order_by_summary(&cull_order_by(&asc)), "ts asc");
+
+        // Explicit desc.
+        let desc = cull_with_order_by("      order_by:\n        - { field: ts, order: desc }\n");
+        assert_eq!(order_by_summary(&cull_order_by(&desc)), "ts desc");
+
+        // Multiple fields join with a comma in declaration order.
+        let multi = cull_with_order_by(
+            "      order_by:\n        - { field: ts, order: desc }\n        - { field: gid, order: asc }\n",
+        );
+        assert_eq!(order_by_summary(&cull_order_by(&multi)), "ts desc, gid asc");
+    }
+
+    /// `partition_subtitle` names the partition key, or notes "ungrouped" when
+    /// none is declared; `envelope_strategy_name` is the engine's lowercase tag.
+    #[test]
+    fn partition_subtitle_and_envelope_strategy_name() {
+        use clinker_plan::config::pipeline_node::EnvelopeStrategy;
+
+        assert_eq!(partition_subtitle(&[]), "ungrouped");
+        assert_eq!(
+            partition_subtitle(&["gid".to_string()]),
+            "partition_by: gid"
+        );
+        assert_eq!(
+            partition_subtitle(&["a".to_string(), "b".to_string()]),
+            "partition_by: a, b"
+        );
+
+        assert_eq!(
+            envelope_strategy_name(&EnvelopeStrategy::Preserve),
+            "preserve"
+        );
+        assert_eq!(envelope_strategy_name(&EnvelopeStrategy::Concat), "concat");
+    }
+
+    /// `join_or_dash` joins a field list with commas, or an em dash when empty.
+    #[test]
+    fn join_or_dash_joins_or_dashes() {
+        assert_eq!(join_or_dash(&[]), "\u{2014}");
+        assert_eq!(join_or_dash(&["x".to_string()]), "x");
+        assert_eq!(join_or_dash(&["x".to_string(), "y".to_string()]), "x, y");
+    }
+
+    /// `operator_body_view` builds the right section per kind: a RESHAPE body
+    /// surfaces partition_by/order_by scalars and one rule with its action
+    /// summary; a CULL body adds the `removed_to` scalar; an ENVELOPE body
+    /// surfaces only the strategy and no rules; every other kind yields `None`.
+    #[test]
+    fn operator_body_view_per_kind() {
+        // Reshape: two scalars (partition_by, order_by) + one rule.
+        let reshape = reshape_with_rule_actions(
+            "          mutate:\n            set:\n              v: \"v + 1\"",
+        );
+        let rv = operator_body_view(&reshape).expect("reshape has a body view");
+        assert_eq!(rv.title, "RESHAPE");
+        assert_eq!(
+            rv.scalars,
+            vec![
+                ("partition_by", "gid".to_string()),
+                ("order_by", "\u{2014}".to_string()),
+            ]
+        );
+        assert_eq!(rv.rules.len(), 1);
+        assert_eq!(rv.rules[0].name, "r1");
+        assert_eq!(rv.rules[0].predicate, "v > 0");
+        assert_eq!(rv.rules[0].detail, "mutate");
+
+        // Cull: three scalars (partition_by, order_by, removed_to) + one rule
+        // with NO detail (its action is implicit in routing to `removed_to`).
+        let cull = cull_with_order_by("");
+        let cv = operator_body_view(&cull).expect("cull has a body view");
+        assert_eq!(cv.title, "CULL");
+        assert_eq!(
+            cv.scalars,
+            vec![
+                ("partition_by", "gid".to_string()),
+                ("order_by", "\u{2014}".to_string()),
+                ("removed_to", "dropped".to_string()),
+            ]
+        );
+        assert_eq!(cv.rules.len(), 1);
+        assert_eq!(cv.rules[0].name, "drop_small");
+        assert_eq!(cv.rules[0].predicate, "count(*) < 2");
+        assert_eq!(cv.rules[0].detail, "");
+
+        // Envelope: one strategy scalar, no rules.
+        let env_yaml = r#"
+pipeline:
+  name: env_fixture
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: gid, type: string }
+  - type: envelope
+    name: frame
+    body: src
+    config:
+      strategy: concat
+"#;
+        let env = node_from(env_yaml, "frame");
+        let ev = operator_body_view(&env).expect("envelope has a body view");
+        assert_eq!(ev.title, "ENVELOPE");
+        assert_eq!(ev.scalars, vec![("strategy", "concat".to_string())]);
+        assert!(ev.rules.is_empty());
+
+        // A non-operator kind (Transform) has no operator body view.
+        let transform_yaml = r#"
+pipeline:
+  name: transform_fixture
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: gid, type: string }
+  - type: transform
+    name: t
+    input: src
+    config:
+      cxl: |
+        emit x = 1
+"#;
+        let transform = node_from(transform_yaml, "t");
+        assert!(operator_body_view(&transform).is_none());
+    }
+}

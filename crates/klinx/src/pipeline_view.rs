@@ -1960,8 +1960,12 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
             ),
             // Per-group operators inside a drilled-in composition body. Each gets
             // its own stage kind so the body view labels/accents them as the
-            // top-level canvas does. The compiled plan node does not re-expose the
-            // partition/strategy config here, so the subtitle names the operator.
+            // top-level canvas does. The compiled `PlanNode` DOES carry the
+            // config (`PlanNode::Reshape/Cull { config }`,
+            // `PlanNode::Envelope { strategy }`), but this secondary canvas keeps
+            // a minimal operator-name subtitle by design — the rich per-config
+            // subtitle is a top-level-canvas affordance, mirroring the other plan
+            // arms here (Route/Aggregate/Combine) that likewise summarize tersely.
             PlanNode::Reshape { name, .. } => (name.clone(), StageKind::Reshape, "reshape".into()),
             PlanNode::Cull { name, .. } => (name.clone(), StageKind::Cull, "cull".into()),
             PlanNode::Envelope { name, .. } => {
