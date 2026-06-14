@@ -1106,10 +1106,16 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             header,
             config: body,
         } => {
+            // Total output branches = every condition branch PLUS the always-present
+            // default/fallback branch. The default is a first-class branch (a real
+            // output port downstream nodes consume), not "just another rule", so it
+            // counts toward the branch total — otherwise a route with one condition
+            // and a default reads as "1 branch" when it actually fans out to two.
+            let branch_count = body.conditions.len() + 1;
             let subtitle = format!(
                 "{} branch{} → {}",
-                body.conditions.len(),
-                if body.conditions.len() == 1 { "" } else { "es" },
+                branch_count,
+                if branch_count == 1 { "" } else { "es" },
                 body.default
             );
             StageView {
@@ -1597,6 +1603,41 @@ nodes:
         assert!(has(&StageKind::Route));
         assert!(has(&StageKind::Merge));
         assert!(has(&StageKind::Output));
+    }
+
+    /// The shipped `order_fulfillment.yaml` example parses and models routing
+    /// with clinker's dedicated `route` node — not a transform emitting a
+    /// synthetic `_route` column (#74). Guards the example against rot and
+    /// verifies the migration: `route_priority` derives to a Route stage whose
+    /// subtitle counts the one condition branch plus the default, and both
+    /// outputs connect to it.
+    #[test]
+    fn order_fulfillment_example_uses_route_node() {
+        let yaml = include_str!("../../../examples/pipelines/order_fulfillment.yaml");
+        let config = parse_config(yaml).expect("order_fulfillment.yaml parses");
+        let view = derive_pipeline_view(&config);
+
+        let route_idx = view
+            .stages
+            .iter()
+            .position(|s| s.id == "route_priority")
+            .expect("route_priority stage exists");
+        let route = &view.stages[route_idx];
+        assert_eq!(route.kind, StageKind::Route);
+        // Two output branches — the `priority_report` condition + the
+        // `fulfilled_orders` default (the default counts as a branch).
+        assert_eq!(route.subtitle, "2 branches \u{2192} fulfilled_orders");
+
+        // No synthetic `_route` field leaks onto the card (Route has no cxl).
+        assert!(route.fields.iter().all(|f| f.name != "_route"));
+
+        // Both `output` nodes consume the route node's branches.
+        let from_route = view
+            .connections
+            .iter()
+            .filter(|(from, _)| *from == route_idx)
+            .count();
+        assert_eq!(from_route, 2, "both outputs connect to the route node");
     }
 
     /// A legacy-shape fixture lifted into the unified `nodes:` topology

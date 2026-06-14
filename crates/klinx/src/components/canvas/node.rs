@@ -141,7 +141,15 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
 
                 div { class: "klinx-node-label", "{stage.label}" }
                 hr { class: "klinx-rust-line" }
-                div { class: "klinx-node-subtitle", "{stage.subtitle}" }
+                // The subtitle clips with an ellipsis at the fixed card width
+                // (`.klinx-node-subtitle` is `overflow:hidden; text-overflow:ellipsis`),
+                // so a long value (e.g. a Route's "N branches → default") is otherwise
+                // unreadable. A native `title` tooltip surfaces the full text on hover.
+                div {
+                    class: "klinx-node-subtitle",
+                    title: "{stage.subtitle}",
+                    "{stage.subtitle}"
+                }
             }
 
             // ── Field-row list (variable height) ─────────────────────────────
