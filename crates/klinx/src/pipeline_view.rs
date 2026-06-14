@@ -59,6 +59,17 @@ pub enum StageKind {
     Merge,
     Combine,
     Output,
+    /// Per-correlation-group record synthesis (clinker `Reshape`). Single
+    /// output whose schema differs from the input (synthesized rows + audit
+    /// columns), so it is NOT a passthrough.
+    Reshape,
+    /// Per-correlation-group record removal (clinker `Cull`). Schema-preserving
+    /// on both ports; carries a `removed_to` side-output branch port in
+    /// addition to its main output.
+    Cull,
+    /// Body-record framing into documents (clinker `Envelope`). Single output
+    /// whose framed-document shape differs from the input.
+    Envelope,
     Composition,
     InputPort,
     OutputPort,
@@ -75,6 +86,9 @@ impl StageKind {
             StageKind::Merge => "merge",
             StageKind::Combine => "combine",
             StageKind::Output => "output",
+            StageKind::Reshape => "reshape",
+            StageKind::Cull => "cull",
+            StageKind::Envelope => "envelope",
             StageKind::Composition => "composition",
             StageKind::InputPort => "input-port",
             StageKind::OutputPort => "output-port",
@@ -91,6 +105,9 @@ impl StageKind {
             StageKind::Merge => "MERGE",
             StageKind::Combine => "COMBINE",
             StageKind::Output => "OUTPUT",
+            StageKind::Reshape => "RESHAPE",
+            StageKind::Cull => "CULL",
+            StageKind::Envelope => "ENVELOPE",
             StageKind::Composition => "COMPOSITION",
             StageKind::InputPort => "INPUT",
             StageKind::OutputPort => "OUTPUT",
@@ -112,13 +129,12 @@ pub fn stage_kind_for_node(node: &PipelineNode) -> StageKind {
         PipelineNode::Combine { .. } => StageKind::Combine,
         PipelineNode::Output { .. } => StageKind::Output,
         PipelineNode::Composition { .. } => StageKind::Composition,
-        // Reshape/Cull/Envelope are new per-correlation-group operators. They
-        // render with the generic transform kind until #80 gives them dedicated
-        // stage kinds + cards; listing them explicitly (no `_` arm) keeps the
-        // build-time guard that a future variant forces a decision here.
-        PipelineNode::Reshape { .. }
-        | PipelineNode::Cull { .. }
-        | PipelineNode::Envelope { .. } => StageKind::Transform,
+        // The three per-group operators each get their own first-class kind so
+        // the canvas labels, accents, and ports them distinctly (#80). No `_`
+        // arm: a future `PipelineNode` variant still forces a decision here.
+        PipelineNode::Reshape { .. } => StageKind::Reshape,
+        PipelineNode::Cull { .. } => StageKind::Cull,
+        PipelineNode::Envelope { .. } => StageKind::Envelope,
     }
 }
 
@@ -138,9 +154,17 @@ fn node_input_port(ni: &NodeInput) -> Option<&str> {
     }
 }
 
-/// A node's output branches: every condition branch in declaration order
-/// followed by the always-present `default`. Empty for every non-Route node.
-fn route_branches(node: &PipelineNode) -> Vec<RouteBranch> {
+/// A node's extra named output ports, rendered below the field rows.
+///
+/// - **Route**: every condition branch in declaration order, then the
+///   always-present `default` fallback. A Route node's outputs ARE these ports
+///   (it has no separate node-level output port).
+/// - **Cull**: exactly one entry — the `removed_to` side-output port carrying
+///   the removed groups' records. Cull ALSO keeps its node-level main output, so
+///   this is in addition to it (see [`StageView::keeps_node_output_port`]).
+///
+/// Empty for every other node.
+fn output_branches(node: &PipelineNode) -> Vec<RouteBranch> {
     match node {
         PipelineNode::Route { config: body, .. } => {
             let mut branches: Vec<RouteBranch> = body
@@ -161,6 +185,15 @@ fn route_branches(node: &PipelineNode) -> Vec<RouteBranch> {
             });
             branches
         }
+        // Cull's `removed_to` is a producer-side side-output port: downstream
+        // nodes consume the removed groups as `<cull>.<removed_to>`, so it must
+        // be an individually-addressable port (the same seam Route branches use).
+        // It is NOT a default fallback — the main output is the node-level port.
+        PipelineNode::Cull { config: body, .. } => vec![RouteBranch {
+            name: body.removed_to.clone(),
+            predicate: None,
+            is_default: false,
+        }],
         _ => Vec::new(),
     }
 }
@@ -242,11 +275,15 @@ pub struct StageView {
     /// unchanged, so existing rendering is untouched. Both the composition
     /// canvas (#66) and the pipeline canvas (#68) populate this.
     pub fields: Vec<FieldRow>,
-    /// Per-branch output ports for a Route node — condition branches in
-    /// declaration order followed by the `default` branch. Empty for every
-    /// non-Route node. Rendered as labelled output ports below the field rows;
-    /// each downstream edge that consumes `route.branch` anchors at the matching
-    /// branch port (see [`StageView::branch_anchor_out`]).
+    /// Extra named output ports rendered below the field rows. For a Route node
+    /// these are its condition branches (declaration order) then the `default`
+    /// branch; for a Cull node it is the single `removed_to` side-output. Empty
+    /// for every other node. Each downstream edge that consumes `producer.port`
+    /// anchors at the matching port (see [`StageView::branch_anchor_out`]).
+    ///
+    /// Whether the node ALSO keeps its node-level output port depends on the
+    /// kind: a Route's outputs ARE these ports, but a Cull keeps its main output
+    /// — see [`StageView::keeps_node_output_port`].
     pub branches: Vec<RouteBranch>,
 }
 
@@ -265,6 +302,17 @@ impl StageView {
     /// name; see [`StageView::port_out`].
     pub fn port_in(&self) -> (f32, f32) {
         (self.canvas_x, self.canvas_y + HEADER_PORT_Y)
+    }
+
+    /// Whether this node renders a node-level OUTPUT port in addition to any
+    /// branch ports it carries.
+    ///
+    /// A Route node's outputs ARE its branch ports, so it has no separate
+    /// node-level output port. Every other node — including a Cull, whose
+    /// `removed_to` is a *side*-output alongside its main output — keeps the
+    /// node-level port. A node with no branches trivially keeps it.
+    pub fn keeps_node_output_port(&self) -> bool {
+        !matches!(self.kind, StageKind::Route)
     }
 
     /// World-space vertical center of field row `i` inside this card.
@@ -615,12 +663,13 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
         cols.push(col);
     }
 
-    // Per-node Route output branches (condition branches + default), empty for
-    // every non-Route node. Computed before connections so an edge that consumes
-    // `route.branch` can resolve its source-branch index, and before layout so
-    // the branch ports' height is reserved alongside the field rows.
+    // Per-node extra output ports: a Route's condition+default branches, or a
+    // Cull's `removed_to` side-output; empty for every other node. Computed
+    // before connections so an edge that consumes `producer.port` can resolve its
+    // source-port index, and before layout so the ports' height is reserved
+    // alongside the field rows.
     let node_branches: Vec<Vec<RouteBranch>> =
-        nodes.iter().map(|s| route_branches(&s.value)).collect();
+        nodes.iter().map(|s| output_branches(&s.value)).collect();
 
     // Connections: resolve each consumer's input header reference. These also
     // form the predecessor relation the barycenter layout pass consumes. An edge
@@ -771,13 +820,14 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
     let mut connections: Vec<Connection> = Vec::new();
     let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); total];
 
-    // Route output branches per UNIFIED index: body slots carry their route's
-    // branches (condition branches + default); input/output ports carry none.
-    // Sized over the whole index space so a `route.branch` edge can resolve its
-    // source-branch index, and so layout reserves the branch ports' height.
+    // Extra output ports per UNIFIED index: body slots carry their Route
+    // branches (condition + default) or Cull `removed_to` side-output;
+    // input/output ports carry none. Sized over the whole index space so a
+    // `producer.port` edge can resolve its source-port index, and so layout
+    // reserves the ports' height.
     let mut node_branches: Vec<Vec<RouteBranch>> = vec![Vec::new(); total];
     for (bi, spanned) in body.iter().enumerate() {
-        node_branches[n_in + bi] = route_branches(&spanned.value);
+        node_branches[n_in + bi] = output_branches(&spanned.value);
     }
 
     // Resolve a body input reference to `(unified_index, source_branch_index)`;
@@ -932,6 +982,32 @@ fn node_cxl(node: &PipelineNode) -> Option<&str> {
     }
 }
 
+/// Whether a CXL-less node forwards its input columns unchanged, so drawing
+/// passthrough field rows from its predecessors is faithful.
+///
+/// This gates the field-lineage pass's no-CXL branch: a node with no `cxl:`
+/// would otherwise be drawn as a pure passthrough of its input columns. That is
+/// honest for schema-preserving operators (Route, Output, and crucially Cull —
+/// which removes whole groups but never alters columns), but MISLEADING for
+/// operators whose output shape differs from the input:
+///
+/// - **Reshape** synthesizes new rows and appends `$meta.*` audit columns, and
+///   may mutate trigger rows — its output schema is not the input schema.
+/// - **Envelope** frames body records into documents — its framed-document
+///   output shape differs from the body input.
+///
+/// For those two we have no resolvable output schema at this layer, so we emit
+/// NO field rows rather than the wrong ones (an empty card, classic
+/// [`NODE_HEIGHT`], no field cables). Every other CXL-less node (Route, Output,
+/// Cull, Composition) keeps its existing passthrough-row treatment — schema-
+/// preserving for the first three, and unchanged for Composition.
+fn node_preserves_input_schema(node: &PipelineNode) -> bool {
+    !matches!(
+        node,
+        PipelineNode::Reshape { .. } | PipelineNode::Envelope { .. }
+    )
+}
+
 /// Declared origin field rows from a source/port schema's columns.
 ///
 /// Shared by both lineage entry points: a composition input port and a pipeline
@@ -1062,6 +1138,18 @@ fn compute_field_lineage(
                     input_cols.push(row.name.clone());
                 }
             }
+        }
+
+        // Schema-changing CXL-less operators (Reshape, Envelope) get NO field
+        // rows: their output shape differs from the input, so the passthrough
+        // rows the no-CXL branch below would draw are MISLEADING (they would show
+        // the input columns verbatim as if carried through). With no resolvable
+        // output schema at this layer we leave the card empty (classic
+        // [`NODE_HEIGHT`], no field cables) rather than draw a wrong shape. A
+        // schema-changing node that DOES carry CXL (none today, but future-proof)
+        // still falls through to the precise emit analysis.
+        if node_cxl(node).is_none() && !node_preserves_input_schema(node) {
+            continue;
         }
 
         // Three cases, deliberately distinct:
@@ -1484,15 +1572,19 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
         },
-        // Reshape/Cull/Envelope render as generic transform-kind cards (subtitle
-        // names the operator) until #80 builds their first-class layout. Reshape
-        // and Cull carry a `NodeHeader`; Envelope carries an `EnvelopeHeader` —
-        // both expose `name`/`description`, so the card body is identical here.
-        PipelineNode::Reshape { header, .. } => StageView {
+        // Reshape: per-group synthesis. Subtitle names the partition key (the
+        // grouping that every rule observes) and the rule count, the two facts
+        // that read at a glance. Output schema differs from input, so its field
+        // rows are suppressed by the lineage pass (see
+        // [`node_preserves_input_schema`]); `branches` stays empty (single output).
+        PipelineNode::Reshape {
+            header,
+            config: body,
+        } => StageView {
             id: header.name.clone(),
             label: header.name.clone(),
             kind,
-            subtitle: "reshape".to_string(),
+            subtitle: group_rules_subtitle(&body.partition_by, body.rules.len()),
             canvas_x: x,
             canvas_y: y,
             cxl_source: None,
@@ -1501,11 +1593,18 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
         },
-        PipelineNode::Cull { header, .. } => StageView {
+        // Cull: per-group removal. Subtitle mirrors Reshape (partition key + rule
+        // count). Schema-preserving, so its passthrough field rows are honest and
+        // come from the lineage pass; the `removed_to` side-output is surfaced as
+        // a branch port assigned by `output_branches` in the view builders.
+        PipelineNode::Cull {
+            header,
+            config: body,
+        } => StageView {
             id: header.name.clone(),
             label: header.name.clone(),
             kind,
-            subtitle: "cull".to_string(),
+            subtitle: group_rules_subtitle(&body.partition_by, body.rules.len()),
             canvas_x: x,
             canvas_y: y,
             cxl_source: None,
@@ -1514,11 +1613,17 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
         },
-        PipelineNode::Envelope { header, .. } => StageView {
+        // Envelope: frames body records into documents. Subtitle names the
+        // framing strategy. Output shape differs from input, so its field rows
+        // are suppressed by the lineage pass; single output (no branches).
+        PipelineNode::Envelope {
+            header,
+            config: body,
+        } => StageView {
             id: header.name.clone(),
             label: header.name.clone(),
             kind,
-            subtitle: "envelope".to_string(),
+            subtitle: format!("frame: {}", envelope_strategy_name(&body.strategy)),
             canvas_x: x,
             canvas_y: y,
             cxl_source: None,
@@ -1527,6 +1632,33 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
         },
+    }
+}
+
+/// Card subtitle shared by Reshape and Cull: the partition key plus the rule
+/// count — the two facts that read at a glance for a per-correlation-group
+/// operator. With no `partition_by` fields (structurally valid but unusual) it
+/// degrades to just the rule count.
+fn group_rules_subtitle(partition_by: &[String], rule_count: usize) -> String {
+    let rules = format!(
+        "{rule_count} rule{}",
+        if rule_count == 1 { "" } else { "s" }
+    );
+    if partition_by.is_empty() {
+        rules
+    } else {
+        format!("by {} · {rules}", partition_by.join(", "))
+    }
+}
+
+/// Stable lowercase name of an [`EnvelopeStrategy`] for display.
+fn envelope_strategy_name(
+    strategy: &clinker_plan::config::pipeline_node::EnvelopeStrategy,
+) -> &'static str {
+    use clinker_plan::config::pipeline_node::EnvelopeStrategy;
+    match strategy {
+        EnvelopeStrategy::Preserve => "preserve",
+        EnvelopeStrategy::Concat => "concat",
     }
 }
 
@@ -1826,14 +1958,18 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
                 StageKind::Transform,
                 "correlation_commit".into(),
             ),
-            // New per-group operators inside a drilled-in composition body;
-            // generic transform rendering until #80.
-            PlanNode::Reshape { name, .. } => {
-                (name.clone(), StageKind::Transform, "reshape".into())
-            }
-            PlanNode::Cull { name, .. } => (name.clone(), StageKind::Transform, "cull".into()),
+            // Per-group operators inside a drilled-in composition body. Each gets
+            // its own stage kind so the body view labels/accents them as the
+            // top-level canvas does. The compiled `PlanNode` DOES carry the
+            // config (`PlanNode::Reshape/Cull { config }`,
+            // `PlanNode::Envelope { strategy }`), but this secondary canvas keeps
+            // a minimal operator-name subtitle by design — the rich per-config
+            // subtitle is a top-level-canvas affordance, mirroring the other plan
+            // arms here (Route/Aggregate/Combine) that likewise summarize tersely.
+            PlanNode::Reshape { name, .. } => (name.clone(), StageKind::Reshape, "reshape".into()),
+            PlanNode::Cull { name, .. } => (name.clone(), StageKind::Cull, "cull".into()),
             PlanNode::Envelope { name, .. } => {
-                (name.clone(), StageKind::Transform, "envelope".into())
+                (name.clone(), StageKind::Envelope, "envelope".into())
             }
         };
 
@@ -1897,16 +2033,19 @@ mod migrated_fixture_tests {
 
     /// Variant dispatch is guarded at compile time: [`stage_kind_for_node`]
     /// has no `_` arm, so adding a `PipelineNode` variant without mapping it is
-    /// a build error. Most variants map to their own `StageKind`; the per-group
-    /// operators Reshape/Cull/Envelope intentionally share `StageKind::Transform`
-    /// until #80 gives them first-class kinds.
+    /// a build error. This test exercises the dispatch at RUNTIME over a fixture
+    /// that now INCLUDES the #80 per-group / framing operators
+    /// (Reshape/Cull/Envelope), asserting each derives to its OWN distinct
+    /// `StageKind` (not the generic `Transform` fallback #78 left behind).
     #[test]
     fn test_canvas_node_dispatches_on_variant() {
-        // A minimal unified-shape YAML that exercises the common single-shape
-        // variants at runtime (Source/Transform/Aggregate/Route/Merge/Output).
-        // Combine/Composition and the new Reshape/Cull/Envelope rely on the
-        // compile-time guard above; runtime fixtures for the new kinds land
-        // with #80.
+        // A minimal unified-shape YAML exercising the single-shape variants
+        // (Source/Transform/Aggregate/Route/Merge/Output) plus the three new
+        // first-class kinds. Config bodies use the minimal valid shapes from
+        // clinker-plan's `config::pipeline_node` (`ReshapeBody`/`CullBody`/
+        // `EnvelopeBody`): Reshape needs `partition_by` + `rules`; Cull adds the
+        // required `removed_to`; Envelope needs its `body` input + a (possibly
+        // empty) `config`.
         let yaml = r#"
 pipeline:
   name: variant_dispatch_smoke
@@ -1943,9 +2082,33 @@ nodes:
   - type: merge
     name: joined
     inputs: [split.hi, split.lo]
+  - type: reshape
+    name: synth
+    input: joined
+    config:
+      partition_by: [x]
+      rules:
+        - name: fill
+          when: "x > 0"
+          synthesize:
+            copy_from: trigger
+  - type: cull
+    name: prune
+    input: synth
+    config:
+      partition_by: [x]
+      removed_to: dropped
+      rules:
+        - name: drop_small
+          drop_group_when: "count(*) < 2"
+  - type: envelope
+    name: frame
+    body: prune
+    config:
+      strategy: preserve
   - type: output
     name: out
-    input: joined
+    input: frame
     config:
       name: out
       type: csv
@@ -1955,16 +2118,257 @@ nodes:
         let view = derive_pipeline_view(&config);
 
         // Each declared node produces exactly one stage.
-        assert_eq!(view.stages.len(), 6);
+        assert_eq!(view.stages.len(), 9);
 
-        // Every variant kind is represented.
-        let has = |k: &StageKind| view.stages.iter().any(|s| &s.kind == k);
-        assert!(has(&StageKind::Source));
-        assert!(has(&StageKind::Transform));
-        assert!(has(&StageKind::Aggregate));
-        assert!(has(&StageKind::Route));
-        assert!(has(&StageKind::Merge));
-        assert!(has(&StageKind::Output));
+        // Every variant kind is represented — including the three new ones, each
+        // mapped to its OWN kind (the #78 fallback would have folded all three
+        // into `Transform`).
+        let kind_of = |id: &str| {
+            view.stages
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.kind.clone())
+                .unwrap_or_else(|| panic!("stage {id} present"))
+        };
+        assert_eq!(kind_of("src"), StageKind::Source);
+        assert_eq!(kind_of("clean"), StageKind::Transform);
+        assert_eq!(kind_of("agg"), StageKind::Aggregate);
+        assert_eq!(kind_of("split"), StageKind::Route);
+        assert_eq!(kind_of("joined"), StageKind::Merge);
+        assert_eq!(kind_of("synth"), StageKind::Reshape);
+        assert_eq!(kind_of("prune"), StageKind::Cull);
+        assert_eq!(kind_of("frame"), StageKind::Envelope);
+        assert_eq!(kind_of("out"), StageKind::Output);
+    }
+
+    /// A pipeline with a Cull node surfaces its `removed_to` as a first-class
+    /// side-output branch port, keeps its node-level MAIN output port, and routes
+    /// a downstream consumer of `<cull>.<removed_to>` to that branch (so the cable
+    /// anchors at the side-output, not the main output). Cull is schema-
+    /// preserving, so its field rows are honest passthroughs of the input columns.
+    #[test]
+    fn cull_surfaces_removed_to_side_output() {
+        let yaml = r#"
+pipeline:
+  name: cull_side_output
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: gid, type: string }
+        - { name: amount, type: int }
+  - type: cull
+    name: prune
+    input: src
+    config:
+      partition_by: [gid]
+      removed_to: dropped
+      rules:
+        - name: drop_small
+          drop_group_when: "count(*) < 2"
+  - type: output
+    name: kept
+    input: prune
+    config:
+      name: kept
+      type: csv
+      path: ./kept.csv
+  - type: output
+    name: removed
+    input: prune.dropped
+    config:
+      name: removed
+      type: csv
+      path: ./removed.csv
+"#;
+        let config = parse_config(yaml).expect("cull pipeline parses");
+        let view = derive_pipeline_view(&config);
+
+        let cull_idx = stage_idx(&view, "prune");
+        let cull = &view.stages[cull_idx];
+        assert_eq!(cull.kind, StageKind::Cull);
+
+        // Exactly one branch port — the `removed_to` side-output, not a default.
+        assert_eq!(cull.branches.len(), 1);
+        assert_eq!(cull.branches[0].name, "dropped");
+        assert!(!cull.branches[0].is_default);
+        assert!(cull.branches[0].predicate.is_none());
+
+        // Cull keeps its node-level main output (unlike a Route, whose outputs
+        // ARE its branch ports).
+        assert!(
+            cull.keeps_node_output_port(),
+            "Cull must keep its node-level main output port"
+        );
+
+        // Schema-preserving: the input columns ride through as passthrough rows.
+        let names: Vec<&str> = cull.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["gid", "amount"]);
+        assert!(
+            cull.fields.iter().all(|f| f.kind == FieldKind::PassThrough),
+            "Cull rows must be passthrough (schema-preserving): {:?}",
+            cull.fields
+        );
+
+        // The `kept` output consumes the MAIN output (bare `prune`) → no branch;
+        // the `removed` output consumes `prune.dropped` → branch index 0.
+        let kept_idx = stage_idx(&view, "kept");
+        let removed_idx = stage_idx(&view, "removed");
+        let edge_to = |to: usize| {
+            view.connections
+                .iter()
+                .find(|c| c.from == cull_idx && c.to == to)
+                .unwrap_or_else(|| panic!("edge prune→{to} present"))
+        };
+        assert_eq!(
+            edge_to(kept_idx).from_branch,
+            None,
+            "the main output edge leaves the node-level port"
+        );
+        assert_eq!(
+            edge_to(removed_idx).from_branch,
+            Some(0),
+            "the removed-groups edge leaves the `removed_to` side-output port"
+        );
+    }
+
+    /// Reshape and Envelope change their output shape, so the field-lineage pass
+    /// must NOT draw misleading passthrough rows for them: their cards carry NO
+    /// field rows and contribute NO field edges. A Cull in the same chain is
+    /// schema-preserving and DOES carry passthrough rows — the contrast guards
+    /// against an over-broad suppression.
+    #[test]
+    fn reshape_and_envelope_suppress_misleading_field_rows() {
+        let yaml = r#"
+pipeline:
+  name: shape_changing_no_passthrough
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: gid, type: string }
+        - { name: v, type: int }
+  - type: reshape
+    name: synth
+    input: src
+    config:
+      partition_by: [gid]
+      rules:
+        - name: fill
+          when: "v > 0"
+          synthesize:
+            copy_from: trigger
+  - type: cull
+    name: prune
+    input: src
+    config:
+      partition_by: [gid]
+      removed_to: dropped
+      rules:
+        - name: drop_small
+          drop_group_when: "count(*) < 2"
+  - type: envelope
+    name: frame
+    body: src
+    config:
+      strategy: preserve
+"#;
+        let config = parse_config(yaml).expect("shape-changing pipeline parses");
+        let view = derive_pipeline_view(&config);
+
+        let synth = &view.stages[stage_idx(&view, "synth")];
+        let frame = &view.stages[stage_idx(&view, "frame")];
+        let prune = &view.stages[stage_idx(&view, "prune")];
+
+        // Reshape and Envelope: no field rows (output shape differs from input).
+        assert!(
+            synth.fields.is_empty(),
+            "Reshape must not draw passthrough rows (output shape differs): {:?}",
+            synth.fields
+        );
+        assert!(
+            frame.fields.is_empty(),
+            "Envelope must not draw passthrough rows (output shape differs): {:?}",
+            frame.fields
+        );
+
+        // Cull: schema-preserving, so it DOES carry the input columns through.
+        assert_eq!(
+            prune
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gid", "v"],
+        );
+        assert!(
+            prune
+                .fields
+                .iter()
+                .all(|f| f.kind == FieldKind::PassThrough),
+            "Cull rows must be passthrough: {:?}",
+            prune.fields
+        );
+
+        // No field edge terminates at the schema-changing nodes (a suppressed
+        // card has no row anchors for a cable to land on).
+        let synth_idx = stage_idx(&view, "synth");
+        let frame_idx = stage_idx(&view, "frame");
+        assert!(
+            view.field_edges
+                .iter()
+                .all(|e| e.to_node != synth_idx && e.to_node != frame_idx),
+            "no field edge may terminate at a shape-changing node: {:?}",
+            view.field_edges
+        );
+    }
+
+    /// The per-group subtitle names the partition key and rule count, pluralizing
+    /// "rule" and degrading gracefully when ungrouped; the envelope strategy name
+    /// is the engine's lowercase tag.
+    #[test]
+    fn operator_subtitle_helpers() {
+        use clinker_plan::config::pipeline_node::EnvelopeStrategy;
+
+        assert_eq!(
+            group_rules_subtitle(&["gid".to_string()], 1),
+            "by gid · 1 rule"
+        );
+        assert_eq!(
+            group_rules_subtitle(&["a".to_string(), "b".to_string()], 3),
+            "by a, b · 3 rules"
+        );
+        // No partition fields → just the rule count (no leading "by").
+        assert_eq!(group_rules_subtitle(&[], 2), "2 rules");
+
+        assert_eq!(
+            envelope_strategy_name(&EnvelopeStrategy::Preserve),
+            "preserve"
+        );
+        assert_eq!(envelope_strategy_name(&EnvelopeStrategy::Concat), "concat");
+    }
+
+    /// Every new kind exposes a distinct `kind_attr` / `badge_label` — the CSS
+    /// selector key (drives the accent that keeps cables visible) and the canvas
+    /// badge text. Guards against a copy-paste collision with an existing kind.
+    #[test]
+    fn new_stage_kinds_have_distinct_attrs_and_badges() {
+        for (kind, attr, badge) in [
+            (StageKind::Reshape, "reshape", "RESHAPE"),
+            (StageKind::Cull, "cull", "CULL"),
+            (StageKind::Envelope, "envelope", "ENVELOPE"),
+        ] {
+            assert_eq!(kind.kind_attr(), attr);
+            assert_eq!(kind.badge_label(), badge);
+        }
     }
 
     /// The shipped `order_fulfillment.yaml` example parses and models routing
