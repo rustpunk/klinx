@@ -1106,6 +1106,93 @@ struct ColMeta {
     is_ck: bool,
 }
 
+/// The bare column name an emit-support member denotes — the final dotted
+/// segment of an alias/source-qualified ref (`orders.order_id` → `order_id`),
+/// or the member itself when unqualified.
+///
+/// CXL emits in a Combine body name columns through an input-port alias, and
+/// `Expr::support_into` reports such a ref as the joined dotted string. The
+/// canvas's per-column maps (`producers_of`, `used_cols`) are keyed by the BARE
+/// column name, so support members are normalised through here before lookup.
+/// Mirrors [`field_lineage::bare_field_ref`]'s last-segment rule for copies, so
+/// edge resolution and copy classification agree.
+fn bare_column(member: &str) -> &str {
+    member.rsplit_once('.').map_or(member, |(_, last)| last)
+}
+
+/// A node's input-port aliases mapped to the slot index each names — the
+/// qualifier resolver for alias-qualified CXL refs in a Combine body.
+///
+/// Only [`PipelineNode::Combine`] declares input-port aliases (its
+/// `input:` map keys, e.g. `orders` / `products`); every other node returns an
+/// empty map, so its CXL refs (bare, or a single-source `src.col`) fall through
+/// to bare-column resolution unchanged. `name_to_idx` maps a producer's name to
+/// its slot index in the caller's index space (node indices for a pipeline,
+/// unified port/body indices for a composition), so the same helper serves both
+/// callers.
+fn node_input_aliases(
+    node: &PipelineNode,
+    name_to_idx: &std::collections::HashMap<String, usize>,
+) -> std::collections::HashMap<String, usize> {
+    let mut aliases = std::collections::HashMap::new();
+    if let PipelineNode::Combine { header, .. } = node {
+        for (alias, ni) in &header.input {
+            if let Some(&p) = name_to_idx.get(node_input_name(&ni.value)) {
+                aliases.insert(alias.clone(), p);
+            }
+        }
+    }
+    aliases
+}
+
+/// Resolve one CXL emit-support member to its `(producer_index, bare_column)`
+/// edge anchors, bridging the alias-qualified support vocabulary to the
+/// bare-keyed producer map.
+///
+/// Three cases, in precedence order:
+///   - `alias.column` whose `alias` is one of this node's input ports
+///     (`input_aliases`) → the bare `column` on EXACTLY that port's predecessor,
+///     or nothing when that predecessor does not produce the column. This is the
+///     precise case: a join key copied from one specific side
+///     (`emit product_code = orders.product_code`) connects only to that side,
+///     even when the column also exists in the other input.
+///   - any other dotted ref (a single-input `src.col`, or an unknown qualifier)
+///     → bare-column fallback: every producer of the final dotted segment.
+///   - a bare member → every producer of that column.
+///
+/// Returns an empty vec when no producer matches — a member that names no
+/// predecessor column (an intra-node `let`/earlier-emit the caller resolves via
+/// `emitted_so_far`, or a typo) — never panicking.
+fn resolve_support_anchors(
+    member: &str,
+    producers_of: &std::collections::HashMap<String, Vec<usize>>,
+    input_aliases: &std::collections::HashMap<String, usize>,
+) -> Vec<(usize, String)> {
+    if let Some((alias, rest)) = member.split_once('.')
+        && let Some(&p) = input_aliases.get(alias)
+    {
+        // Alias-qualified by a declared input port → that port's predecessor
+        // only. The producer column is the FIRST segment after the alias, so a
+        // deeper nested access (`alias.record.subfield`) still pins the `record`
+        // column it reads rather than missing on the bare-keyed map's absent
+        // `record.subfield` key. A column the port does not produce yields no
+        // edge (the alias pins the producer; we never fan to another input to
+        // "find" it).
+        let column = rest.split_once('.').map_or(rest, |(col, _)| col);
+        return match producers_of.get(column) {
+            Some(producers) if producers.contains(&p) => vec![(p, column.to_string())],
+            _ => Vec::new(),
+        };
+    }
+    // Bare, or dotted-but-not-a-known-port: resolve the bare column across all
+    // its producers (a shared fan-in column carries from each, per #67).
+    let column = bare_column(member);
+    producers_of
+        .get(column)
+        .map(|producers| producers.iter().map(|&p| (p, column.to_string())).collect())
+        .unwrap_or_default()
+}
+
 /// Compute per-index output field rows and the field-level lineage edges over a
 /// classified slot list. **The shared lineage core** for both the composition
 /// canvas ([`derive_composition_view`]) and the pipeline canvas
@@ -1138,10 +1225,20 @@ struct ColMeta {
 /// predecessor (a join key carried from both joined inputs) emits a carry edge
 /// to EACH contributing input, so hovering it lights up every source rather than
 /// only the first-seen one (#67).
+///
+/// Alias-qualified Combine refs: a Combine body names columns through its
+/// input-port aliases (`emit name = orders.order_id`), which `support_into`
+/// reports as the dotted string `orders.order_id`. `input_aliases[u]` maps index
+/// `u`'s port aliases to predecessor indices so each qualified ref resolves to
+/// the column on EXACTLY that port (the bare-keyed `producers_of` alone cannot
+/// disambiguate a column shared by two inputs). It is empty for every non-Combine
+/// node, whose bare / single-source refs resolve by bare-column fallback.
 fn compute_field_lineage(
     slots: &[LineageSlot<'_>],
     predecessors: &[Vec<usize>],
+    input_aliases: &[std::collections::HashMap<String, usize>],
 ) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+    debug_assert_eq!(slots.len(), input_aliases.len());
     let total = slots.len();
     debug_assert_eq!(total, predecessors.len());
     let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
@@ -1246,12 +1343,16 @@ fn compute_field_lineage(
                 // emit supports" wording on purpose: a pure copy is not an
                 // "access" of the column it copies. (No effect on the canonical
                 // value_tier fixture, which has no copy emits.)
+                // Keyed by BARE column name (`bare_column`): a Combine's computed
+                // emit reads `orders.line_total`, but a carry is classified
+                // against the bare `line_total`, so both sides must speak the
+                // same vocabulary for the Access/Passthrough split to fire.
                 let used_cols: std::collections::HashSet<&str> = supports
                     .iter()
                     .filter(|(target, _)| !copies.contains(target.as_str()))
-                    .flat_map(|(_, support)| support.iter().map(String::as_str))
+                    .flat_map(|(_, support)| support.iter().map(|m| bare_column(m)))
                     .collect();
-                // Classify one identity (`c → c`) carry of column `col`: an
+                // Classify one identity (`c → c`) carry of bare column `col`: an
                 // `Access` carry when `col` also feeds a computed emit, else a
                 // pure `Passthrough`.
                 let carry_kind = |col: &str| {
@@ -1273,6 +1374,7 @@ fn compute_field_lineage(
                 //    after its own edges, so an emit never reads itself.
                 // A support column that is neither resolves to nothing (it names
                 // no producible field — e.g. an accept-any input).
+                let aliases = &input_aliases[idx];
                 let mut emitted_so_far: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
                 for (target, support) in &supports {
@@ -1280,28 +1382,35 @@ fn compute_field_lineage(
                     // edge is a carry (Passthrough/Access); a computed or renamed
                     // emit derives its target.
                     let carried = copies.contains(target.as_str());
-                    for col in support {
+                    for member in support {
+                        // Resolve the (possibly alias-qualified) support member to
+                        // its bare column on the right predecessor(s); `col` is the
+                        // bare name so the carry/Access split and the edge's
+                        // `from_field` both read the column, not the dotted ref.
+                        let col = bare_column(member);
                         let kind = if carried {
                             carry_kind(col)
                         } else {
                             FieldEdgeKind::Derive
                         };
-                        if let Some(producers) = producers_of.get(col) {
+                        let anchors = resolve_support_anchors(member, &producers_of, aliases);
+                        if !anchors.is_empty() {
                             // A support column present in several inputs derives
-                            // its target from each of them (#67).
-                            for &p in producers {
+                            // its target from each of them (#67); an alias-qualified
+                            // ref resolves to its single declared port.
+                            for (p, from_field) in anchors {
                                 field_edges.push(FieldEdge {
                                     from_node: p,
-                                    from_field: col.clone(),
+                                    from_field,
                                     to_node: idx,
                                     to_field: target.clone(),
                                     kind,
                                 });
                             }
-                        } else if emitted_so_far.contains(col.as_str()) {
+                        } else if emitted_so_far.contains(col) {
                             field_edges.push(FieldEdge {
                                 from_node: idx,
-                                from_field: col.clone(),
+                                from_field: col.to_string(),
                                 to_node: idx,
                                 to_field: target.clone(),
                                 kind,
@@ -1445,7 +1554,28 @@ fn composition_field_lineage(
         }]));
     }
 
-    let (out_fields, mut field_edges) = compute_field_lineage(&slots, predecessors);
+    // Per-slot input-port alias → unified-index map for body Combine nodes
+    // (#67 qualified refs). The producer name space is the same one the caller
+    // wired predecessors over: input-port names occupy `[0, n_in)`, body node
+    // names `[n_in, n_in+n_body)`. Ports and output slots carry no aliases.
+    let mut name_to_idx: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (i, port) in sig.inputs.keys().enumerate() {
+        name_to_idx.insert(port.to_string(), i);
+    }
+    for (j, spanned) in body.iter().enumerate() {
+        name_to_idx.insert(spanned.value.name().to_string(), n_in + j);
+    }
+    // Only body slots carry aliases; ports and output slots stay empty. Mirrors
+    // the `node_branches` build above (vec sized over `total`, body slots filled
+    // by an indexed loop) rather than a per-index range guard.
+    let mut input_aliases: Vec<std::collections::HashMap<String, usize>> =
+        vec![std::collections::HashMap::new(); total];
+    for (bi, spanned) in body.iter().enumerate() {
+        input_aliases[n_in + bi] = node_input_aliases(&spanned.value, &name_to_idx);
+    }
+
+    let (out_fields, mut field_edges) = compute_field_lineage(&slots, predecessors, &input_aliases);
 
     // Producer → output-port field edge, one per output port. The output port
     // surfaces its producer body node's records; on the canvas we draw a single
@@ -1514,7 +1644,21 @@ fn pipeline_field_lineage(
         })
         .collect();
 
-    compute_field_lineage(&slots, predecessors)
+    // Per-node input-port alias → node-index map, so a Combine body's
+    // alias-qualified CXL refs (`orders.order_id`) resolve to the right
+    // predecessor. Rebuilds the same name→index relation `derive_view_from_nodes`
+    // used to wire predecessors; empty for every non-Combine node.
+    let name_to_idx: std::collections::HashMap<String, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, spanned)| (spanned.value.name().to_string(), i))
+        .collect();
+    let input_aliases: Vec<std::collections::HashMap<String, usize>> = nodes
+        .iter()
+        .map(|spanned| node_input_aliases(&spanned.value, &name_to_idx))
+        .collect();
+
+    compute_field_lineage(&slots, predecessors, &input_aliases)
 }
 
 /// Synthetic boundary node for a composition input port.
@@ -2857,6 +3001,72 @@ nodes:
             .unwrap_or_else(|| panic!("stage {label} present"))
     }
 
+    /// `resolve_support_anchors` bridges alias-qualified CXL refs to the
+    /// bare-keyed producer map across all three branches: a port alias pins one
+    /// predecessor (precise, even for a shared column), an unknown qualifier and
+    /// a bare ref both fan to every producer of the bare column, and a name no
+    /// input produced resolves to nothing.
+    #[test]
+    fn resolve_support_anchors_three_branches() {
+        use std::collections::HashMap;
+        // `product_code` lives in both inputs (node 0 = orders, node 1 = products);
+        // `order_id` only in orders; `product_name` only in products.
+        let producers_of: HashMap<String, Vec<usize>> = HashMap::from([
+            ("product_code".to_string(), vec![0, 1]),
+            ("order_id".to_string(), vec![0]),
+            ("product_name".to_string(), vec![1]),
+        ]);
+        let aliases: HashMap<String, usize> =
+            HashMap::from([("orders".to_string(), 0), ("products".to_string(), 1)]);
+
+        // Alias pins the producer: a shared column copied from `orders` resolves
+        // to node 0 ONLY — never fanning to the products side that also has it.
+        assert_eq!(
+            resolve_support_anchors("orders.product_code", &producers_of, &aliases),
+            vec![(0, "product_code".to_string())]
+        );
+        assert_eq!(
+            resolve_support_anchors("products.product_code", &producers_of, &aliases),
+            vec![(1, "product_code".to_string())]
+        );
+
+        // A bare ref fans to every producer of the column (#67 shared fan-in).
+        let mut bare = resolve_support_anchors("product_code", &producers_of, &aliases);
+        bare.sort();
+        assert_eq!(
+            bare,
+            vec![
+                (0, "product_code".to_string()),
+                (1, "product_code".to_string())
+            ]
+        );
+
+        // An unknown qualifier (`src.col` style) falls back to the bare column.
+        assert_eq!(
+            resolve_support_anchors("src.order_id", &producers_of, &aliases),
+            vec![(0, "order_id".to_string())]
+        );
+
+        // A nested access through a known alias (`alias.record.subfield`) pins
+        // the FIRST post-alias segment — the real producer column — not the
+        // dotted remainder the bare-keyed map has no key for.
+        assert_eq!(
+            resolve_support_anchors("orders.product_code.len", &producers_of, &aliases),
+            vec![(0, "product_code".to_string())],
+            "a nested access resolves to its first-segment column on the aliased port"
+        );
+
+        // A known alias whose column it does not produce → no edge (we never fan
+        // to another input to "find" a missing column).
+        assert!(
+            resolve_support_anchors("orders.product_name", &producers_of, &aliases).is_empty(),
+            "orders has no product_name, so an orders.product_name ref draws nothing"
+        );
+
+        // A name no input produced (intra-node let / typo) → no anchors.
+        assert!(resolve_support_anchors("nonexistent", &producers_of, &aliases).is_empty());
+    }
+
     /// FIX 3 (#68/#70): the PIPELINE canvas now carries field rows + lineage.
     /// A `source` with declared schema [a, b] feeding a transform `emit c = a+1`
     /// must produce: source fields [a, b] Declared; transform fields
@@ -3101,6 +3311,135 @@ nodes:
             closure.contains(&idx_of(&carry_from_products))
                 && closure.contains(&idx_of(&carry_from_inventory)),
             "hovering the join key reveals carries from every input, got {closure:?}"
+        );
+    }
+
+    /// A Combine body references columns through its input-port aliases
+    /// (`emit name = orders.order_id`); `Expr::support_into` reports that ref as
+    /// the dotted string `"orders.order_id"`, but `producers_of` is keyed by the
+    /// BARE column name, so a naive lookup misses and the node draws NO
+    /// input-side lineage at all (the reported `order_fulfillment` bug). Each
+    /// alias-qualified emit must resolve to the column on EXACTLY that alias's
+    /// predecessor — including the precise case where the column also exists in
+    /// the other input (`product_code`): an explicit `orders.product_code` copy
+    /// connects only to `orders`, never fanning to the `products` side.
+    #[test]
+    fn combine_alias_qualified_emits_resolve_to_their_port() {
+        let yaml = r#"
+pipeline:
+  name: combine_qualified
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./orders.csv
+      schema:
+        - { name: order_id, type: string }
+        - { name: product_code, type: string }
+        - { name: line_total, type: float }
+  - type: source
+    name: products
+    config:
+      name: products
+      type: csv
+      path: ./products.csv
+      schema:
+        - { name: product_code, type: string }
+        - { name: product_name, type: string }
+  - type: combine
+    name: enriched
+    input:
+      orders: orders
+      products: products
+    config:
+      where: "orders.product_code == products.product_code"
+      match: first
+      on_miss: null_fields
+      cxl: |
+        emit order_id = orders.order_id
+        emit product_code = orders.product_code
+        emit product_name = products.product_name
+        emit shipping_cost = orders.line_total * 0.1
+      propagate_ck: driver
+"#;
+        let config = parse_config(yaml).expect("combine qualified pipeline parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_orders = stage_idx(&view, "orders");
+        let i_products = stage_idx(&view, "products");
+        let i_enriched = stage_idx(&view, "enriched");
+
+        let has_edge = |from: usize, ff: &str, tf: &str, kind: FieldEdgeKind| {
+            view.field_edges.iter().any(|e| {
+                e.from_node == from
+                    && e.from_field == ff
+                    && e.to_node == i_enriched
+                    && e.to_field == tf
+                    && e.kind == kind
+            })
+        };
+
+        // A column unique to `orders`, copied unchanged → an identity carry from
+        // orders (the alias prefix is stripped to the bare `order_id`).
+        assert!(
+            has_edge(i_orders, "order_id", "order_id", FieldEdgeKind::Passthrough),
+            "order_id must carry from orders, got {:?}",
+            view.field_edges
+        );
+        // A column unique to `products`, copied unchanged → an identity carry
+        // from products.
+        assert!(
+            has_edge(
+                i_products,
+                "product_name",
+                "product_name",
+                FieldEdgeKind::Passthrough
+            ),
+            "product_name must carry from products, got {:?}",
+            view.field_edges
+        );
+        // A computed emit derives from the orders column it reads.
+        assert!(
+            has_edge(
+                i_orders,
+                "line_total",
+                "shipping_cost",
+                FieldEdgeKind::Derive
+            ),
+            "shipping_cost must derive from orders.line_total, got {:?}",
+            view.field_edges
+        );
+
+        // PRECISION: `emit product_code = orders.product_code` connects ONLY to
+        // the orders side, even though `product_code` also exists in products —
+        // an explicit alias pins the producer; it does not fan to every input.
+        assert!(
+            has_edge(
+                i_orders,
+                "product_code",
+                "product_code",
+                FieldEdgeKind::Passthrough
+            ),
+            "product_code must carry from the orders side it was copied from"
+        );
+        assert!(
+            !view.field_edges.iter().any(|e| {
+                e.from_node == i_products
+                    && e.from_field == "product_code"
+                    && e.to_node == i_enriched
+                    && e.to_field == "product_code"
+            }),
+            "an explicit orders.product_code copy must NOT fan an edge from products"
+        );
+
+        // The node must surface SOME input-side lineage (the bug was zero edges).
+        assert!(
+            view.field_edges
+                .iter()
+                .any(|e| e.to_node == i_enriched && e.from_node != i_enriched),
+            "the combine must draw at least one input-side field edge"
         );
     }
 
