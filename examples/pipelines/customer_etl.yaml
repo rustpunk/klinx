@@ -1,5 +1,10 @@
 pipeline:
   name: customer_etl
+  # `tier_threshold` is the lifetime-value boundary between the "gold" and
+  # "standard" customer tiers. Declared as a `$vars.*` knob so per-tenant
+  # channels (see channels/acme-corp) can re-pin it without editing the graph.
+  vars:
+    tier_threshold: { type: int, default: 10000 }
 
 nodes:
   - type: source
@@ -34,7 +39,7 @@ nodes:
     input: active_only
     config:
       cxl: |
-        emit tier = if lifetime_value.to_int() > 10000 then "gold" else "standard"
+        emit tier = if lifetime_value.to_int() > $vars.tier_threshold then "gold" else "standard"
 
   - type: output
     name: results
