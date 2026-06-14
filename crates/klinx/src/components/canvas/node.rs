@@ -282,10 +282,18 @@ fn FieldRowView(
     // as the row's stable identity for keying and future per-row styling.
     let _ = row_index;
 
+    // Full `name : type` for the native tooltip — the name and the type each clip
+    // with an ellipsis at the card width, so hovering reveals the untruncated text.
+    let tip = match ty.as_ref() {
+        Some(t) => format!("{name} : {t}"),
+        None => name.clone(),
+    };
+
     rsx! {
         div {
             class: "klinx-node-field",
             "data-field-kind": kind_attr,
+            title: "{tip}",
             onmouseenter: {
                 let name = name.clone();
                 move |_| hovered.0.set(Some((node_index, name.clone())))
