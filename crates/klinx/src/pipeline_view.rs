@@ -1599,6 +1599,40 @@ nodes:
         assert!(has(&StageKind::Output));
     }
 
+    /// The shipped `order_fulfillment.yaml` example parses and models routing
+    /// with clinker's dedicated `route` node — not a transform emitting a
+    /// synthetic `_route` column (#74). Guards the example against rot and
+    /// verifies the migration: `route_priority` derives to a Route stage whose
+    /// subtitle counts the one condition branch plus the default, and both
+    /// outputs connect to it.
+    #[test]
+    fn order_fulfillment_example_uses_route_node() {
+        let yaml = include_str!("../../../examples/pipelines/order_fulfillment.yaml");
+        let config = parse_config(yaml).expect("order_fulfillment.yaml parses");
+        let view = derive_pipeline_view(&config);
+
+        let route_idx = view
+            .stages
+            .iter()
+            .position(|s| s.id == "route_priority")
+            .expect("route_priority stage exists");
+        let route = &view.stages[route_idx];
+        assert_eq!(route.kind, StageKind::Route);
+        // One condition branch (`priority_report`) + the `default` branch.
+        assert_eq!(route.subtitle, "1 branch \u{2192} fulfilled_orders");
+
+        // No synthetic `_route` field leaks onto the card (Route has no cxl).
+        assert!(route.fields.iter().all(|f| f.name != "_route"));
+
+        // Both `output` nodes consume the route node's branches.
+        let from_route = view
+            .connections
+            .iter()
+            .filter(|(from, _)| *from == route_idx)
+            .count();
+        assert_eq!(from_route, 2, "both outputs connect to the route node");
+    }
+
     /// A legacy-shape fixture lifted into the unified `nodes:` topology
     /// still renders via the variant-dispatch code path and produces the
     /// expected stage count.

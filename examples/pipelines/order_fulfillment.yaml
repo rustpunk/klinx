@@ -72,17 +72,19 @@ nodes:
 
   # TODO(16c compositions): shipping_cost + order_classification composition imports stripped during 16b fixture migration.
 
-  - type: transform
+  - type: route
     name: route_priority
-    description: Compute route field for downstream routing (priority_report vs fulfilled_orders)
+    description: Route urgent/high-priority orders to the priority report, the rest to fulfilled orders
     input: product_lookup
     config:
-      cxl: |
-        emit _route = if priority_level == "urgent" or priority_level == "high" then "priority_report" else "fulfilled_orders"
+      mode: exclusive
+      conditions:
+        priority_report: 'priority_level == "urgent" or priority_level == "high"'
+      default: fulfilled_orders
 
   - type: output
     name: fulfilled_orders
-    input: route_priority
+    input: route_priority.fulfilled_orders
     config:
       name: fulfilled_orders
       type: csv
@@ -91,7 +93,7 @@ nodes:
 
   - type: output
     name: priority_report
-    input: route_priority
+    input: route_priority.priority_report
     config:
       name: priority_report
       type: json
