@@ -222,6 +222,15 @@
 [data-stage-kind="merge"]       { --klinx-stage-accent: var(--klinx-accent-source); }
 [data-stage-kind="combine"]     { --klinx-stage-accent: var(--klinx-accent-source); }
 [data-stage-kind="composition"] { --klinx-stage-accent: var(--klinx-accent-source); }
+/* The #80 per-group / framing operators each get a DISTINCT accent so the canvas
+   reads them apart (and — the #78 gotcha — so their outgoing cables resolve a
+   non-empty `--klinx-stage-accent` and render visibly). The compute/filter/join
+   accents are defined in `:root`, so they resolve in BOTH themes (Enamel only
+   overrides source/transform/output). Reshape→compute (synthesis), Cull→filter
+   (removal), Envelope→join (framing/consolidation). */
+[data-stage-kind="reshape"]     { --klinx-stage-accent: var(--klinx-accent-compute); }
+[data-stage-kind="cull"]        { --klinx-stage-accent: var(--klinx-accent-filter); }
+[data-stage-kind="envelope"]    { --klinx-stage-accent: var(--klinx-accent-join); }
 [data-stage-kind="error"]     { --klinx-stage-accent: #CC3333; }
 
 /* Enamel node cards — light plate surface replaces dark char surface */
@@ -5013,6 +5022,46 @@ input:-webkit-autofill:focus {
   text-transform: uppercase;
   color: var(--klinx-iron);
   margin-bottom: 4px;
+}
+
+/* Inspector rule rows for the per-group operators (Reshape / Cull). Each rule
+   shows its name + action summary on one line and its CXL predicate below, in
+   the code font so it reads as the expression it is. Stacked rules get a thin
+   left rule to group the predicate under its name. */
+.klinx-op-rule {
+  margin-bottom: 8px;
+  padding-left: 8px;
+  border-left: 2px solid var(--klinx-border-subtle);
+}
+.klinx-op-rule:last-child {
+  margin-bottom: 0;
+}
+.klinx-op-rule-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.klinx-op-rule-name {
+  font-family: var(--klinx-font-code);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--klinx-phosphor);
+}
+.klinx-op-rule-detail {
+  font-family: var(--klinx-font-ui);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--klinx-iron);
+}
+.klinx-op-rule-predicate {
+  font-family: var(--klinx-font-code);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--klinx-text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .klinx-cxl-input {
