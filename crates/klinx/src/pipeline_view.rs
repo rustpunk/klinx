@@ -1895,14 +1895,18 @@ mod migrated_fixture_tests {
     use super::*;
     use clinker_plan::config::parse_config;
 
-    /// Compile-time exhaustiveness of the variant dispatch: this function
-    /// returns a distinct `StageKind` for every `PipelineNode` variant;
-    /// adding a new variant without updating [`stage_kind_for_node`] is a
-    /// build error.
+    /// Variant dispatch is guarded at compile time: [`stage_kind_for_node`]
+    /// has no `_` arm, so adding a `PipelineNode` variant without mapping it is
+    /// a build error. Most variants map to their own `StageKind`; the per-group
+    /// operators Reshape/Cull/Envelope intentionally share `StageKind::Transform`
+    /// until #80 gives them first-class kinds.
     #[test]
     fn test_canvas_node_dispatches_on_variant() {
-        // Use a minimal unified-shape YAML exercising every variant so the
-        // match in `stage_kind_for_node` is hit for each at runtime too.
+        // A minimal unified-shape YAML that exercises the common single-shape
+        // variants at runtime (Source/Transform/Aggregate/Route/Merge/Output).
+        // Combine/Composition and the new Reshape/Cull/Envelope rely on the
+        // compile-time guard above; runtime fixtures for the new kinds land
+        // with #80.
         let yaml = r#"
 pipeline:
   name: variant_dispatch_smoke
