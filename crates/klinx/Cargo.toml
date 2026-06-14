@@ -8,7 +8,9 @@ description = "Klinx — IDE for authoring Clinker YAML pipeline configurations"
 [dependencies]
 dioxus = { workspace = true, features = ["desktop"] }
 cxl.workspace = true
-clinker-core.workspace = true
+clinker-plan.workspace = true
+clinker-exec.workspace = true
+clinker-core-types.workspace = true
 clinker-record.workspace = true
 clinker-schema.workspace = true
 clinker-channel.workspace = true

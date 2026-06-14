@@ -5,10 +5,10 @@
 /// to a [`StageKind`] via an exhaustive `match` in [`stage_kind_for_node`], so
 /// adding a new variant to `PipelineNode` is a compile-time break. Composition
 /// currently renders as a placeholder badge pending full sub-canvas rendering.
-use clinker_core::config::composition::{CompositionFile, OutputAlias, PortDecl};
-use clinker_core::config::node_header::NodeInput;
-use clinker_core::config::{PipelineConfig, PipelineNode};
-use clinker_core::yaml::Spanned;
+use clinker_plan::config::composition::{CompositionFile, OutputAlias, PortDecl};
+use clinker_plan::config::node_header::NodeInput;
+use clinker_plan::config::{PipelineConfig, PipelineNode};
+use clinker_plan::yaml::Spanned;
 
 mod field_lineage;
 
@@ -112,6 +112,13 @@ pub fn stage_kind_for_node(node: &PipelineNode) -> StageKind {
         PipelineNode::Combine { .. } => StageKind::Combine,
         PipelineNode::Output { .. } => StageKind::Output,
         PipelineNode::Composition { .. } => StageKind::Composition,
+        // Reshape/Cull/Envelope are new per-correlation-group operators. They
+        // render with the generic transform kind until #80 gives them dedicated
+        // stage kinds + cards; listing them explicitly (no `_` arm) keeps the
+        // build-time guard that a future variant forces a decision here.
+        PipelineNode::Reshape { .. }
+        | PipelineNode::Cull { .. }
+        | PipelineNode::Envelope { .. } => StageKind::Transform,
     }
 }
 
@@ -586,12 +593,21 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
                 .map(|i| cols[i] + 1)
                 .max()
                 .unwrap_or(1),
-            PipelineNode::Transform { header, .. }
+            PipelineNode::Reshape { header, .. }
+            | PipelineNode::Cull { header, .. }
+            | PipelineNode::Transform { header, .. }
             | PipelineNode::Aggregate { header, .. }
             | PipelineNode::Route { header, .. }
             | PipelineNode::Output { header, .. }
             | PipelineNode::Composition { header, .. } => name_to_idx
                 .get(node_input_name(&header.input.value))
+                .copied()
+                .map(|i| cols[i] + 1)
+                .unwrap_or(1),
+            // Envelope's primary input is `body`; its header/trailer ports are
+            // accepted in config but not wired this engine release.
+            PipelineNode::Envelope { header, .. } => name_to_idx
+                .get(node_input_name(&header.body.value))
                 .copied()
                 .map(|i| cols[i] + 1)
                 .unwrap_or(1),
@@ -638,13 +654,26 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
                     );
                 }
             }
-            PipelineNode::Transform { header, .. }
+            PipelineNode::Reshape { header, .. }
+            | PipelineNode::Cull { header, .. }
+            | PipelineNode::Transform { header, .. }
             | PipelineNode::Aggregate { header, .. }
             | PipelineNode::Route { header, .. }
             | PipelineNode::Output { header, .. }
             | PipelineNode::Composition { header, .. } => {
                 push_input_edge(
                     &header.input.value,
+                    idx,
+                    &name_to_idx,
+                    &node_branches,
+                    &mut connections,
+                    &mut predecessors,
+                );
+            }
+            // Envelope frames its `body` input; header/trailer ports unwired.
+            PipelineNode::Envelope { header, .. } => {
+                push_input_edge(
+                    &header.body.value,
                     idx,
                     &name_to_idx,
                     &node_branches,
@@ -785,12 +814,19 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
                     }
                 }
             }
-            PipelineNode::Transform { header, .. }
+            PipelineNode::Reshape { header, .. }
+            | PipelineNode::Cull { header, .. }
+            | PipelineNode::Transform { header, .. }
             | PipelineNode::Aggregate { header, .. }
             | PipelineNode::Route { header, .. }
             | PipelineNode::Output { header, .. }
             | PipelineNode::Composition { header, .. } => {
                 if let Some(e) = resolve_edge(&header.input.value, &body_idx) {
+                    preds.push(e);
+                }
+            }
+            PipelineNode::Envelope { header, .. } => {
+                if let Some(e) = resolve_edge(&header.body.value, &body_idx) {
                     preds.push(e);
                 }
             }
@@ -903,7 +939,7 @@ fn node_cxl(node: &PipelineNode) -> Option<&str> {
 /// both seed the lineage graph with [`FieldKind::Declared`] origin rows. Each
 /// row carries its declared datatype ([`ColumnDecl::ty`]) as a compact label
 /// (#73); these origin types then propagate to downstream passthrough rows.
-fn declared_rows(columns: &[clinker_core::config::pipeline_node::ColumnDecl]) -> Vec<FieldRow> {
+fn declared_rows(columns: &[clinker_plan::config::pipeline_node::ColumnDecl]) -> Vec<FieldRow> {
     columns
         .iter()
         .map(|c| FieldRow {
@@ -1162,7 +1198,7 @@ fn compute_field_lineage(
 /// output's `internal_ref`); a port with no resolved producer (a dangling
 /// `internal_ref`) is skipped, never panicked on.
 fn composition_field_lineage(
-    sig: &clinker_core::config::composition::CompositionSignature,
+    sig: &clinker_plan::config::composition::CompositionSignature,
     body: &[Spanned<PipelineNode>],
     n_in: usize,
     n_body: usize,
@@ -1448,6 +1484,49 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
         },
+        // Reshape/Cull/Envelope render as generic transform-kind cards (subtitle
+        // names the operator) until #80 builds their first-class layout. Reshape
+        // and Cull carry a `NodeHeader`; Envelope carries an `EnvelopeHeader` —
+        // both expose `name`/`description`, so the card body is identical here.
+        PipelineNode::Reshape { header, .. } => StageView {
+            id: header.name.clone(),
+            label: header.name.clone(),
+            kind,
+            subtitle: "reshape".to_string(),
+            canvas_x: x,
+            canvas_y: y,
+            cxl_source: None,
+            description: header.description.clone(),
+            error_message: None,
+            fields: Vec::new(),
+            branches: Vec::new(),
+        },
+        PipelineNode::Cull { header, .. } => StageView {
+            id: header.name.clone(),
+            label: header.name.clone(),
+            kind,
+            subtitle: "cull".to_string(),
+            canvas_x: x,
+            canvas_y: y,
+            cxl_source: None,
+            description: header.description.clone(),
+            error_message: None,
+            fields: Vec::new(),
+            branches: Vec::new(),
+        },
+        PipelineNode::Envelope { header, .. } => StageView {
+            id: header.name.clone(),
+            label: header.name.clone(),
+            kind,
+            subtitle: "envelope".to_string(),
+            canvas_x: x,
+            canvas_y: y,
+            cxl_source: None,
+            description: header.description.clone(),
+            error_message: None,
+            fields: Vec::new(),
+            branches: Vec::new(),
+        },
     }
 }
 
@@ -1498,9 +1577,9 @@ fn build_connections(
 
 /// Derive canvas nodes from a `PartialPipelineConfig` (graceful degradation).
 pub fn derive_partial_pipeline_view(
-    partial: &clinker_core::partial::PartialPipelineConfig,
+    partial: &clinker_exec::partial::PartialPipelineConfig,
 ) -> PipelineView {
-    use clinker_core::partial::PartialItem;
+    use clinker_exec::partial::PartialItem;
 
     let input_count = partial.inputs.len();
     let transform_count = partial.transformations.len();
@@ -1691,8 +1770,8 @@ fn cxl_subtitle(cxl: &str) -> String {
 /// pass — the same placement `derive_pipeline_view` uses. Edges come from
 /// `body.graph.edge_references()` so route, merge, and combine branches all
 /// render as the real DAG instead of a synthetic chain.
-pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) -> PipelineView {
-    use clinker_core::plan::execution::PlanNode;
+pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) -> PipelineView {
+    use clinker_plan::plan::execution::PlanNode;
     use petgraph::Direction;
     use petgraph::graph::NodeIndex;
     use petgraph::visit::EdgeRef;
@@ -1747,6 +1826,15 @@ pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) 
                 StageKind::Transform,
                 "correlation_commit".into(),
             ),
+            // New per-group operators inside a drilled-in composition body;
+            // generic transform rendering until #80.
+            PlanNode::Reshape { name, .. } => {
+                (name.clone(), StageKind::Transform, "reshape".into())
+            }
+            PlanNode::Cull { name, .. } => (name.clone(), StageKind::Transform, "cull".into()),
+            PlanNode::Envelope { name, .. } => {
+                (name.clone(), StageKind::Transform, "envelope".into())
+            }
         };
 
         let slot = stages.len();
@@ -1805,16 +1893,20 @@ pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) 
 #[cfg(test)]
 mod migrated_fixture_tests {
     use super::*;
-    use clinker_core::config::parse_config;
+    use clinker_plan::config::parse_config;
 
-    /// Compile-time exhaustiveness of the variant dispatch: this function
-    /// returns a distinct `StageKind` for every `PipelineNode` variant;
-    /// adding a new variant without updating [`stage_kind_for_node`] is a
-    /// build error.
+    /// Variant dispatch is guarded at compile time: [`stage_kind_for_node`]
+    /// has no `_` arm, so adding a `PipelineNode` variant without mapping it is
+    /// a build error. Most variants map to their own `StageKind`; the per-group
+    /// operators Reshape/Cull/Envelope intentionally share `StageKind::Transform`
+    /// until #80 gives them first-class kinds.
     #[test]
     fn test_canvas_node_dispatches_on_variant() {
-        // Use a minimal unified-shape YAML exercising every variant so the
-        // match in `stage_kind_for_node` is hit for each at runtime too.
+        // A minimal unified-shape YAML that exercises the common single-shape
+        // variants at runtime (Source/Transform/Aggregate/Route/Merge/Output).
+        // Combine/Composition and the new Reshape/Cull/Envelope rely on the
+        // compile-time guard above; runtime fixtures for the new kinds land
+        // with #80.
         let yaml = r#"
 pipeline:
   name: variant_dispatch_smoke
@@ -2038,7 +2130,7 @@ nodes:
     }
 
     fn parse_comp(yaml: &str) -> CompositionFile {
-        use clinker_core::span::FileId;
+        use clinker_core_types::span::FileId;
         use std::num::NonZeroU32;
         CompositionFile::parse(
             yaml,
@@ -2679,7 +2771,7 @@ nodes:
 #[cfg(test)]
 mod layout_tests {
     use super::*;
-    use clinker_core::config::parse_config;
+    use clinker_plan::config::parse_config;
 
     /// X coordinate for a given column, matching `layout_positions`.
     fn col_x(col: usize) -> f32 {
@@ -2836,8 +2928,8 @@ nodes:
     /// what guarantees this once a card grows with its field-row list.
     #[test]
     fn field_cards_in_one_column_do_not_overlap() {
-        use clinker_core::config::composition::CompositionFile;
-        use clinker_core::span::FileId;
+        use clinker_core_types::span::FileId;
+        use clinker_plan::config::composition::CompositionFile;
         use std::num::NonZeroU32;
 
         // One input port fans out to two independent transforms, so both land

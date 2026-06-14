@@ -12,9 +12,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clinker_core::config::PipelineConfig;
-use clinker_core::partial::PartialPipelineConfig;
-use clinker_core::plan::CompiledPlan;
+use clinker_exec::partial::PartialPipelineConfig;
+use clinker_plan::config::PipelineConfig;
+use clinker_plan::plan::CompiledPlan;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -244,7 +244,7 @@ pub enum ChannelViewMode {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompositionDrillFrame {
     /// Body ID for the composition's bound body (not an alias prefix string).
-    pub body_id: clinker_core::plan::composition_body::CompositionBodyId,
+    pub body_id: clinker_plan::plan::composition_body::CompositionBodyId,
     /// Display label for the breadcrumb (composition alias or name).
     pub alias: String,
     /// Path to the `.comp.yaml` file (for display in breadcrumb tooltip).

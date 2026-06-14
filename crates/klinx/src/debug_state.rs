@@ -205,7 +205,7 @@ impl fmt::Display for CompactCellValue<'_> {
 // ── Stage data structs ────────────────────────────────────
 
 /// A row that was filtered/dropped by a pipeline stage, with the reason.
-/// Follows the DlqEntry pattern from clinker_core::executor.
+/// Follows the DlqEntry pattern from clinker_exec::executor.
 #[derive(Clone, Debug)]
 pub struct DroppedRow {
     pub cells: Vec<CellValue>,

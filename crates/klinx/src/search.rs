@@ -345,7 +345,7 @@ pub fn structural_search(
             .to_string();
 
         // Parse as pipeline config for structural matching
-        let Ok(config) = clinker_core::config::parse_config(&content) else {
+        let Ok(config) = clinker_plan::config::parse_config(&content) else {
             continue;
         };
 
@@ -456,7 +456,7 @@ fn stage_matches_tags(tags: &[StructuralTag], stage_type: &str, name: &str, cont
 }
 
 /// Build searchable content string for an input stage.
-fn content_for_input(input: &clinker_core::config::SourceConfig) -> String {
+fn content_for_input(input: &clinker_plan::config::SourceConfig) -> String {
     let mut content = format!(
         "{} {} {}",
         input.name,

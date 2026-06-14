@@ -27,7 +27,7 @@ pub fn InspectorPanel(stage_id: String) -> Element {
     // Dispatch inspector content on the `PipelineNode` variant tag. Every
     // variant is handled explicitly so adding a new one is a compile break
     // here.
-    use clinker_core::config::PipelineNode;
+    use clinker_plan::config::PipelineNode;
     let Some(node_spanned) = config.nodes.iter().find(|n| n.value.name() == stage_id) else {
         return rsx! {};
     };
@@ -89,6 +89,11 @@ pub fn InspectorPanel(stage_id: String) -> Element {
             format!("use: {}", r#use.display()),
             None,
         ),
+        // Reshape/Cull/Envelope: name the node kind but reuse transform styling;
+        // per-body config cards are #80.
+        PipelineNode::Reshape { .. } => ("RESHAPE", "transform", String::new(), None),
+        PipelineNode::Cull { .. } => ("CULL", "transform", String::new(), None),
+        PipelineNode::Envelope { .. } => ("ENVELOPE", "transform", String::new(), None),
     };
 
     // Collect config param names for composition provenance display

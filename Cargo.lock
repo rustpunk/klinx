@@ -599,6 +599,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "borsh"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfd1e3f8955a5d7de9fab72fc8373fade9fb8a703968cb200ae3dc6cf08e185a"
+dependencies = [
+ "bytes",
+ "cfg_aliases",
+]
+
+[[package]]
 name = "built"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,42 +777,60 @@ dependencies = [
 [[package]]
 name = "clinker-channel"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=c233a38#c233a387405e4cc8ba1cb80a758cd05d9bad9d0b"
+source = "git+https://github.com/rustpunk/clinker?rev=997ea7d#997ea7d96ea557e48e15403b3b0ad34e59b170f0"
 dependencies = [
  "blake3",
- "clinker-core",
+ "chrono",
+ "clinker-core-types",
+ "clinker-plan",
  "clinker-record",
+ "fs4",
  "indexmap",
+ "nix",
  "serde",
  "serde-saphyr",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
  "walkdir",
 ]
 
 [[package]]
-name = "clinker-core"
+name = "clinker-core-types"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=c233a38#c233a387405e4cc8ba1cb80a758cd05d9bad9d0b"
+source = "git+https://github.com/rustpunk/clinker?rev=997ea7d#997ea7d96ea557e48e15403b3b0ad34e59b170f0"
+dependencies = [
+ "miette",
+ "petgraph",
+ "serde-saphyr",
+]
+
+[[package]]
+name = "clinker-exec"
+version = "0.1.0"
+source = "git+https://github.com/rustpunk/clinker?rev=997ea7d#997ea7d96ea557e48e15403b3b0ad34e59b170f0"
 dependencies = [
  "ahash",
  "arc-swap",
  "blake3",
  "chrono",
+ "clinker-core-types",
  "clinker-format",
+ "clinker-plan",
  "clinker-record",
  "crossbeam-channel",
  "csv",
  "ctrlc",
  "cxl",
  "fastrand",
+ "fs4",
  "glob",
  "hashbrown 0.15.5",
  "indexmap",
  "libc",
  "lz4_flex",
- "mach2",
  "miette",
  "num_cpus",
  "petgraph",
@@ -813,6 +841,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
  "walkdir",
@@ -822,11 +851,12 @@ dependencies = [
 [[package]]
 name = "clinker-format"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=c233a38#c233a387405e4cc8ba1cb80a758cd05d9bad9d0b"
+source = "git+https://github.com/rustpunk/clinker?rev=997ea7d#997ea7d96ea557e48e15403b3b0ad34e59b170f0"
 dependencies = [
  "chrono",
  "clinker-record",
  "csv",
+ "cxl",
  "indexmap",
  "miette",
  "quick-xml 0.37.5",
@@ -836,24 +866,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "clinker-plan"
+version = "0.1.0"
+source = "git+https://github.com/rustpunk/clinker?rev=997ea7d#997ea7d96ea557e48e15403b3b0ad34e59b170f0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "clinker-core-types",
+ "clinker-format",
+ "clinker-record",
+ "cxl",
+ "fastrand",
+ "glob",
+ "indexmap",
+ "lz4_flex",
+ "miette",
+ "nix",
+ "petgraph",
+ "postcard",
+ "regex",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "tracing",
+ "walkdir",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "clinker-record"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=c233a38#c233a387405e4cc8ba1cb80a758cd05d9bad9d0b"
+source = "git+https://github.com/rustpunk/clinker?rev=997ea7d#997ea7d96ea557e48e15403b3b0ad34e59b170f0"
 dependencies = [
  "ahash",
  "chrono",
  "indexmap",
  "serde",
  "serde_json",
+ "smol_str",
 ]
 
 [[package]]
 name = "clinker-schema"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=c233a38#c233a387405e4cc8ba1cb80a758cd05d9bad9d0b"
+source = "git+https://github.com/rustpunk/clinker?rev=997ea7d#997ea7d96ea557e48e15403b3b0ad34e59b170f0"
 dependencies = [
  "ahash",
- "clinker-core",
+ "clinker-plan",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -1251,7 +1312,7 @@ dependencies = [
 [[package]]
 name = "cxl"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=c233a38#c233a387405e4cc8ba1cb80a758cd05d9bad9d0b"
+source = "git+https://github.com/rustpunk/clinker?rev=997ea7d#997ea7d96ea557e48e15403b3b0ad34e59b170f0"
 dependencies = [
  "ahash",
  "chrono",
@@ -2310,6 +2371,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3439,7 +3510,9 @@ dependencies = [
  "blake3",
  "chrono",
  "clinker-channel",
- "clinker-core",
+ "clinker-core-types",
+ "clinker-exec",
+ "clinker-plan",
  "clinker-record",
  "clinker-schema",
  "cxl",
@@ -3697,12 +3770,6 @@ name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
-
-[[package]]
-name = "mach2"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "macro-string"
@@ -5797,6 +5864,16 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "smol_str"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
+dependencies = [
+ "borsh",
+ "serde_core",
+]
 
 [[package]]
 name = "socket2"

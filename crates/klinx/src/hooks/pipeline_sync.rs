@@ -17,8 +17,8 @@
 
 use dioxus::prelude::*;
 
-use clinker_core::config::PipelineConfig;
-use clinker_core::partial::PartialPipelineConfig;
+use clinker_exec::partial::PartialPipelineConfig;
+use clinker_plan::config::PipelineConfig;
 use clinker_schema::{SchemaIndex, SchemaWarning};
 
 use crate::perf::perf_trace;

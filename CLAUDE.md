@@ -16,17 +16,22 @@ is required — install via `cargo install dioxus-cli`.
 
 ## Engine types come from Clinker via a git pin
 
-Klinx does not vendor the engine. The five engine crates it imports — `cxl`,
-`clinker-core`, `clinker-record`, `clinker-schema`, `clinker-channel` — are git
-dependencies pinned to Clinker commit `c233a38`, declared in the workspace
-`Cargo.toml` `[workspace.dependencies]` block:
+Klinx does not vendor the engine. The seven engine crates it imports — `cxl`,
+`clinker-plan`, `clinker-exec`, `clinker-core-types`, `clinker-record`,
+`clinker-schema`, `clinker-channel` — are git dependencies pinned to Clinker
+commit `997ea7d`, declared in the workspace `Cargo.toml`
+`[workspace.dependencies]` block:
 
 ```toml
-cxl = { git = "https://github.com/rustpunk/clinker", rev = "c233a38" }
+cxl = { git = "https://github.com/rustpunk/clinker", rev = "997ea7d" }
 ```
 
-Keep these identifiers as `clinker_core` / `clinker_record` / `clinker_schema`
-/ `clinker_channel` / `cxl` in source — they resolve to the git-pinned crates.
+Upstream deleted the old `clinker-core` umbrella crate and split it three ways:
+`config` / `plan` / `yaml` / `span` live in `clinker-plan` (imported as
+`clinker_plan`), `partial` / `executor` in `clinker-exec` (`clinker_exec`), and
+the leaf `span::FileId` vocabulary in `clinker-core-types` (`clinker_core_types`).
+Keep those identifiers — plus `clinker_record` / `clinker_schema` /
+`clinker_channel` / `cxl` — in source; they resolve to the git-pinned crates.
 The first build fetches the commit over the network. To move to a newer engine
 surface, bump the `rev` in `[workspace.dependencies]` (a single edit point) and
 rebuild.

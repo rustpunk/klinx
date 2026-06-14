@@ -83,7 +83,7 @@ struct TemplateYaml {
 /// Extracts the `_template` metadata block. Returns `None` if the YAML
 /// doesn't contain a `_template` block.
 pub fn parse_template(yaml: &str, source: TemplateSource) -> Option<Template> {
-    let parsed: TemplateYaml = clinker_core::yaml::from_str(yaml).ok()?;
+    let parsed: TemplateYaml = clinker_plan::yaml::from_str(yaml).ok()?;
     let format_category = detect_format_category(yaml);
 
     Some(Template {

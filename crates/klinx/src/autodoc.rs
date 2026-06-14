@@ -4,7 +4,7 @@
 /// never from run results. The doc model is section-based: each stage
 /// gets applicable sections (schema, lineage, contract, config, provenance,
 /// channel overrides) populated from config metadata.
-use clinker_core::config::{
+use clinker_plan::config::{
     ErrorStrategy, InputFormat, OutputFormat, PipelineConfig, SchemaSource,
 };
 use clinker_record::schema_def::FieldDef;
@@ -240,7 +240,7 @@ pub fn generate_stage_doc(config: &PipelineConfig, stage_name: &str) -> Option<S
     }
 
     for node in &config.nodes {
-        if let clinker_core::config::PipelineNode::Transform {
+        if let clinker_plan::config::PipelineNode::Transform {
             header,
             config: body,
         } = &node.value
@@ -259,7 +259,7 @@ pub fn generate_stage_doc(config: &PipelineConfig, stage_name: &str) -> Option<S
 
 fn generate_input_doc(
     config: &PipelineConfig,
-    input: &clinker_core::config::SourceConfig,
+    input: &clinker_plan::config::SourceConfig,
 ) -> StageDoc {
     let format_name = input.format.format_name();
 
@@ -414,8 +414,8 @@ fn generate_input_doc(
 
 fn generate_transform_doc(
     _config: &PipelineConfig,
-    header: &clinker_core::config::NodeHeader,
-    body: &clinker_core::config::TransformBody,
+    header: &clinker_plan::config::NodeHeader,
+    body: &clinker_plan::config::TransformBody,
 ) -> StageDoc {
     // Analyze CXL statements
     let cxl_src: &str = body.cxl.as_ref();
@@ -547,7 +547,7 @@ fn generate_transform_doc(
 
 fn generate_output_doc(
     _config: &PipelineConfig,
-    output: &clinker_core::config::OutputConfig,
+    output: &clinker_plan::config::OutputConfig,
 ) -> StageDoc {
     let format_name = output.format.format_name();
     let mapping_count = output.mapping.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -688,7 +688,7 @@ fn generate_output_doc(
 
 // ── Helper: build input schema ──────────────────────────────────────────────
 
-fn build_input_schema(input: &clinker_core::config::SourceConfig) -> Option<SchemaSection> {
+fn build_input_schema(input: &clinker_plan::config::SourceConfig) -> Option<SchemaSection> {
     let mut fields = Vec::new();
     let source;
 
@@ -728,7 +728,7 @@ fn build_input_schema(input: &clinker_core::config::SourceConfig) -> Option<Sche
     Some(SchemaSection { source, fields })
 }
 
-fn build_output_schema(output: &clinker_core::config::OutputConfig) -> Option<SchemaSection> {
+fn build_output_schema(output: &clinker_plan::config::OutputConfig) -> Option<SchemaSection> {
     let mut fields = Vec::new();
 
     // Document mapping renames as pseudo-schema
