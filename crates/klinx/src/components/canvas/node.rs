@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::pipeline_view::{FieldKind, NODE_HEIGHT, NODE_WIDTH, StageKind, StageView};
+use crate::pipeline_view::{FieldKind, NODE_WIDTH, StageKind, StageView};
 use crate::state::{CompositionDrillFrame, use_app_state};
 
 use super::HoveredField;
@@ -69,7 +69,12 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
 
     const BORDER_TOP: f32 = 3.0;
     const PORT_HALF: f32 = 4.0;
-    let port_y = NODE_HEIGHT / 2.0 - PORT_HALF - BORDER_TOP;
+    // Center the node-level port squares on the card's VERTICAL CENTER so they
+    // coincide with the cable anchors (`StageView::port_in`/`port_out`, also at
+    // `card_height/2`). Pinning them near the top left tall field-bearing cards'
+    // cables visibly missing the port markers (#77). A field-less card is exactly
+    // NODE_HEIGHT, so this matches the classic position there.
+    let port_y = stage.card_height() / 2.0 - PORT_HALF - BORDER_TOP;
 
     rsx! {
         div {
@@ -231,9 +236,14 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
                 class: "klinx-node-port klinx-node-port--in",
                 style: "top: {port_y}px;",
             }
-            div {
-                class: "klinx-node-port klinx-node-port--out",
-                style: "top: {port_y}px;",
+            // A Route node's outputs ARE its branch ports — the shared node-level
+            // output port is never used, so omit it (your point 2). Every other
+            // node keeps its single node-level output port.
+            if !has_branches {
+                div {
+                    class: "klinx-node-port klinx-node-port--out",
+                    style: "top: {port_y}px;",
+                }
             }
         }
     }
