@@ -1,28 +1,16 @@
-_channel:
-  pipeline: order_fulfillment
-  description: >
-    Warehouse West uses a regional product catalog and lower value
-    tier thresholds to account for west-coast pricing differences.
+# Warehouse West channel for the order_fulfillment pipeline.
+#
+# West-coast pricing flags orders as high-value at a lower line total: this
+# channel lowers `$vars.high_value_threshold` to 300 (pipeline default is 500).
+# The knob drives the `is_high_value` flag emitted in `product_lookup`, so a
+# wider band of orders is flagged high-value for this tenant. The surcharge
+# knob is left at the pipeline default.
+channel:
+  name: warehouse-west
+  target: ../../order_fulfillment.yaml
 
-inputs:
-  products:
-    path: ./data/west/products.csv
-
-transformations:
-  value_tier:
-    cxl: |
-      emit value_tier = if line_total >= 750 then "premium" else if line_total >= 150 then "standard" else "economy"
-    description: West coast uses lower tier thresholds
-
-add_transformations:
-  - name: region_tag
-    after: route_priority
-    description: Tag all records with west region
-    cxl: |
-      emit region = "west"
-
-outputs:
-  fulfilled_orders:
-    path: ./output/warehouse-west/fulfilled_orders.csv
-  priority_report:
-    path: ./output/warehouse-west/priority_report.json
+vars:
+  static:
+    high_value_threshold:
+      type: int
+      default: 300

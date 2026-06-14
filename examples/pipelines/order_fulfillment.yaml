@@ -68,6 +68,12 @@ nodes:
         emit product_name = products.product_name
         emit category = products.category
         emit weight_kg = products.weight_kg
+        # Per-tenant knobs (declared as `$vars.*`, overridable by channels):
+        # `high_value_threshold` sets the line-total boundary for the
+        # high-value flag; `express_surcharge` is added to the shipping
+        # estimate on expedited orders.
+        emit is_high_value = orders.line_total >= $vars.high_value_threshold
+        emit shipping_cost = if orders.priority_level == "urgent" or orders.priority_level == "high" then orders.line_total * 0.1 + $vars.express_surcharge else orders.line_total * 0.1
       propagate_ck: driver
 
   # TODO(16c compositions): shipping_cost + order_classification composition imports stripped during 16b fixture migration.

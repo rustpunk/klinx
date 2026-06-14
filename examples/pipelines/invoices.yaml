@@ -14,7 +14,7 @@ nodes:
         - { name: invoice_id, type: string }
         - { name: invoice_date, type: string }
         - { name: customer_id, type: string }
-        - { name: amount, type: string }
+        - { name: amount, type: float }
 
   - type: source
     name: customers
@@ -31,20 +31,27 @@ nodes:
 
   - type: transform
     name: recent_only
-    description: Filter to last 90 days
+    # CXL at engine rev 997ea7d exposes no relative-date builtin (no `days_since`
+    # / `now`-based arithmetic in the typechecked surface), so a "recent" filter
+    # is expressed as an absolute cutoff: parse the ISO date column with
+    # `to_date` and compare against a fixed `#YYYY-MM-DD#` date literal.
+    description: Filter to invoices on or after the cutoff date
     input: invoices
     config:
       cxl: |
-        emit _include = days_since(invoice_date) < 90
+        emit _include = invoice_date.to_date("%Y-%m-%d") >= #2024-01-01#
 
-  # TODO(16c compositions): fiscal_date composition import was stripped during 16b fixture migration.
-
-  - type: transform
+  # Aggregation lives on a dedicated `aggregate` node in the new engine —
+  # `sum`/`count` are rejected inside a row-level `transform`. An empty
+  # `group_by` would fold to a single row; here we roll up per customer.
+  - type: aggregate
     name: totals
-    description: Sum by customer
+    description: Sum invoice amounts per customer
     input: recent_only
     config:
+      group_by: [customer_id]
       cxl: |
+        emit customer_id = customer_id
         emit total_amount = sum(amount)
         emit invoice_count = count(invoice_id)
 

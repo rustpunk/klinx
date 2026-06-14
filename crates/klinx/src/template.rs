@@ -246,34 +246,71 @@ mod tests {
         }
     }
 
+    /// Classification of a vendored example `.yaml` by the engine parser that
+    /// owns its document shape. Each variant routes to a different parse entry
+    /// point in [`test_vendored_examples_parse_against_engine`].
+    enum ExampleKind {
+        /// A full pipeline document (`pipeline:` + `nodes:`). Parsed via
+        /// `parse_config` and additionally compiled via `PipelineConfig::compile`.
+        Pipeline,
+        /// A `*.comp.yaml` composition (`_compose:` + body `nodes:`), parsed via
+        /// `CompositionFile::parse`.
+        Composition,
+        /// A `*.channel.yaml` per-tenant binding (`channel:` + `config`/`vars`),
+        /// parsed via `ChannelBinding::from_yaml_bytes`.
+        Channel,
+        /// A `*.schema.yaml` source-schema overlay (`_schema:` + `fields:`),
+        /// parsed via `clinker_schema::parse_schema`.
+        Schema,
+        /// A `channel.yaml` channel *manifest* (`_channel:` with `id`/`active`).
+        /// This is a Klinx authoring convention with no engine parser — the
+        /// engine's channel crate scans only `*.channel.yaml` bindings — so it
+        /// is discovered for the coverage count but never parse-gated.
+        Manifest,
+    }
+
+    /// Route a vendored example path to the engine parser that owns its shape,
+    /// keyed off the filename suffix the IDE itself uses to classify documents.
+    fn classify_example(path: &Path) -> ExampleKind {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name == "channel.yaml" {
+            ExampleKind::Manifest
+        } else if name.ends_with(".comp.yaml") {
+            ExampleKind::Composition
+        } else if name.ends_with(".channel.yaml") {
+            ExampleKind::Channel
+        } else if name.ends_with(".schema.yaml") {
+            ExampleKind::Schema
+        } else {
+            ExampleKind::Pipeline
+        }
+    }
+
     #[test]
-    fn test_vendored_example_pipelines_parse_against_engine() {
+    fn test_vendored_examples_parse_against_engine() {
+        use std::num::NonZeroU32;
+
+        use clinker_core_types::span::FileId;
+        use clinker_plan::config::composition::CompositionFile;
+        use clinker_plan::config::{CompileContext, parse_config};
+
         // Klinx ships an on-disk sample workspace at repo-root `examples/` so
         // users can Open Workspace → Open File on real pipeline YAML. This gate
-        // parses every vendored pipeline through the same path the IDE uses to
-        // open a file (`crate::sync::parse_yaml`), so a future engine `rev` bump
-        // that drifts the schema breaks the build here rather than silently
-        // shipping a sample that fails to open. `CARGO_MANIFEST_DIR` is
+        // walks the whole subtree and validates every document through the same
+        // engine parser the IDE uses for that document kind, so a future engine
+        // `rev` bump that drifts any schema breaks the build here rather than
+        // silently shipping a sample that fails to open. `CARGO_MANIFEST_DIR` is
         // `<repo>/crates/klinx`; the workspace lives two levels up.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/pipelines")
             .canonicalize()
             .expect("examples/pipelines should exist relative to crates/klinx");
 
-        // Composition / channel / schema overlays carry their own top-level
-        // shapes (`_compose` / `_channel` / `_schema`) that `parse_config` does
-        // not accept; only full pipeline documents are gated here.
-        fn is_non_pipeline_yaml(path: &Path) -> bool {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            name == "channel.yaml"
-                || name.ends_with(".comp.yaml")
-                || name.ends_with(".channel.yaml")
-                || name.ends_with(".schema.yaml")
-        }
-
+        // Discover by walking — never a hardcoded file list — so a newly added
+        // example is auto-covered without touching this test.
         fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             for entry in fs::read_dir(dir)
                 .expect("read_dir on examples subtree")
@@ -282,41 +319,99 @@ mod tests {
                 let path = entry.path();
                 if path.is_dir() {
                     collect(&path, out);
-                } else if path.extension().and_then(|e| e.to_str()) == Some("yaml")
-                    && !is_non_pipeline_yaml(&path)
-                {
+                } else if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
                     out.push(path);
                 }
             }
         }
 
-        let mut pipelines = Vec::new();
-        collect(&root, &mut pipelines);
-        pipelines.sort();
+        let mut files = Vec::new();
+        collect(&root, &mut files);
+        files.sort();
 
-        // A path mistake (wrong relative offset, renamed dir) must fail loudly
-        // rather than vacuously pass on an empty set. The vendored workspace has
-        // 8 top-level pipelines plus retract-demo/pipeline.yaml = 9.
-        assert!(
-            pipelines.len() >= 9,
-            "expected at least 9 pipeline YAMLs under {}, found {} — check path \
-             resolution",
-            root.display(),
-            pipelines.len()
-        );
+        // A non-windowed aggregate's empty-group fold and the workspace
+        // composition scan both resolve paths relative to the workspace root;
+        // pin it to the vendored tree so `compile` matches how the IDE would
+        // compile these files in place.
+        let ctx = CompileContext::new(root.clone());
 
         let mut failures = Vec::new();
-        for path in &pipelines {
-            let yaml =
-                fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            if let Err(errors) = crate::sync::parse_yaml(&yaml) {
-                failures.push(format!("{}: {errors:?}", path.display()));
+        let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+        for path in &files {
+            let label = path
+                .strip_prefix(&root)
+                .unwrap_or(path.as_path())
+                .display()
+                .to_string();
+            let read = || {
+                fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+            };
+            match classify_example(path) {
+                ExampleKind::Pipeline => {
+                    *counts.entry("pipeline").or_default() += 1;
+                    let yaml = read();
+                    match parse_config(&yaml) {
+                        Err(e) => failures.push(format!("{label}: parse: {e}")),
+                        Ok(cfg) => {
+                            if let Err(diags) = cfg.compile(&ctx) {
+                                failures.push(format!("{label}: compile: {diags:?}"));
+                            }
+                        }
+                    }
+                }
+                ExampleKind::Composition => {
+                    *counts.entry("composition").or_default() += 1;
+                    let yaml = read();
+                    let file_id = FileId::new(NonZeroU32::new(1).expect("1 is non-zero"));
+                    if let Err(e) = CompositionFile::parse(&yaml, file_id, path.clone()) {
+                        failures.push(format!("{label}: composition parse: {e}"));
+                    }
+                }
+                ExampleKind::Channel => {
+                    *counts.entry("channel").or_default() += 1;
+                    let bytes =
+                        fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                    if let Err(e) =
+                        clinker_channel::ChannelBinding::from_yaml_bytes(&bytes, path.clone())
+                    {
+                        failures.push(format!("{label}: channel parse: {e}"));
+                    }
+                }
+                ExampleKind::Schema => {
+                    *counts.entry("schema").or_default() += 1;
+                    let yaml = read();
+                    if let Err(e) = clinker_schema::parse_schema(&yaml, path) {
+                        failures.push(format!("{label}: schema parse: {e}"));
+                    }
+                }
+                // Manifests have no engine parser; count for coverage only.
+                ExampleKind::Manifest => *counts.entry("manifest").or_default() += 1,
             }
         }
+
+        // A path mistake (wrong relative offset, renamed dir) must fail loudly
+        // rather than vacuously pass on an empty set. Per-kind floors track the
+        // vendored workspace's current contents; new examples only push these up.
+        let floors = [
+            ("pipeline", 9),
+            ("composition", 5),
+            ("channel", 3),
+            ("schema", 2),
+            ("manifest", 3),
+        ];
+        for (kind, floor) in floors {
+            let got = counts.get(kind).copied().unwrap_or(0);
+            assert!(
+                got >= floor,
+                "expected at least {floor} {kind} example(s) under {}, found {got} \
+                 — check path resolution",
+                root.display(),
+            );
+        }
+
         assert!(
             failures.is_empty(),
-            "vendored example pipeline(s) failed to parse against the pinned \
-             engine:\n{}",
+            "vendored example(s) failed to validate against the pinned engine:\n{}",
             failures.join("\n")
         );
     }
