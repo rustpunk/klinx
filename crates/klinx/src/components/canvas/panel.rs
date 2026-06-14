@@ -130,13 +130,17 @@ pub fn CanvasPanel() -> Element {
         }
     };
     drop(drill_stack);
-    let connections: Vec<_> = pipeline_view
+    // Resolve each connection to its endpoint stages plus the source branch (if
+    // it leaves a Route). The branch lets the connector anchor at the specific
+    // branch port instead of the shared node-level port.
+    let connections: Vec<(StageView, StageView, Option<usize>)> = pipeline_view
         .connections
         .iter()
-        .map(|&(from, to)| {
+        .map(|c| {
             (
-                pipeline_view.stages[from].clone(),
-                pipeline_view.stages[to].clone(),
+                pipeline_view.stages[c.from].clone(),
+                pipeline_view.stages[c.to].clone(),
+                c.from_branch,
             )
         })
         .collect();
@@ -523,11 +527,12 @@ pub fn CanvasPanel() -> Element {
                     // cables read clearly against it.
                     g {
                         class: if hover_active { "klinx-canvas-edges klinx-canvas-edges--recede" } else { "klinx-canvas-edges" },
-                        for (from, to) in connections {
+                        for (from, to, from_branch) in connections {
                             Connector {
-                                key: "{from.id}-{to.id}",
+                                key: "{from.id}-{to.id}-{from_branch:?}",
                                 from,
                                 to,
+                                from_branch,
                             }
                         }
                     }

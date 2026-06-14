@@ -14,13 +14,22 @@ use crate::pipeline_view::StageView;
 pub struct ConnectorProps {
     pub from: StageView,
     pub to: StageView,
+    /// When the edge leaves a Route node, the index of the source branch in
+    /// `from.branches` — the cable then anchors at that branch's output port
+    /// rather than the shared node-level port. `None` for ordinary edges.
+    pub from_branch: Option<usize>,
 }
 
 #[component]
 pub fn Connector(props: ConnectorProps) -> Element {
-    // Node-level connector: anchor at the two stages' mid-height ports. This is
-    // the DEFAULT canvas view — one cable per `(from, to)` connection.
-    let (sx, sy) = props.from.port_out();
+    // Source anchor: a Route-branch edge leaves the specific branch port; every
+    // other edge leaves the node-level mid-height port. The target always enters
+    // at the consumer's node-level port. This is the DEFAULT canvas view — one
+    // cable per `(from, to)` connection.
+    let (sx, sy) = match props.from_branch {
+        Some(i) => props.from.branch_anchor_out(i),
+        None => props.from.port_out(),
+    };
     let (tx, ty) = props.to.port_in();
     let kind_attr = props.from.kind.kind_attr();
 
@@ -123,7 +132,10 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
     // otherwise (node edges). An empty `style` leaves the path's stroke to be
     // inherited from the `<g>`'s class-set value.
     let stroke_style = if inline_accent_stroke {
-        "stroke: var(--klinx-stage-accent);"
+        // Fallback to the transform accent so a node kind that is ever missing a
+        // `--klinx-stage-accent` definition still renders a visible cable rather
+        // than a strokeless (invisible) one.
+        "stroke: var(--klinx-stage-accent, var(--klinx-accent-transform));"
     } else {
         ""
     };
