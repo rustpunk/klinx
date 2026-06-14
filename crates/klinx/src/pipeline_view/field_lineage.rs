@@ -32,6 +32,14 @@ pub enum FieldKind {
 pub struct FieldRow {
     pub name: String,
     pub kind: FieldKind,
+    /// Compact datatype label for inline display (e.g. `float`, `string`,
+    /// `int?` for a nullable int). `Some` for [`FieldKind::Declared`] columns
+    /// (from a source/port schema) and for [`FieldKind::PassThrough`] columns
+    /// that carry a typed producer column through unchanged. `None` for
+    /// [`FieldKind::Emitted`] columns — typing an `emit` expression needs the
+    /// engine typechecker (Phase 2b / #68) — and when the producer column has no
+    /// known type.
+    pub ty: Option<String>,
 }
 
 /// A field-level lineage edge: `to_node.to_field` is (partly) derived from
@@ -165,12 +173,16 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
     let emitted = emitted_field_names(program);
     let emitted_set: HashSet<&str> = emitted.iter().map(|s| s.as_str()).collect();
 
+    // Datatypes are filled in by the caller (`compute_field_lineage`): a
+    // PassThrough row inherits its producer column's type; an Emitted row's type
+    // would need the engine typechecker (Phase 2b), so it stays `None` here.
     let mut rows: Vec<FieldRow> = Vec::new();
     for col in input_cols {
         if !emitted_set.contains(col.as_str()) {
             rows.push(FieldRow {
                 name: col.clone(),
                 kind: FieldKind::PassThrough,
+                ty: None,
             });
         }
     }
@@ -178,6 +190,7 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
         rows.push(FieldRow {
             name,
             kind: FieldKind::Emitted,
+            ty: None,
         });
     }
     rows
@@ -190,11 +203,14 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
 /// skipped) and for Phase-1 best-effort handling of types without precise
 /// emit rules.
 pub fn passthrough_output_fields(input_cols: &[String]) -> Vec<FieldRow> {
+    // Types are filled in by the caller from each column's producer (see
+    // `transform_output_fields`).
     input_cols
         .iter()
         .map(|col| FieldRow {
             name: col.clone(),
             kind: FieldKind::PassThrough,
+            ty: None,
         })
         .collect()
 }
@@ -318,15 +334,18 @@ mod tests {
             vec![
                 FieldRow {
                     name: "x".to_string(),
-                    kind: FieldKind::PassThrough
+                    kind: FieldKind::PassThrough,
+                    ty: None,
                 },
                 FieldRow {
                     name: "b".to_string(),
-                    kind: FieldKind::Emitted
+                    kind: FieldKind::Emitted,
+                    ty: None,
                 },
                 FieldRow {
                     name: "a".to_string(),
-                    kind: FieldKind::Emitted
+                    kind: FieldKind::Emitted,
+                    ty: None,
                 },
             ]
         );

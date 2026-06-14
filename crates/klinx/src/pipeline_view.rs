@@ -900,15 +900,40 @@ fn node_cxl(node: &PipelineNode) -> Option<&str> {
 ///
 /// Shared by both lineage entry points: a composition input port and a pipeline
 /// Source node both declare their shape as `[{name, type}]` ([`SchemaDecl`]), and
-/// both seed the lineage graph with [`FieldKind::Declared`] origin rows.
+/// both seed the lineage graph with [`FieldKind::Declared`] origin rows. Each
+/// row carries its declared datatype ([`ColumnDecl::ty`]) as a compact label
+/// (#73); these origin types then propagate to downstream passthrough rows.
 fn declared_rows(columns: &[clinker_core::config::pipeline_node::ColumnDecl]) -> Vec<FieldRow> {
     columns
         .iter()
         .map(|c| FieldRow {
             name: c.name.clone(),
             kind: FieldKind::Declared,
+            ty: Some(compact_type(&c.ty)),
         })
         .collect()
+}
+
+/// A short, lowercase datatype label for inline display on a field row, e.g.
+/// `float`, `string`, `datetime`, and `int?` for `Nullable(Int)`. The engine's
+/// `Display`/`display_name` are unsuitable: `display_name` drops the inner type
+/// of `Nullable`, and `Display` renders the verbose `Nullable(Int)` form.
+fn compact_type(ty: &cxl::typecheck::Type) -> String {
+    use cxl::typecheck::Type;
+    match ty {
+        Type::Nullable(inner) => format!("{}?", compact_type(inner)),
+        Type::Null => "null".to_string(),
+        Type::Bool => "bool".to_string(),
+        Type::Int => "int".to_string(),
+        Type::Float => "float".to_string(),
+        Type::String => "string".to_string(),
+        Type::Date => "date".to_string(),
+        Type::DateTime => "datetime".to_string(),
+        Type::Array => "array".to_string(),
+        Type::Map => "map".to_string(),
+        Type::Numeric => "numeric".to_string(),
+        Type::Any => "any".to_string(),
+    }
 }
 
 /// Per-index classification fed to the shared lineage core: each slot is either
@@ -988,10 +1013,16 @@ fn compute_field_lineage(
         let mut input_cols: Vec<String> = Vec::new();
         let mut producer_of: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
+        // Each input column's datatype label, taken from its producer row, so a
+        // carried column keeps the type it was given upstream (#73). First
+        // producer wins, matching `producer_of`.
+        let mut col_type: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
         for &p in &predecessors[idx] {
             for row in &out_fields[p] {
                 if !producer_of.contains_key(&row.name) {
                     producer_of.insert(row.name.clone(), p);
+                    col_type.insert(row.name.clone(), row.ty.clone());
                     input_cols.push(row.name.clone());
                 }
             }
@@ -1091,6 +1122,18 @@ fn compute_field_lineage(
                 }
             }
         }
+
+        // Propagate carried-column datatypes onto this node's passthrough rows
+        // from their producers (#73). Declared/origin rows already carry their
+        // type; emitted rows keep `None` — typing an emit needs the engine
+        // typechecker (Phase 2b / #68).
+        for row in out_fields[idx].iter_mut() {
+            if matches!(row.kind, FieldKind::PassThrough)
+                && let Some(t) = col_type.get(&row.name)
+            {
+                row.ty = t.clone();
+            }
+        }
     }
 
     (out_fields, field_edges)
@@ -1138,6 +1181,8 @@ fn composition_field_lineage(
         slots.push(LineageSlot::Origin(vec![FieldRow {
             name: port.to_string(),
             kind: FieldKind::Declared,
+            // The output-port placeholder row has no declared schema type.
+            ty: None,
         }]));
     }
 
@@ -2207,31 +2252,37 @@ nodes:
             vec![
                 FieldRow {
                     name: "a".to_string(),
-                    kind: FieldKind::Declared
+                    kind: FieldKind::Declared,
+                    ty: Some("int".to_string()),
                 },
                 FieldRow {
                     name: "b".to_string(),
-                    kind: FieldKind::Declared
+                    kind: FieldKind::Declared,
+                    ty: Some("string".to_string()),
                 },
             ]
         );
 
         // Transform: `a` shadowed? No — `c` is emitted, so a & b ride through as
-        // passthrough (input order), then emitted `c`.
+        // passthrough (input order, carrying their source types), then emitted
+        // `c` (no type — typing an emit is Phase 2b).
         assert_eq!(
             view.stages[i_t].fields,
             vec![
                 FieldRow {
                     name: "a".to_string(),
-                    kind: FieldKind::PassThrough
+                    kind: FieldKind::PassThrough,
+                    ty: Some("int".to_string()),
                 },
                 FieldRow {
                     name: "b".to_string(),
-                    kind: FieldKind::PassThrough
+                    kind: FieldKind::PassThrough,
+                    ty: Some("string".to_string()),
                 },
                 FieldRow {
                     name: "c".to_string(),
-                    kind: FieldKind::Emitted
+                    kind: FieldKind::Emitted,
+                    ty: None,
                 },
             ]
         );
@@ -2317,40 +2368,48 @@ nodes:
             view.stages[i_src].fields,
             vec![FieldRow {
                 name: "a".to_string(),
-                kind: FieldKind::Declared
+                kind: FieldKind::Declared,
+                ty: Some("float".to_string()),
             }]
         );
 
-        // t1: passthrough `a` (not shadowed) then emitted `b`.
+        // t1: passthrough `a` (not shadowed, carries `float`) then emitted `b`
+        // (no type — emit typing is Phase 2b).
         assert_eq!(
             view.stages[i_t1].fields,
             vec![
                 FieldRow {
                     name: "a".to_string(),
-                    kind: FieldKind::PassThrough
+                    kind: FieldKind::PassThrough,
+                    ty: Some("float".to_string()),
                 },
                 FieldRow {
                     name: "b".to_string(),
-                    kind: FieldKind::Emitted
+                    kind: FieldKind::Emitted,
+                    ty: None,
                 },
             ]
         );
 
-        // t2: passthrough `a`, `b` (input order) then emitted `c`.
+        // t2: passthrough `a` (still `float`), `b` (untyped — it was emitted
+        // upstream), then emitted `c`.
         assert_eq!(
             view.stages[i_t2].fields,
             vec![
                 FieldRow {
                     name: "a".to_string(),
-                    kind: FieldKind::PassThrough
+                    kind: FieldKind::PassThrough,
+                    ty: Some("float".to_string()),
                 },
                 FieldRow {
                     name: "b".to_string(),
-                    kind: FieldKind::PassThrough
+                    kind: FieldKind::PassThrough,
+                    ty: None,
                 },
                 FieldRow {
                     name: "c".to_string(),
-                    kind: FieldKind::Emitted
+                    kind: FieldKind::Emitted,
+                    ty: None,
                 },
             ]
         );
@@ -2361,7 +2420,8 @@ nodes:
             view.stages[i_out].fields,
             vec![FieldRow {
                 name: "result".to_string(),
-                kind: FieldKind::Declared
+                kind: FieldKind::Declared,
+                ty: None,
             }]
         );
 
@@ -2592,7 +2652,11 @@ nodes:
             view.stages[i_bad].fields,
             vec![FieldRow {
                 name: "a".to_string(),
-                kind: FieldKind::PassThrough
+                kind: FieldKind::PassThrough,
+                // The carried column keeps its source type even though the node's
+                // CXL failed to parse (the type comes from the producer, not the
+                // emit analysis).
+                ty: Some("float".to_string()),
             }]
         );
         // No field edge — derive OR carry — terminates at the parse-error node:

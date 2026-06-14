@@ -190,6 +190,7 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
                             row_index: i,
                             name: field.name.clone(),
                             kind: field.kind,
+                            ty: field.ty.clone(),
                         }
                     }
                 }
@@ -258,7 +259,13 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
 /// `onmouseleave` on the parent `.klinx-node-fields` container, not per row:
 /// sweeping row→row stays `Some(A)→Some(B)` with no transient `None` flash.
 #[component]
-fn FieldRowView(node_index: usize, row_index: usize, name: String, kind: FieldKind) -> Element {
+fn FieldRowView(
+    node_index: usize,
+    row_index: usize,
+    name: String,
+    kind: FieldKind,
+    ty: Option<String>,
+) -> Element {
     let mut hovered = use_context::<HoveredField>();
 
     let kind_attr = match kind {
@@ -285,6 +292,11 @@ fn FieldRowView(node_index: usize, row_index: usize, name: String, kind: FieldKi
             },
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
             span { class: "klinx-node-field-name", "{name}" }
+            // Compact datatype suffix (e.g. `: float`) when known. Declared and
+            // carried columns have a type; emitted columns don't yet (Phase 2b).
+            if let Some(t) = ty.as_ref() {
+                span { class: "klinx-node-field-type", "{t}" }
+            }
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }
         }
     }
