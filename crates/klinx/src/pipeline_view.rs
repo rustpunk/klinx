@@ -124,10 +124,12 @@ pub struct StageView {
     pub description: Option<String>,
     pub error_message: Option<String>,
     /// Per-field output rows for field-level lineage. Empty for nodes the
-    /// field-lineage pass does not analyze (every pipeline-path node, and
-    /// composition nodes before #66) — an empty `fields` keeps the card at its
-    /// classic [`NODE_HEIGHT`] and leaves the node-level connector geometry
-    /// (`port_in`/`port_out`) unchanged, so existing rendering is untouched.
+    /// field-lineage pass cannot give rows (an accept-any source/port, a node
+    /// whose predecessors declare no schema, or the error/partial-degradation
+    /// paths) — an empty `fields` keeps the card at its classic [`NODE_HEIGHT`]
+    /// and leaves the node-level connector geometry (`port_in`/`port_out`)
+    /// unchanged, so existing rendering is untouched. Both the composition
+    /// canvas (#66) and the pipeline canvas (#68) populate this.
     pub fields: Vec<FieldRow>,
 }
 
@@ -195,9 +197,10 @@ pub struct PipelineView {
     pub stages: Vec<StageView>,
     /// Explicit connections between stages: `(from_idx, to_idx)`.
     pub connections: Vec<(usize, usize)>,
-    /// Field-level lineage edges between stage rows. Empty for every view
-    /// except composition views with the #66 field-lineage pass; an empty
-    /// `field_edges` means the canvas draws node-level connectors only.
+    /// Field-level lineage edges between stage rows. Populated by both the
+    /// composition pass (#66) and the pipeline pass (#68); empty for views
+    /// without resolvable field schemas (e.g. partial/degraded views), where an
+    /// empty `field_edges` means the canvas draws node-level connectors only.
     pub field_edges: Vec<FieldEdge>,
 }
 
@@ -304,9 +307,10 @@ pub fn fit_transform(
 /// (parallel to `cols`).
 ///
 /// `heights[i]` is node `i`'s rendered card height — [`StageView::card_height`]
-/// for field-bearing cards, [`NODE_HEIGHT`] for everything else. The pipeline
-/// path (no fields) passes [`NODE_HEIGHT`] for every node, so its layout is
-/// byte-for-byte what fixed-`NODE_HEIGHT` stacking produced before this change.
+/// for field-bearing cards, [`NODE_HEIGHT`] for everything else. A node with no
+/// field rows (an accept-any source, the drilled-in body path) passes
+/// [`NODE_HEIGHT`], so a schema-less graph lays out byte-for-byte as
+/// fixed-`NODE_HEIGHT` stacking did before field rows existed.
 fn layout_positions(
     cols: &[usize],
     predecessors: &[Vec<usize>],
@@ -394,6 +398,11 @@ pub fn derive_pipeline_view(config: &PipelineConfig) -> PipelineView {
 /// `Vec<Spanned<PipelineNode>>`, so column/edge derivation is identical. A
 /// composition's body nodes render exactly like a pipeline's; references to the
 /// composition's *input ports* (which are not nodes) simply produce no edge.
+///
+/// Field-level lineage (#68): Source nodes seed Declared origin fields from their
+/// declared schema and every other node is analyzed as a transform, via the
+/// shared [`compute_field_lineage`] core (the same core the composition path
+/// uses; only the origin-field source differs).
 pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
     use std::collections::HashMap;
 
@@ -468,25 +477,45 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
         }
     }
 
-    // Place nodes: barycenter ordering within each column + even centered
-    // spacing. `positions` is parallel to `nodes`. Pipeline-path nodes carry no
-    // field rows, so every card is the classic [`NODE_HEIGHT`] — the layout is
-    // identical to fixed-height stacking.
-    let heights = vec![NODE_HEIGHT; nodes.len()];
+    // Field-level lineage pass (#68): Source nodes seed Declared origin fields
+    // from their declared `schema.columns`; every other node is analyzed as a
+    // transform against its predecessors' output columns. Declaration order is
+    // topological for the column DAG built above (a node references only
+    // earlier-declared nodes), so the shared core reads final producer rows in
+    // one sweep. `out_fields[i]` is parallel to `nodes`.
+    let (out_fields, field_edges) = pipeline_field_lineage(nodes, &predecessors);
+
+    // Per-node card heights drive the column stacking so a tall field-bearing
+    // card never overlaps the next one. A node with field rows is `header +
+    // n*row` tall (matching [`StageView::card_height`]); a row-less node keeps
+    // the classic [`NODE_HEIGHT`], so a pipeline with no schemas lays out exactly
+    // as fixed-height stacking did before this change.
+    let heights: Vec<f32> = out_fields
+        .iter()
+        .map(|rows| {
+            if rows.is_empty() {
+                NODE_HEIGHT
+            } else {
+                FIELD_HEADER_HEIGHT + rows.len() as f32 * FIELD_ROW_HEIGHT
+            }
+        })
+        .collect();
     let positions = layout_positions(&cols, &predecessors, &heights);
     let stages: Vec<StageView> = nodes
         .iter()
         .zip(positions)
-        .map(|(spanned, (x, y))| build_stage_view(&spanned.value, x, y))
+        .enumerate()
+        .map(|(i, (spanned, (x, y)))| {
+            let mut stage = build_stage_view(&spanned.value, x, y);
+            stage.fields = out_fields[i].clone();
+            stage
+        })
         .collect();
 
-    // Pipelines (and a composition's body rendered via this path) carry no
-    // field-level lineage in Phase 1 — only `derive_composition_view` populates
-    // `field_edges`. An empty list keeps the canvas at node-level connectors.
     PipelineView {
         stages,
         connections,
-        field_edges: Vec::new(),
+        field_edges,
     }
 }
 
@@ -611,7 +640,8 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
     // order, which is a topological order over `predecessors` (a body node's
     // preds are only input ports or earlier body nodes), so every predecessor's
     // field set is final before its consumer reads it.
-    let (out_fields, field_edges) = compute_field_lineage(sig, body, n_in, n_body, &predecessors);
+    let (out_fields, field_edges) =
+        composition_field_lineage(sig, body, n_in, n_body, &predecessors);
 
     // Per-node card heights drive the stacking so tall field cards in one column
     // never overlap. A node with field rows is `header + n*row` tall (matching
@@ -668,64 +698,93 @@ fn node_cxl(node: &PipelineNode) -> Option<&str> {
     }
 }
 
-/// Compute per-unified-index output field rows and the field-level lineage
-/// edges for a composition.
+/// Declared origin field rows from a source/port schema's columns.
+///
+/// Shared by both lineage entry points: a composition input port and a pipeline
+/// Source node both declare their shape as `[{name, type}]` ([`SchemaDecl`]), and
+/// both seed the lineage graph with [`FieldKind::Declared`] origin rows.
+fn declared_rows(columns: &[clinker_core::config::pipeline_node::ColumnDecl]) -> Vec<FieldRow> {
+    columns
+        .iter()
+        .map(|c| FieldRow {
+            name: c.name.clone(),
+            kind: FieldKind::Declared,
+        })
+        .collect()
+}
+
+/// Per-index classification fed to the shared lineage core: each slot is either
+/// a fixed-shape origin (its output rows are pre-seeded and it runs no transform
+/// logic) or a node to analyze as a transform.
+enum LineageSlot<'a> {
+    /// A boundary/origin slot with a pre-seeded output record:
+    /// - composition **input port** → declared columns (empty when accept-any),
+    /// - composition **output port** → empty (receives edges only),
+    /// - pipeline **Source node** → declared `schema.columns`.
+    ///
+    /// Origins have no predecessor-derived columns and emit no edges of their
+    /// own; downstream consumers read these rows as input columns.
+    Origin(Vec<FieldRow>),
+    /// A transform-like node analyzed against its predecessors' output columns:
+    /// passthrough + emitted rows, with derive/identity edges.
+    Node(&'a PipelineNode),
+}
+
+/// Compute per-index output field rows and the field-level lineage edges over a
+/// classified slot list. **The shared lineage core** for both the composition
+/// canvas ([`derive_composition_view`]) and the pipeline canvas
+/// ([`derive_view_from_nodes`]).
+///
+/// `slots[u]` classifies index `u`; `predecessors[u]` is its predecessor index
+/// list. The ONLY difference between the two callers is how origin fields are
+/// sourced — composition input ports vs. pipeline Source-node schemas — which is
+/// captured entirely by the [`LineageSlot::Origin`] rows the caller supplies.
+/// Transform analysis (passthrough/emit rows, let-resolved derive edges,
+/// intra-node chained-emit edges, identity carries, parse-error degradation) is
+/// identical for both and lives here.
 ///
 /// Returns `(out_fields, field_edges)` where `out_fields[u]` is the ordered
-/// output record of unified index `u` (input ports, then body nodes, then
-/// output ports) and `field_edges` carries every producer-column → consumer-
-/// column relationship discovered.
+/// output record of index `u`. Slots MUST be ordered so every node appears after
+/// its predecessors (topological): both callers pass declaration order, which is
+/// topological for the DAGs they build.
 ///
 /// Per-node rules (Phase 1, transforms-precise):
-/// - **Input port**: declared `schema.columns` → [`FieldKind::Declared`]
-///   (empty when the port is accept-any).
-/// - **Body node with parseable CXL**: passthrough rows for input columns not
+/// - **Origin slot**: its pre-seeded rows verbatim, no edges.
+/// - **Node with parseable CXL**: passthrough rows for input columns not
 ///   shadowed by an emit, then emitted rows — see
 ///   [`field_lineage::transform_output_fields`]. Edges: each emit's let-resolved
 ///   support ∩ input columns yields derive edges; each surviving passthrough
 ///   column yields an identity edge.
-/// - **Body node without CXL / on parse error**: passthrough of its input
-///   columns, no lineage edges (fields still render).
-/// - **Output port**: empty (it only receives edges; the producer's row carries
-///   the field).
-///
-/// `predecessors` is the unified-index predecessor relation already built by the
-/// caller (input-port and earlier-body-node indices feeding each body node).
+/// - **Node without CXL / on parse error**: passthrough of its input columns; no
+///   edges on parse error, identity carries when there is simply no CXL block.
 fn compute_field_lineage(
-    sig: &clinker_core::config::composition::CompositionSignature,
-    body: &[Spanned<PipelineNode>],
-    n_in: usize,
-    n_body: usize,
+    slots: &[LineageSlot<'_>],
     predecessors: &[Vec<usize>],
 ) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
-    let total = n_in + n_body + sig.outputs.len();
+    let total = slots.len();
+    debug_assert_eq!(total, predecessors.len());
     let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
     let mut field_edges: Vec<FieldEdge> = Vec::new();
 
-    // Input ports: declared columns are Declared rows. Accept-any (`schema:
-    // None`) ports contribute nothing — their downstream consumers simply have
-    // no resolvable producer columns from them.
-    for (i, decl) in sig.inputs.values().enumerate() {
-        if let Some(schema) = &decl.schema {
-            out_fields[i] = schema
-                .columns
-                .iter()
-                .map(|c| FieldRow {
-                    name: c.name.clone(),
-                    kind: FieldKind::Declared,
-                })
-                .collect();
+    // First pass: seed every origin slot's fixed output record. Origins have no
+    // predecessor-derived columns, so seeding them all up front (regardless of
+    // index) lets the transform pass below read final producer rows in one
+    // topological sweep.
+    for (idx, slot) in slots.iter().enumerate() {
+        if let LineageSlot::Origin(rows) = slot {
+            out_fields[idx] = rows.clone();
         }
     }
 
-    // Body nodes in declaration (topological) order.
-    for (bi, spanned) in body.iter().enumerate() {
-        let idx = n_in + bi;
-        let node = &spanned.value;
+    // Second pass: analyze transform nodes in slot order (topological).
+    for (idx, slot) in slots.iter().enumerate() {
+        let LineageSlot::Node(node) = slot else {
+            continue;
+        };
 
         // Ordered, de-duplicated union of predecessor output column names, with
-        // the producer's unified index recorded per column so edges can name a
-        // concrete source. First producer wins for a duplicated column name.
+        // the producer's index recorded per column so edges can name a concrete
+        // source. First producer wins for a duplicated column name.
         let mut input_cols: Vec<String> = Vec::new();
         let mut producer_of: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
@@ -834,9 +893,68 @@ fn compute_field_lineage(
         }
     }
 
-    // Output ports keep an empty output record (they receive edges only); the
-    // producing body node's row already carries the field downstream.
     (out_fields, field_edges)
+}
+
+/// Build the composition's classified slot list and run the shared lineage core.
+///
+/// Slot layout mirrors the unified index space: `[0, n_in)` input ports,
+/// `[n_in, n_in+n_body)` body nodes, `[n_in+n_body, total)` output ports. Input
+/// ports become [`LineageSlot::Origin`] from their declared schema (empty when
+/// accept-any); body nodes become [`LineageSlot::Node`]; output ports are empty
+/// origins (they only receive edges). `predecessors` is the unified-index
+/// relation the caller already built.
+fn composition_field_lineage(
+    sig: &clinker_core::config::composition::CompositionSignature,
+    body: &[Spanned<PipelineNode>],
+    n_in: usize,
+    n_body: usize,
+    predecessors: &[Vec<usize>],
+) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+    let total = n_in + n_body + sig.outputs.len();
+    let mut slots: Vec<LineageSlot<'_>> = Vec::with_capacity(total);
+
+    // Input ports: declared columns are origin rows. Accept-any (`schema: None`)
+    // ports are empty origins — their downstream consumers simply have no
+    // resolvable producer columns from them.
+    for decl in sig.inputs.values() {
+        let rows = decl.schema.as_ref().map(|s| declared_rows(&s.columns));
+        slots.push(LineageSlot::Origin(rows.unwrap_or_default()));
+    }
+    // Body nodes analyzed as transforms.
+    for spanned in body {
+        slots.push(LineageSlot::Node(&spanned.value));
+    }
+    // Output ports receive edges only — empty origins.
+    for _ in 0..sig.outputs.len() {
+        slots.push(LineageSlot::Origin(Vec::new()));
+    }
+
+    compute_field_lineage(&slots, predecessors)
+}
+
+/// Build a pipeline's classified slot list and run the shared lineage core.
+///
+/// Slots are parallel to `nodes` (declaration order). A [`PipelineNode::Source`]
+/// becomes a [`LineageSlot::Origin`] seeded from its declared `schema.columns`
+/// (the pipeline analogue of a composition input port); every other node becomes
+/// a [`LineageSlot::Node`] analyzed as a transform. `predecessors` is the
+/// node-index relation the caller already built.
+fn pipeline_field_lineage(
+    nodes: &[Spanned<PipelineNode>],
+    predecessors: &[Vec<usize>],
+) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+    let slots: Vec<LineageSlot<'_>> = nodes
+        .iter()
+        .map(|spanned| match &spanned.value {
+            PipelineNode::Source { config: body, .. } => {
+                LineageSlot::Origin(declared_rows(&body.schema.columns))
+            }
+            node => LineageSlot::Node(node),
+        })
+        .collect();
+
+    compute_field_lineage(&slots, predecessors)
 }
 
 /// Synthetic boundary node for a composition input port.
@@ -1725,6 +1843,114 @@ nodes:
             .iter()
             .position(|s| s.label == label)
             .unwrap_or_else(|| panic!("stage {label} present"))
+    }
+
+    /// FIX 3 (#68/#70): the PIPELINE canvas now carries field rows + lineage.
+    /// A `source` with declared schema [a, b] feeding a transform `emit c = a+1`
+    /// must produce: source fields [a, b] Declared; transform fields
+    /// [a, b passthrough, c emitted]; and a derive edge source.a → transform.c.
+    /// (Pipeline Source schema is the analogue of a composition input port.)
+    #[test]
+    fn pipeline_fields_and_lineage_from_source_schema() {
+        let yaml = r#"
+pipeline:
+  name: src_schema_lineage
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+  - type: transform
+    name: t
+    input: src
+    config:
+      cxl: |
+        emit c = a + 1
+"#;
+        let config = parse_config(yaml).expect("source-schema pipeline parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_src = stage_idx(&view, "src");
+        let i_t = stage_idx(&view, "t");
+
+        // Source: its two declared columns as Declared origin rows (in order).
+        assert_eq!(
+            view.stages[i_src].fields,
+            vec![
+                FieldRow {
+                    name: "a".to_string(),
+                    kind: FieldKind::Declared
+                },
+                FieldRow {
+                    name: "b".to_string(),
+                    kind: FieldKind::Declared
+                },
+            ]
+        );
+
+        // Transform: `a` shadowed? No — `c` is emitted, so a & b ride through as
+        // passthrough (input order), then emitted `c`.
+        assert_eq!(
+            view.stages[i_t].fields,
+            vec![
+                FieldRow {
+                    name: "a".to_string(),
+                    kind: FieldKind::PassThrough
+                },
+                FieldRow {
+                    name: "b".to_string(),
+                    kind: FieldKind::PassThrough
+                },
+                FieldRow {
+                    name: "c".to_string(),
+                    kind: FieldKind::Emitted
+                },
+            ]
+        );
+
+        // Derive edge: c is computed from the source column a.
+        let derive_a_c = FieldEdge {
+            from_node: i_src,
+            from_field: "a".to_string(),
+            to_node: i_t,
+            to_field: "c".to_string(),
+            passthrough: false,
+        };
+        assert!(
+            view.field_edges.contains(&derive_a_c),
+            "expected derive edge src.a → t.c, got {:?}",
+            view.field_edges
+        );
+
+        // The pipeline path now populates field lineage (regression guard for
+        // the pre-#68 behavior where these were always empty).
+        assert!(
+            view.stages.iter().any(|s| !s.fields.is_empty()),
+            "pipeline view must now carry field rows"
+        );
+        assert!(
+            !view.field_edges.is_empty(),
+            "pipeline view must now carry field edges"
+        );
+
+        // Hovering the computed column `c` reveals only its derive lineage
+        // (src.a → t.c), never the passthrough carries of a or b — FIX 1.
+        let closure = lineage_closure(&view.field_edges, i_t, "c");
+        let derive_idx = view
+            .field_edges
+            .iter()
+            .position(|e| *e == derive_a_c)
+            .expect("derive edge present");
+        assert_eq!(
+            closure,
+            std::collections::HashSet::from([derive_idx]),
+            "c's closure is exactly the a→c derive edge, no carries"
+        );
     }
 
     /// Full field-rows + lineage-edges pass over the canonical chain:

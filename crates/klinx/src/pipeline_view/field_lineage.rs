@@ -237,15 +237,28 @@ pub fn emit_supports(program: &Program) -> Vec<(String, HashSet<String>)> {
     out
 }
 
-/// Compute the transitive lineage closure of one `(node, field)` anchor over a
-/// field-edge set.
+/// Compute the transitive *derivation* closure of one `(node, field)` anchor
+/// over a field-edge set.
 ///
-/// Walks both directions: *upstream* via edges whose `to == anchor`, *downstream*
-/// via edges whose `from == anchor`, transitively, until no new anchor is
-/// found. Returns the indices (into `edges`) of every edge that participates in
-/// the closure. The canvas draws exactly these edges on hover and dims the rest
-/// — never the whole field-edge set, which is the documented
-/// research-failure mode this design avoids.
+/// Walks both directions — *upstream* via edges whose `to == anchor`,
+/// *downstream* via edges whose `from == anchor` — transitively, until no new
+/// anchor is found, but traverses **only derive edges** (`passthrough == false`).
+/// Identity carry edges (`passthrough == true`) are skipped in BOTH directions.
+///
+/// WHY skip passthrough edges: in a linear pipeline a passthrough column threads
+/// through every node, so following identity carries would make the closure the
+/// entire passthrough-connected component — the whole graph lights up on any
+/// hover, the exact research-failure mode this design avoids. Bounding the walk
+/// to derive edges scopes the highlight to the field's actual *computation*
+/// lineage (what produced it, and what it feeds into via an expression).
+///
+/// Phase 2 (#67): passthrough-aware origin tracing — collapsing identity carries
+/// to follow a value back to the column that first *computed* it (rather than
+/// stopping at the carry boundary) — is intentionally deferred. Phase 1 reveals
+/// only the derive subgraph.
+///
+/// Returns the indices (into `edges`) of every derive edge that participates in
+/// the closure. The canvas draws exactly these edges on hover and dims the rest.
 pub fn lineage_closure(edges: &[FieldEdge], node: usize, field: &str) -> HashSet<usize> {
     // BFS frontier of (node, field) anchors reached so far.
     let mut seen: HashSet<(usize, String)> = HashSet::new();
@@ -255,6 +268,11 @@ pub fn lineage_closure(edges: &[FieldEdge], node: usize, field: &str) -> HashSet
     let mut participating: HashSet<usize> = HashSet::new();
     while let Some((cur_node, cur_field)) = frontier.pop() {
         for (i, e) in edges.iter().enumerate() {
+            // Identity carries are not derivation: they never extend a
+            // computation-lineage closure, in either BFS direction.
+            if e.passthrough {
+                continue;
+            }
             // Downstream: this anchor is the source of `e`.
             if e.from_node == cur_node && e.from_field == cur_field {
                 participating.insert(i);
@@ -376,6 +394,57 @@ mod tests {
 
         // Hovering the unrelated target reaches only its own edge.
         assert_eq!(lineage_closure(&edges, 1, "w"), HashSet::from([2]));
+    }
+
+    /// The closure follows ONLY derive edges: a node whose sole connection to
+    /// the hovered field is a passthrough (identity carry) edge is excluded.
+    ///
+    /// This is FIX 1 (#70): in a linear chain a passthrough column threads
+    /// through every node, so traversing carries would light up the whole graph.
+    /// Models `input{a} -> t1 emit b = a*2 -> t2 emit c = b + 1` with the
+    /// realistic passthrough carries `a` rides through on, then asserts hovering
+    /// `c` reveals the derive chain (a→b, b→c) and NOT any passthrough edge.
+    #[test]
+    fn closure_excludes_passthrough_only_neighbors() {
+        // Indices: 0=input, 1=t1, 2=t2.
+        let derive = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            passthrough: false,
+        };
+        let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            passthrough: true,
+        };
+        let edges = vec![
+            derive(0, "a", 1, "b"), // 0: t1 computes b from a
+            carry(0, "a", 1, "a"),  // 1: a rides through t1 (passthrough only)
+            derive(1, "b", 2, "c"), // 2: t2 computes c from b
+            carry(1, "a", 2, "a"),  // 3: a rides through t2 (passthrough only)
+            carry(1, "b", 2, "b"),  // 4: b rides through t2 (passthrough only)
+        ];
+
+        // Hovering `c` on t2 walks upstream through the derive chain c←b←a,
+        // touching only the two derive edges — never a passthrough carry.
+        let closure = lineage_closure(&edges, 2, "c");
+        assert_eq!(
+            closure,
+            HashSet::from([0, 2]),
+            "closure of c must be exactly the derive chain a→b→c, no carries"
+        );
+
+        // Hovering the carried column `a` on t2 — whose ONLY connections are
+        // passthrough carries — yields an empty closure: a passthrough-only
+        // neighbor never participates.
+        assert!(
+            lineage_closure(&edges, 2, "a").is_empty(),
+            "a passthrough-only field reveals no derive lineage"
+        );
     }
 
     /// A cyclic let-support map must not loop forever; the visiting guard makes
