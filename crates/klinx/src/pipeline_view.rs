@@ -1046,6 +1046,10 @@ fn compute_field_lineage(
                 let supports = field_lineage::emit_supports(&program);
                 let emitted: std::collections::HashSet<&str> =
                     supports.iter().map(|(name, _)| name.as_str()).collect();
+                // Emits that merely re-emit an input column unchanged
+                // (`emit c = c` / `emit c = src.c`) are passthroughs, not derives,
+                // so their edge reads as an identity carry.
+                let copies = field_lineage::emit_copy_targets(&program, &input_cols);
 
                 // Derive edges: each emit's let-resolved support resolved to its
                 // producer. A support column is one of:
@@ -1061,6 +1065,9 @@ fn compute_field_lineage(
                 let mut emitted_so_far: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
                 for (target, support) in &supports {
+                    // An identity-copy emit carries its column unchanged, so its
+                    // edge is a passthrough; a computed emit derives its target.
+                    let carried = copies.contains(target.as_str());
                     for col in support {
                         if let Some(&p) = producer_of.get(col) {
                             field_edges.push(FieldEdge {
@@ -1068,7 +1075,7 @@ fn compute_field_lineage(
                                 from_field: col.clone(),
                                 to_node: idx,
                                 to_field: target.clone(),
-                                passthrough: false,
+                                passthrough: carried,
                             });
                         } else if emitted_so_far.contains(col.as_str()) {
                             field_edges.push(FieldEdge {
@@ -1076,7 +1083,7 @@ fn compute_field_lineage(
                                 from_field: col.clone(),
                                 to_node: idx,
                                 to_field: target.clone(),
-                                passthrough: false,
+                                passthrough: carried,
                             });
                         }
                     }
