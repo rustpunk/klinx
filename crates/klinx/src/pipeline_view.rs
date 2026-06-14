@@ -12,7 +12,7 @@ use clinker_plan::yaml::Spanned;
 
 mod field_lineage;
 
-pub use field_lineage::{FieldEdge, FieldKind, FieldRow, lineage_closure};
+pub use field_lineage::{FieldEdge, FieldKind, FieldRow, group_endpoints_by_node, lineage_closure};
 
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;

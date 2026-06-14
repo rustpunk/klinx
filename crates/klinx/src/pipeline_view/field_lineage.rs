@@ -293,6 +293,47 @@ pub fn emit_supports(program: &Program) -> Vec<(String, HashSet<String>)> {
     out
 }
 
+/// Group a set of lineage edges' `(node, field)` endpoints by node.
+///
+/// For every edge in `edges`, both its `from` side (`(from_node, from_field)`)
+/// and its `to` side (`(to_node, to_field)`) are recorded under that node's
+/// index. The result maps each node index to the de-duplicated, sorted list of
+/// its endpoint field names. The canvas uses it to tint the individual field-row
+/// cells that are lineage endpoints of the active hover, so a reader of a
+/// multi-field node sees *which row* is the source/target — not just which card
+/// participates (the existing whole-node dim already conveys the latter).
+///
+/// The caller passes only the edges whose cable anchors actually RESOLVE, so a
+/// highlighted cell can never appear on a dimmed, cable-less card: the highlight,
+/// the dim exemption, and the drawn cable all derive from the same resolved-edge
+/// set. Names are sorted purely for determinism (stable per-node `Vec` across
+/// renders, so `CanvasNode`'s `PartialEq` memoization is not defeated by set
+/// iteration order); a self-loop edge contributes its endpoint once because the
+/// per-node accumulation de-duplicates.
+pub fn group_endpoints_by_node<'a>(
+    edges: impl IntoIterator<Item = &'a FieldEdge>,
+) -> HashMap<usize, Vec<String>> {
+    let mut by_node: HashMap<usize, HashSet<String>> = HashMap::new();
+    for edge in edges {
+        by_node
+            .entry(edge.from_node)
+            .or_default()
+            .insert(edge.from_field.clone());
+        by_node
+            .entry(edge.to_node)
+            .or_default()
+            .insert(edge.to_field.clone());
+    }
+    by_node
+        .into_iter()
+        .map(|(node, names)| {
+            let mut names: Vec<String> = names.into_iter().collect();
+            names.sort_unstable();
+            (node, names)
+        })
+        .collect()
+}
+
 /// The DIRECT (1-hop) lineage neighbourhood of one `(node, field)` anchor over a
 /// field-edge set.
 ///
@@ -486,6 +527,67 @@ mod tests {
 
         // Hovering the unrelated target reaches only its own edge.
         assert_eq!(lineage_closure(&edges, 1, "w"), HashSet::from([2]));
+    }
+
+    /// `group_endpoints_by_node` records BOTH sides of every supplied edge under
+    /// its node, so a hover reveal can tint exactly the source/target field cells
+    /// — the hovered field itself, its adjacent producers/consumers, and a
+    /// self-loop endpoint (counted once) — while a field on an edge NOT supplied
+    /// (e.g. one whose anchor failed to resolve, or an unrelated edge) is absent.
+    #[test]
+    fn field_endpoints_cover_both_sides_of_closure_edges() {
+        let derive = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            passthrough: false,
+        };
+        // Middle node 1 carries `status`, which also feeds a derive (`risk`) on
+        // its OWN node — a self-loop on field `status`. Edge 3 is unrelated.
+        let edges = vec![
+            derive(0, "status", 1, "status"), // 0: into node 1
+            derive(1, "status", 1, "risk"),   // 1: self-loop on node 1 feeding a derive
+            derive(1, "status", 2, "status"), // 2: out of node 1
+            derive(0, "age", 1, "risk"),      // 3: unrelated source field
+        ];
+
+        // Mirror the canvas path: take the REAL 1-hop closure of the hovered
+        // field, then group the endpoints of exactly those (resolved) edges.
+        let closure = lineage_closure(&edges, 1, "status");
+        assert_eq!(closure, HashSet::from([0, 1, 2]));
+        let grouped = group_endpoints_by_node(closure.iter().map(|&ei| &edges[ei]));
+
+        // Each node maps to its de-duplicated, SORTED endpoint field names. Both
+        // sides of every closure edge are present: node 0's `status` (producer),
+        // node 1's `status` (hovered) + `risk` (the self-loop derive it feeds),
+        // node 2's `status` (consumer).
+        assert_eq!(
+            grouped,
+            HashMap::from([
+                (0, vec!["status".to_string()]),
+                (1, vec!["risk".to_string(), "status".to_string()]), // sorted
+                (2, vec!["status".to_string()]),
+            ]),
+        );
+
+        // Negative (standalone): the unrelated edge 3 (`0.age -> 1.risk`) is
+        // outside the closure, so `age` never appears on ANY node.
+        assert!(
+            !grouped.values().flatten().any(|f| f == "age"),
+            "a field only on a non-closure edge is never highlighted"
+        );
+
+        // The self-loop edge (1.status -> 1.risk) contributes node 1's `status`
+        // once, not twice — the per-node accumulation de-duplicates.
+        let self_loop_only = group_endpoints_by_node(std::iter::once(&edges[1]));
+        assert_eq!(
+            self_loop_only,
+            HashMap::from([(1, vec!["risk".to_string(), "status".to_string()])]),
+        );
+
+        // No edges → no highlighted nodes (the not-hovered render path).
+        assert!(group_endpoints_by_node(std::iter::empty()).is_empty());
     }
 
     /// The 1-hop neighbourhood INCLUDES passthrough carries (the FIX): a field

@@ -4270,6 +4270,31 @@ input:-webkit-autofill:focus {
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* Lineage-endpoint cell tint (#87) — on a field-lineage hover reveal, the
+   individual source/target rows get a calm, STATIC verdigris wash so a reader of
+   a multi-field node sees *which* row participates, not just that the card does
+   (the whole-node dim conveys the latter). Verdigris ties the tint to the
+   lineage cables and the `emitted` accent, and the alpha wash shifts BOTH hue and
+   luminance (not hue alone) so it stays perceptible. Background only — no border
+   or size change — so toggling the class never reflows the fixed-pitch rows. It
+   sits after `:hover` so a hovered endpoint keeps the lineage tint (the more
+   meaningful signal) rather than the generic hover wash. On a participating
+   (non-dimmed) card it reads at full strength; the dim treatment is parent
+   opacity, which simply scales it down on the rare dimmed-but-endpoint cell. */
+.klinx-node-field--lineage,
+.klinx-node-field--lineage:hover {
+  background: rgba(67, 179, 174, 0.16);
+  box-shadow: inset 2px 0 0 var(--klinx-verdigris);
+}
+
+/* Enamel (light plate): the same verdigris identity, but a touch more alpha so
+   the wash clears the brighter plate and keeps adequate contrast. */
+[data-theme="enamel"] .klinx-node-field--lineage,
+[data-theme="enamel"] .klinx-node-field--lineage:hover {
+  background: rgba(31, 122, 116, 0.16);
+  box-shadow: inset 2px 0 0 #1F7A74;
+}
+
 .klinx-node-field-name {
   flex: 1 1 auto;
   white-space: nowrap;
