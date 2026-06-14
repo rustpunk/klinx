@@ -1106,10 +1106,16 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             header,
             config: body,
         } => {
+            // Total output branches = every condition branch PLUS the always-present
+            // default/fallback branch. The default is a first-class branch (a real
+            // output port downstream nodes consume), not "just another rule", so it
+            // counts toward the branch total — otherwise a route with one condition
+            // and a default reads as "1 branch" when it actually fans out to two.
+            let branch_count = body.conditions.len() + 1;
             let subtitle = format!(
                 "{} branch{} → {}",
-                body.conditions.len(),
-                if body.conditions.len() == 1 { "" } else { "es" },
+                branch_count,
+                if branch_count == 1 { "" } else { "es" },
                 body.default
             );
             StageView {
@@ -1618,8 +1624,9 @@ nodes:
             .expect("route_priority stage exists");
         let route = &view.stages[route_idx];
         assert_eq!(route.kind, StageKind::Route);
-        // One condition branch (`priority_report`) + the `default` branch.
-        assert_eq!(route.subtitle, "1 branch \u{2192} fulfilled_orders");
+        // Two output branches — the `priority_report` condition + the
+        // `fulfilled_orders` default (the default counts as a branch).
+        assert_eq!(route.subtitle, "2 branches \u{2192} fulfilled_orders");
 
         // No synthetic `_route` field leaks onto the card (Route has no cxl).
         assert!(route.fields.iter().all(|f| f.name != "_route"));
