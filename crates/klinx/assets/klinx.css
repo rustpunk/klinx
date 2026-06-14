@@ -238,6 +238,22 @@
   color: #1C2830;
 }
 
+/* Enamel field rows — the dark-theme `--klinx-bone` base (near-white) is
+   invisible on the light enamel plate, exactly like `.klinx-node-label` was, so
+   field labels (Declared rows on INPUT-port cards especially) need the same dark
+   ink. Passthrough (`--klinx-iron`) and emitted (`--klinx-verdigris`) names read
+   too light on the plate too, so they get darker enamel variants that keep the
+   neutral-vs-accent distinction while staying legible. */
+[data-theme="enamel"] .klinx-node-field {
+  color: #38424C;
+}
+[data-theme="enamel"] .klinx-node-field[data-field-kind="passthrough"] .klinx-node-field-name {
+  color: #5A6B78;
+}
+[data-theme="enamel"] .klinx-node-field[data-field-kind="emitted"] .klinx-node-field-name {
+  color: #1F7A74;
+}
+
 /* Enamel inspector — light plate fields inside dark panel shell */
 [data-theme="enamel"] .klinx-inspector-field,
 [data-theme="enamel"] .klinx-inspector-section-body {
@@ -4270,20 +4286,28 @@ input:-webkit-autofill:focus {
   transition: opacity 150ms ease;
 }
 
-/* Node-level cable overlay fades while a field's lineage is revealed. */
-.klinx-canvas-svg--dimmed {
-  opacity: 0.15;
+/* Node-level cable GROUP recedes while a field's lineage is revealed — only the
+   node cables, not the whole `<svg>`, so the field cables rendered outside this
+   group stay at full opacity (see CanvasPanel). Dimming the overlay itself
+   crushed the field cables we want to highlight. */
+.klinx-canvas-edges--recede {
+  opacity: 0.12;
   transition: opacity 150ms ease;
 }
 
-/* Field-lineage cables (drawn only on hover-reveal). Derive edges read solid;
-   passthrough carries read with a lighter dash so a reader can tell a
-   computed/renamed column from an identity carry. */
-.klinx-field-edge--passthrough {
-  opacity: 0.7;
-}
+/* Field-lineage cables (drawn only on hover-reveal). The two flavours read as
+   DISTINCT COLOURS, not just distinct opacity: derive cables use the verdigris
+   accent (a computed/renamed column), passthrough carries use the muted
+   text-floor neutral (an identity 1:1 carry). The stroke is owned here (the
+   FieldConnector inlines no stroke) and set on the `<g>` so every layer/path
+   inherits it; both colours read clearly in the dark and Enamel themes. */
 .klinx-field-edge--derive {
+  stroke: var(--klinx-verdigris);
   opacity: 1;
+}
+.klinx-field-edge--passthrough {
+  stroke: var(--klinx-text-floor);
+  opacity: 0.65;
 }
 
 /* ── 8b. Composition nodes — dashed verdigris border ─────────────────────── */

@@ -719,7 +719,9 @@ fn declared_rows(columns: &[clinker_core::config::pipeline_node::ColumnDecl]) ->
 enum LineageSlot<'a> {
     /// A boundary/origin slot with a pre-seeded output record:
     /// - composition **input port** → declared columns (empty when accept-any),
-    /// - composition **output port** → empty (receives edges only),
+    /// - composition **output port** → one [`FieldKind::Declared`] row named for
+    ///   the port (so the card draws a label + anchor; the producer edge is
+    ///   appended by [`composition_field_lineage`] after the core runs),
     /// - pipeline **Source node** → declared `schema.columns`.
     ///
     /// Origins have no predecessor-derived columns and emit no edges of their
@@ -901,9 +903,16 @@ fn compute_field_lineage(
 /// Slot layout mirrors the unified index space: `[0, n_in)` input ports,
 /// `[n_in, n_in+n_body)` body nodes, `[n_in+n_body, total)` output ports. Input
 /// ports become [`LineageSlot::Origin`] from their declared schema (empty when
-/// accept-any); body nodes become [`LineageSlot::Node`]; output ports are empty
-/// origins (they only receive edges). `predecessors` is the unified-index
-/// relation the caller already built.
+/// accept-any); body nodes become [`LineageSlot::Node`]; output ports become
+/// single-row origins (one [`FieldKind::Declared`] row = the port name) so each
+/// renders a labelled, anchored field instead of a blank card. `predecessors` is
+/// the unified-index relation the caller already built.
+///
+/// After the shared core runs, one field edge per output port is appended from
+/// its producer's representative field to the port's field. The producer is the
+/// body node the caller already resolved as the port's predecessor (from the
+/// output's `internal_ref`); a port with no resolved producer (a dangling
+/// `internal_ref`) is skipped, never panicked on.
 fn composition_field_lineage(
     sig: &clinker_core::config::composition::CompositionSignature,
     body: &[Spanned<PipelineNode>],
@@ -925,12 +934,48 @@ fn composition_field_lineage(
     for spanned in body {
         slots.push(LineageSlot::Node(&spanned.value));
     }
-    // Output ports receive edges only — empty origins.
-    for _ in 0..sig.outputs.len() {
-        slots.push(LineageSlot::Origin(Vec::new()));
+    // Output ports: one Declared row named for the port, so the card draws a
+    // label + anchor the producer edge lands on (rather than a blank boundary).
+    for port in sig.outputs.keys() {
+        slots.push(LineageSlot::Origin(vec![FieldRow {
+            name: port.to_string(),
+            kind: FieldKind::Declared,
+        }]));
     }
 
-    compute_field_lineage(&slots, predecessors)
+    let (out_fields, mut field_edges) = compute_field_lineage(&slots, predecessors);
+
+    // Producer → output-port field edge, one per output port. The output port
+    // surfaces its producer body node's records; on the canvas we draw a single
+    // cable from the producer's representative field to the port's named field.
+    // The representative field is the producer's same-named column if it has one
+    // (a clean 1:1 carry → passthrough), else the producer's LAST output field (a
+    // rename → derive). A port with no resolved producer, or a producer with no
+    // fields, contributes no edge (graceful, never a panic).
+    for (oi, port) in sig.outputs.keys().enumerate() {
+        let out_idx = n_in + n_body + oi;
+        let Some(&producer) = predecessors[out_idx].first() else {
+            continue;
+        };
+        let producer_field = out_fields[producer]
+            .iter()
+            .find(|r| r.name == *port)
+            .or_else(|| out_fields[producer].last())
+            .map(|r| r.name.clone());
+        let Some(producer_field) = producer_field else {
+            continue;
+        };
+        let passthrough = producer_field == *port;
+        field_edges.push(FieldEdge {
+            from_node: producer,
+            from_field: producer_field,
+            to_node: out_idx,
+            to_field: port.to_string(),
+            passthrough,
+        });
+    }
+
+    (out_fields, field_edges)
 }
 
 /// Build a pipeline's classified slot list and run the shared lineage core.
@@ -959,13 +1004,6 @@ fn pipeline_field_lineage(
 
 /// Synthetic boundary node for a composition input port.
 fn input_port_stage(name: &str, decl: &PortDecl, x: f32, y: f32) -> StageView {
-    let subtitle = match &decl.schema {
-        Some(schema) => {
-            let n = schema.columns.len();
-            format!("{n} field{}", if n == 1 { "" } else { "s" })
-        }
-        None => "any shape".to_string(),
-    };
     StageView {
         // `port:` prefix with a colon — invalid in body-node identifiers — so a
         // port id can never collide with a body node's id (its raw name), which
@@ -973,7 +1011,10 @@ fn input_port_stage(name: &str, decl: &PortDecl, x: f32, y: f32) -> StageView {
         id: format!("port:in:{name}"),
         label: name.to_string(),
         kind: StageKind::InputPort,
-        subtitle,
+        // No subtitle: the declared columns now render as field ROWS on the card,
+        // so a "N fields" count line is redundant chrome. `decl` stays in the
+        // signature for the description and parity with `output_port_stage`.
+        subtitle: String::new(),
         canvas_x: x,
         canvas_y: y,
         cxl_source: None,
@@ -2032,8 +2073,15 @@ nodes:
             ]
         );
 
-        // Output port: receives edges only, carries no own row.
-        assert!(view.stages[i_out].fields.is_empty());
+        // Output port now carries one Declared row named for the port (FIX E),
+        // so the card draws a label + anchor instead of a blank boundary.
+        assert_eq!(
+            view.stages[i_out].fields,
+            vec![FieldRow {
+                name: "result".to_string(),
+                kind: FieldKind::Declared
+            }]
+        );
 
         // Exact edge set. Build the expected set and compare as multisets.
         let derive = |fn_: usize, ff: &str, tn: usize, tf: &str| FieldEdge {
@@ -2059,6 +2107,10 @@ nodes:
             derive(i_t1, "a", i_t2, "c"),
             pass(i_t1, "a", i_t2, "a"),
             pass(i_t1, "b", i_t2, "b"),
+            // Producer → output port (FIX E): the port name `result` matches no
+            // t2 field, so its representative field is t2's last field `c` — a
+            // rename, hence a derive edge t2.c → result.
+            derive(i_t2, "c", i_out, "result"),
         ];
         assert_eq!(
             view.field_edges.len(),
@@ -2076,10 +2128,11 @@ nodes:
     }
 
     /// Intra-node chained emits: a later emit reading an EARLIER emit's output
-    /// of the SAME node gets a same-node derive edge, and the hover closure
-    /// chains through it. Here `emit b = a*2` then `emit c = b + 1` produces both
-    /// the inter-node edge a→b and the intra-node edge b→c (both on node `t`),
-    /// so hovering `c` reveals the full a→b→c lineage.
+    /// of the SAME node gets a same-node derive edge. Here `emit b = a*2` then
+    /// `emit c = b + 1` produces both the inter-node edge a→b and the intra-node
+    /// edge b→c (both on node `t`). Hovering `c` reveals its DIRECT (1-hop)
+    /// neighbourhood — the incoming b→c derive and the outgoing edge to the
+    /// output port — but NOT the 2-hop a→b derive (FIX C: direct, not transitive).
     #[test]
     fn intra_node_chained_emit_lineage() {
         let yaml = r#"_compose:
@@ -2146,18 +2199,31 @@ nodes:
             view.field_edges
         );
 
-        // Hover closure on `c` walks the full chain: it must include BOTH the
-        // a→b and b→c edge indices (upstream-transitive), proving the intra-node
-        // edge participates in the same closure the canvas highlights.
+        // Hover closure on `c` is its DIRECT (1-hop) neighbourhood: the incoming
+        // intra-node derive b→c, plus the outgoing producer→output edge c→result
+        // (FIX E). The 2-hop a→b derive is NOT pulled in — the closure is direct,
+        // not transitive (FIX C).
+        let i_out = stage_idx(&view, "result");
+        let c_to_result = FieldEdge {
+            from_node: i_t,
+            from_field: "c".to_string(),
+            to_node: i_out,
+            to_field: "result".to_string(),
+            passthrough: false,
+        };
         let closure = lineage_closure(&view.field_edges, i_t, "c");
         let idx_of = |e: &FieldEdge| view.field_edges.iter().position(|x| x == e).unwrap();
         assert!(
             closure.contains(&idx_of(&b_to_c)),
-            "closure of c must contain b→c: {closure:?}"
+            "closure of c must contain its incoming b→c derive: {closure:?}"
         );
         assert!(
-            closure.contains(&idx_of(&a_to_b)),
-            "closure of c must transitively contain a→b: {closure:?}"
+            closure.contains(&idx_of(&c_to_result)),
+            "closure of c must contain its outgoing c→result edge: {closure:?}"
+        );
+        assert!(
+            !closure.contains(&idx_of(&a_to_b)),
+            "closure of c must NOT contain the 2-hop a→b derive (1-hop only): {closure:?}"
         );
     }
 
