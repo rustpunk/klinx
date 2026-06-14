@@ -3,9 +3,9 @@
 //! # Why this module exists
 //!
 //! The engine marks `PipelineConfig.nodes` `#[serde(skip_serializing)]`
-//! (`clinker-core` `config/mod.rs`): the engine treats the source YAML as
+//! (`clinker-plan` `config/pipeline.rs`): the engine treats the source YAML as
 //! authoritative for nodes, each node carrying a [`Spanned`] byte span into
-//! that source. So a plain `clinker_core::yaml::to_string(config)` emits
+//! that source. So a plain `clinker_plan::yaml::to_string(config)` emits
 //! `pipeline:` + `error_handling:` + `_notes` but **drops the entire `nodes:`
 //! block**. Persisting that to disk, or pushing it back into the editor
 //! buffer, silently destroys every node (klinx issue #29, P1 data-loss).
@@ -46,10 +46,10 @@
 //! `nodes:` block by serializing each `node.value`. It loses comments but is
 //! never node-less — the data-loss invariant holds on every path.
 //!
-//! [`Spanned`]: clinker_core::yaml::Spanned
-//! [`Spanned::referenced`]: clinker_core::yaml::Spanned
+//! [`Spanned`]: clinker_plan::yaml::Spanned
+//! [`Spanned::referenced`]: clinker_plan::yaml::Spanned
 
-use clinker_core::config::{PipelineConfig, PipelineNode, parse_config};
+use clinker_plan::config::{PipelineConfig, PipelineNode, parse_config};
 
 /// Reflect an inspector edit of `config` into the authoritative `current_yaml`
 /// document, preserving every unchanged node's text and the user's comments.
@@ -87,8 +87,8 @@ fn try_patch(current_yaml: &str, config: &PipelineConfig) -> Option<String> {
     // rebuild in that case (rare — the inspector only edits per-node notes
     // today). Equal node-less serializations ⇒ only nodes changed ⇒ the
     // head/tail can be kept byte-identical.
-    let old_meta = clinker_core::yaml::to_string(&old).ok()?;
-    let new_meta = clinker_core::yaml::to_string(config).ok()?;
+    let old_meta = clinker_plan::yaml::to_string(&old).ok()?;
+    let new_meta = clinker_plan::yaml::to_string(config).ok()?;
     if old_meta != new_meta {
         return None;
     }
@@ -127,8 +127,8 @@ fn try_patch(current_yaml: &str, config: &PipelineConfig) -> Option<String> {
             block_end
         };
 
-        let old_ser = clinker_core::yaml::to_string(&old.nodes[i].value).ok()?;
-        let new_ser = clinker_core::yaml::to_string(&config.nodes[i].value).ok()?;
+        let old_ser = clinker_plan::yaml::to_string(&old.nodes[i].value).ok()?;
+        let new_ser = clinker_plan::yaml::to_string(&config.nodes[i].value).ok()?;
         if old_ser == new_ser {
             // Unchanged node: keep its source region verbatim (comments,
             // inline formatting, blank lines, and any trailing inter-node
@@ -174,7 +174,7 @@ fn try_patch(current_yaml: &str, config: &PipelineConfig) -> Option<String> {
 /// Loses comments and emits each node's defaulted fields, but is **never**
 /// node-less — upholding the issue-#29 data-loss invariant on every path.
 pub fn serialize_yaml_full(config: &PipelineConfig) -> String {
-    let meta = match clinker_core::yaml::to_string(config) {
+    let meta = match clinker_plan::yaml::to_string(config) {
         Ok(s) => s,
         Err(e) => return format!("# Serialization error: {e}\n"),
     };
@@ -219,7 +219,7 @@ pub fn serialize_yaml_full(config: &PipelineConfig) -> String {
 /// `Serialize` (`#[serde(tag = "type")]`), so this yields a `type: …` mapping
 /// that re-parses into the same node.
 fn serialize_node_as_list_item(node: &PipelineNode, base_indent: usize) -> String {
-    let body = match clinker_core::yaml::to_string(node) {
+    let body = match clinker_plan::yaml::to_string(node) {
         Ok(s) => s,
         Err(e) => format!("# node serialization error: {e}\n"),
     };
@@ -436,7 +436,7 @@ _notes:
         edited.set_stage_notes("clean", Some(serde_json::json!({ "stage": "x" })));
 
         // The pre-fix code did exactly this.
-        let old_output = clinker_core::yaml::to_string(&edited).expect("engine serializes");
+        let old_output = clinker_plan::yaml::to_string(&edited).expect("engine serializes");
         let reparsed = parse_config(&old_output);
 
         // Engine output has no `nodes:` block, so it either fails validation or

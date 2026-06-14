@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::Path;
 
-use clinker_core::config::composition::CompositionFile;
-use clinker_core::config::{PipelineConfig, parse_config};
-use clinker_core::span::FileId;
+use clinker_core_types::span::FileId;
+use clinker_plan::config::composition::CompositionFile;
+use clinker_plan::config::{PipelineConfig, parse_config};
 
 use crate::pipeline_view::{PipelineView, derive_composition_view};
 
@@ -79,7 +79,7 @@ fn body_dag_view(yaml: &str) -> Option<PipelineView> {
         doc.push_str(line);
         doc.push('\n');
     }
-    match clinker_core::partial::parse_partial_config(&doc) {
+    match clinker_exec::partial::parse_partial_config(&doc) {
         Ok(partial) => Some(crate::pipeline_view::derive_partial_pipeline_view(&partial)),
         Err(_) => None,
     }
@@ -103,7 +103,7 @@ pub fn parse_and_resolve_yaml(
 #[allow(clippy::large_enum_variant)]
 pub enum ParseResult {
     Complete(ResolvedPipeline),
-    Partial(clinker_core::partial::PartialPipelineConfig),
+    Partial(clinker_exec::partial::PartialPipelineConfig),
     Failed(Vec<String>),
 }
 
@@ -111,7 +111,7 @@ pub fn try_parse_yaml(yaml: &str, workspace_root: Option<&Path>) -> ParseResult 
     if let Ok(resolved) = parse_and_resolve_yaml(yaml, workspace_root) {
         return ParseResult::Complete(resolved);
     }
-    match clinker_core::partial::parse_partial_config(yaml) {
+    match clinker_exec::partial::parse_partial_config(yaml) {
         Ok(mut partial) => {
             partial.errors = crate::parse_diagnostics::refine(yaml, partial.errors);
             ParseResult::Partial(partial)

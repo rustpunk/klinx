@@ -1,7 +1,7 @@
 //! Post-processing for engine parse-error strings.
 //!
-//! The five engine crates are git-pinned (see `CLAUDE.md`); klinx cannot change
-//! how `clinker_core` / `serde-saphyr` word a parse error. What klinx *can* do
+//! The engine crates are git-pinned (see `CLAUDE.md`); klinx cannot change
+//! how `clinker_plan` / `serde-saphyr` word a parse error. What klinx *can* do
 //! is augment the raw string before it reaches the editor's error bar.
 //!
 //! The motivating case: a mapping key that lost its colon —
@@ -375,7 +375,7 @@ mod tests {
         );
     }
 
-    /// Drift guard: drive a real `clinker_core` parse of `CONF_YAML` through the
+    /// Drift guard: drive a real `clinker_plan` parse of `CONF_YAML` through the
     /// live editor path and confirm (a) the engine still emits `simple key
     /// expect ':'` flagged at line 7, and (b) the full pipeline — parse →
     /// refine — surfaces a hint pointing at line 6. If the pinned engine

@@ -3,7 +3,7 @@
 
 use dioxus::prelude::*;
 
-use clinker_core::config::composition::{LayerKind, ProvenanceLayer};
+use clinker_plan::config::composition::{LayerKind, ProvenanceLayer};
 
 use crate::state::use_app_state;
 

@@ -8,8 +8,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use clinker_core::config::PipelineConfig;
-use clinker_core::partial::PartialPipelineConfig;
+use clinker_exec::partial::PartialPipelineConfig;
+use clinker_plan::config::PipelineConfig;
 use uuid::Uuid;
 
 use crate::file_ops::compute_hash;
