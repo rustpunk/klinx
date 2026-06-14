@@ -12,8 +12,21 @@ use super::HoveredField;
 /// so field-row hover reports `(index, field_name)` to the canvas's
 /// [`HoveredField`] context. `dimmed` fades the card when a field's lineage is
 /// being revealed and this node is outside that closure.
+///
+/// `highlighted_fields` names THIS card's own field rows that are lineage
+/// endpoints of the active hover reveal (#87) — the rows to tint so a reader of
+/// a multi-field node sees *which* row is the source/target, not just that the
+/// card participates. The canvas pre-groups endpoints by node and hands each card
+/// exactly its own names (a small, sorted, de-duplicated list), so there is no
+/// per-node scan of a global set. Empty when nothing is hovered (or none of this
+/// card's rows are endpoints). Looked up via a `HashSet<&str>` built once below.
 #[component]
-pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
+pub fn CanvasNode(
+    stage: StageView,
+    index: usize,
+    dimmed: bool,
+    highlighted_fields: Vec<String>,
+) -> Element {
     let state = use_app_state();
     let kind_attr = stage.kind.kind_attr();
     let badge = stage.kind.badge_label();
@@ -43,6 +56,12 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
     let keeps_node_out = stage.keeps_node_output_port();
     let show_rows = has_fields && !*collapsed.read();
     let show_branches = has_branches && !*collapsed.read();
+
+    // Lineage-endpoint lookup (#87): build the set ONCE per card, so testing each
+    // field row is O(1) rather than scanning `highlighted_fields` per row. Empty
+    // (allocation-free) when nothing is hovered or this card has no endpoints.
+    let highlighted: std::collections::HashSet<&str> =
+        highlighted_fields.iter().map(String::as_str).collect();
 
     let base_class = match (is_selected, is_error, is_composition) {
         (_, _, true) => {
@@ -196,6 +215,10 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
                             name: field.name.clone(),
                             kind: field.kind,
                             ty: field.ty.clone(),
+                            // Tint this cell when it is a lineage endpoint of the
+                            // active hover (#87). O(1) lookup in this card's
+                            // pre-built endpoint set.
+                            highlighted: highlighted.contains(field.name.as_str()),
                         }
                     }
                 }
@@ -264,6 +287,11 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
 /// that field's lineage closure. The reveal is *cleared* by a single
 /// `onmouseleave` on the parent `.klinx-node-fields` container, not per row:
 /// sweeping row→row stays `Some(A)→Some(B)` with no transient `None` flash.
+///
+/// `highlighted` tints THIS cell (`klinx-node-field--lineage`) when the row is a
+/// lineage endpoint of the active hover reveal (#87) — a calm, static background
+/// tint, no motion and no layout shift, so it coexists with the whole-node dim
+/// and the inline datatype label.
 #[component]
 fn FieldRowView(
     node_index: usize,
@@ -271,6 +299,7 @@ fn FieldRowView(
     name: String,
     kind: FieldKind,
     ty: Option<String>,
+    highlighted: bool,
 ) -> Element {
     let mut hovered = use_context::<HoveredField>();
 
@@ -295,9 +324,17 @@ fn FieldRowView(
         None => name.clone(),
     };
 
+    // Append the lineage-tint modifier only when this cell is an endpoint of the
+    // active hover; an un-highlighted row keeps exactly its classic class string.
+    let row_class = if highlighted {
+        "klinx-node-field klinx-node-field--lineage"
+    } else {
+        "klinx-node-field"
+    };
+
     rsx! {
         div {
-            class: "klinx-node-field",
+            class: "{row_class}",
             "data-field-kind": kind_attr,
             title: "{tip}",
             onmouseenter: {

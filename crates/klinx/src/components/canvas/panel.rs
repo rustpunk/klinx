@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 
 use crate::pipeline_view::{
     FieldEdge, NODE_WIDTH, StageView, derive_body_view, derive_partial_pipeline_view,
-    derive_pipeline_view, fit_transform, layout_bounds, lineage_closure,
+    derive_pipeline_view, fit_transform, group_endpoints_by_node, layout_bounds, lineage_closure,
 };
 use crate::state::{ChannelViewMode, use_app_state};
 
@@ -214,16 +214,31 @@ pub fn CanvasPanel() -> Element {
     let mut active_field_edges: Vec<(usize, FieldEdgeAnchors)> = Vec::new();
     let mut participating_nodes: std::collections::HashSet<usize> =
         std::collections::HashSet::new();
+    // Per-node lineage-endpoint field names (#87): node index → the field rows on
+    // that card to tint, so a multi-field node shows *which row* is the
+    // source/target — not just that the card participates (the whole-node dim
+    // conveys the latter). Built from ONLY the edges whose anchors resolve, in the
+    // SAME pass that fills `participating_nodes`/`active_field_edges`: the
+    // highlight, the dim exemption, and the drawn cable therefore derive from one
+    // resolved-edge set, so a tinted cell can never land on a dimmed, cable-less
+    // card. Empty map when nothing is hovered (each card then gets an empty Vec
+    // without any per-node scan). `group_endpoints_by_node` returns sorted,
+    // de-duplicated names so each card's prop is stable across renders.
+    let mut highlighted_by_node: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
     if let Some((node, field)) = &*hovered_field.0.read() {
         let closure = lineage_closure(&field_edges, *node, field);
+        let mut resolved_edges: Vec<&FieldEdge> = Vec::with_capacity(closure.len());
         for &ei in &closure {
             let edge = &field_edges[ei];
             if let Some(anchors) = resolve_edge_anchors(&stages, edge) {
                 participating_nodes.insert(edge.from_node);
                 participating_nodes.insert(edge.to_node);
                 active_field_edges.push((ei, anchors));
+                resolved_edges.push(edge);
             }
         }
+        highlighted_by_node = group_endpoints_by_node(resolved_edges);
     }
     // Any field hovered with a non-empty closure dims the rest of the canvas.
     let hover_active = !active_field_edges.is_empty();
@@ -552,12 +567,19 @@ pub fn CanvasPanel() -> Element {
 
                 // Node cards
                 for (index, stage) in stages.into_iter().enumerate() {
+                    // Hand each card its pre-grouped lineage-endpoint field names
+                    // (#87). `remove` MOVES the Vec out (each index is visited once,
+                    // so this never loses a card's names), avoiding a clone and any
+                    // per-node scan of a global set. A non-endpoint card gets a
+                    // fresh empty Vec — cheap, and unchanged across renders so
+                    // CanvasNode's PartialEq memoization holds.
                     CanvasNode {
                         key: "{stage.id}",
                         stage,
                         index,
                         // Dim cards outside the revealed field's lineage closure.
                         dimmed: hover_active && !participating_nodes.contains(&index),
+                        highlighted_fields: highlighted_by_node.remove(&index).unwrap_or_default(),
                     }
                 }
             }
