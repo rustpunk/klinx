@@ -17,6 +17,16 @@ pub use field_lineage::{FieldEdge, FieldKind, FieldRow, lineage_closure};
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;
 
+/// Vertical offset (px from the card's border-box top) of the node-level
+/// input/output ports, placed on the **node-name label's** mid-line rather than
+/// the header's geometric center — so the port squares read as centered on the
+/// node name. Derived from the header CSS box model: 3px card border + 10px
+/// header padding-top + ~12px badge row + 7px badge margin + half the ~14px
+/// label line ≈ 39px. Both the cable anchors ([`StageView::port_in`]/`port_out`)
+/// and the rendered port squares use this, so they coincide; keep it in step
+/// with the `.klinx-node-header` / `.klinx-node-label` CSS.
+pub const HEADER_PORT_Y: f32 = 39.0;
+
 /// Pixel height of a node card's header (badge + label + rust-line + subtitle)
 /// above the first field row, measured from the card's border-box top.
 ///
@@ -234,23 +244,20 @@ pub struct StageView {
 }
 
 impl StageView {
-    /// Node-level OUTPUT port — the default cable origin. Anchored at the
-    /// HEADER's vertical center (`NODE_HEIGHT/2` from the card top), inline with
-    /// the node name, so node→node cables connect header-to-header regardless of
-    /// how many field rows a card carries. Per-column field cables use the per-row
+    /// Node-level OUTPUT port — the default cable origin. Anchored on the
+    /// node-name label's mid-line ([`HEADER_PORT_Y`] from the card top), inline
+    /// with the name, so node→node cables connect at the header regardless of how
+    /// many field rows a card carries. Per-column field cables use the per-row
     /// anchors ([`StageView::field_anchor_out`]); a Route node's OUTPUTS are its
     /// branch ports ([`StageView::branch_anchor_out`]), not this port.
     pub fn port_out(&self) -> (f32, f32) {
-        (
-            self.canvas_x + NODE_WIDTH,
-            self.canvas_y + NODE_HEIGHT / 2.0,
-        )
+        (self.canvas_x + NODE_WIDTH, self.canvas_y + HEADER_PORT_Y)
     }
 
     /// Node-level INPUT port — the header-level entry point, inline with the node
     /// name; see [`StageView::port_out`].
     pub fn port_in(&self) -> (f32, f32) {
-        (self.canvas_x, self.canvas_y + NODE_HEIGHT / 2.0)
+        (self.canvas_x, self.canvas_y + HEADER_PORT_Y)
     }
 
     /// World-space vertical center of field row `i` inside this card.
