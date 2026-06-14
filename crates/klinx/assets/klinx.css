@@ -213,6 +213,15 @@
 [data-stage-kind="output"]    { --klinx-stage-accent: var(--klinx-accent-output); }
 [data-stage-kind="input-port"]  { --klinx-stage-accent: var(--klinx-accent-source); }
 [data-stage-kind="output-port"] { --klinx-stage-accent: var(--klinx-accent-output); }
+/* The remaining processing kinds previously had NO `--klinx-stage-accent`, so a
+   cable leaving one (e.g. a Combine or Route node) resolved `stroke: var(...)`
+   to nothing and rendered invisible. Map each to an existing accent so every
+   node's outgoing cables — and its card's top border — are visible. */
+[data-stage-kind="aggregate"]   { --klinx-stage-accent: var(--klinx-accent-transform); }
+[data-stage-kind="route"]       { --klinx-stage-accent: var(--klinx-accent-transform); }
+[data-stage-kind="merge"]       { --klinx-stage-accent: var(--klinx-accent-source); }
+[data-stage-kind="combine"]     { --klinx-stage-accent: var(--klinx-accent-source); }
+[data-stage-kind="composition"] { --klinx-stage-accent: var(--klinx-accent-source); }
 [data-stage-kind="error"]     { --klinx-stage-accent: #CC3333; }
 
 /* Enamel node cards — light plate surface replaces dark char surface */

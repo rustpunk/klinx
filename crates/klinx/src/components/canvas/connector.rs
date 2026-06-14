@@ -132,7 +132,10 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
     // otherwise (node edges). An empty `style` leaves the path's stroke to be
     // inherited from the `<g>`'s class-set value.
     let stroke_style = if inline_accent_stroke {
-        "stroke: var(--klinx-stage-accent);"
+        // Fallback to the transform accent so a node kind that is ever missing a
+        // `--klinx-stage-accent` definition still renders a visible cable rather
+        // than a strokeless (invisible) one.
+        "stroke: var(--klinx-stage-accent, var(--klinx-accent-transform));"
     } else {
         ""
     };

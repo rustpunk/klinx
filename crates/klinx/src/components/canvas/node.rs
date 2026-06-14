@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::pipeline_view::{FieldKind, NODE_WIDTH, StageKind, StageView};
+use crate::pipeline_view::{FieldKind, NODE_HEIGHT, NODE_WIDTH, StageKind, StageView};
 use crate::state::{CompositionDrillFrame, use_app_state};
 
 use super::HoveredField;
@@ -69,12 +69,11 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
 
     const BORDER_TOP: f32 = 3.0;
     const PORT_HALF: f32 = 4.0;
-    // Center the node-level port squares on the card's VERTICAL CENTER so they
-    // coincide with the cable anchors (`StageView::port_in`/`port_out`, also at
-    // `card_height/2`). Pinning them near the top left tall field-bearing cards'
-    // cables visibly missing the port markers (#77). A field-less card is exactly
-    // NODE_HEIGHT, so this matches the classic position there.
-    let port_y = stage.card_height() / 2.0 - PORT_HALF - BORDER_TOP;
+    // Node-level port squares sit at the HEADER's vertical center, inline with
+    // the node name, matching the cable anchors (`port_in`/`port_out` at
+    // NODE_HEIGHT/2 from the card top). Per-column field cables and Route branch
+    // cables attach at their own row anchors instead.
+    let port_y = NODE_HEIGHT / 2.0 - PORT_HALF - BORDER_TOP;
 
     rsx! {
         div {

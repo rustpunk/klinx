@@ -234,22 +234,23 @@ pub struct StageView {
 }
 
 impl StageView {
-    /// Node-level OUTPUT port — the default cable origin. Anchored at the card's
-    /// VERTICAL CENTER (`card_height/2`), not a fixed offset, so on a tall
-    /// field-bearing card the node cables meet the card body instead of riding
-    /// along its top edge (#77). A field-less, branch-less card is exactly
-    /// [`NODE_HEIGHT`] tall, so this matches the classic geometry there.
+    /// Node-level OUTPUT port — the default cable origin. Anchored at the
+    /// HEADER's vertical center (`NODE_HEIGHT/2` from the card top), inline with
+    /// the node name, so node→node cables connect header-to-header regardless of
+    /// how many field rows a card carries. Per-column field cables use the per-row
+    /// anchors ([`StageView::field_anchor_out`]); a Route node's OUTPUTS are its
+    /// branch ports ([`StageView::branch_anchor_out`]), not this port.
     pub fn port_out(&self) -> (f32, f32) {
         (
             self.canvas_x + NODE_WIDTH,
-            self.canvas_y + self.card_height() / 2.0,
+            self.canvas_y + NODE_HEIGHT / 2.0,
         )
     }
 
-    /// Node-level INPUT port — see [`StageView::port_out`]; anchored at the
-    /// card's vertical center.
+    /// Node-level INPUT port — the header-level entry point, inline with the node
+    /// name; see [`StageView::port_out`].
     pub fn port_in(&self) -> (f32, f32) {
-        (self.canvas_x, self.canvas_y + self.card_height() / 2.0)
+        (self.canvas_x, self.canvas_y + NODE_HEIGHT / 2.0)
     }
 
     /// World-space vertical center of field row `i` inside this card.
