@@ -1094,6 +1094,11 @@ enum LineageSlot<'a> {
 ///   column yields an identity edge.
 /// - **Node without CXL / on parse error**: passthrough of its input columns; no
 ///   edges on parse error, identity carries when there is simply no CXL block.
+///
+/// Multi-input fan-in (Merge/Combine): a column present in more than one
+/// predecessor (a join key carried from both joined inputs) emits a carry edge
+/// to EACH contributing input, so hovering it lights up every source rather than
+/// only the first-seen one (#67).
 fn compute_field_lineage(
     slots: &[LineageSlot<'_>],
     predecessors: &[Vec<usize>],
@@ -1120,22 +1125,35 @@ fn compute_field_lineage(
         };
 
         // Ordered, de-duplicated union of predecessor output column names, with
-        // the producer's index recorded per column so edges can name a concrete
-        // source. First producer wins for a duplicated column name.
+        // EVERY producer index recorded per column so a column present in more
+        // than one input (a Merge/Combine fan-in, e.g. a join key like
+        // `product_code` that lives in both joined inputs) emits a carry edge to
+        // EACH contributing input rather than dimming all but the first on hover
+        // (#67). `input_cols` keeps each name once, in first-seen order, so the
+        // node still draws one row per column.
         let mut input_cols: Vec<String> = Vec::new();
-        let mut producer_of: std::collections::HashMap<String, usize> =
+        let mut producers_of: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
         // Each input column's datatype label, taken from its producer row, so a
         // carried column keeps the type it was given upstream (#73). First
-        // producer wins, matching `producer_of`.
+        // producer wins, matching the single row `input_cols` draws — this assumes
+        // a column shared across inputs (a join key) is the same type in each; if
+        // two inputs disagree the drawn row shows the first's type while edges
+        // still fan to both, so the marker never goes missing.
         let mut col_type: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         for &p in &predecessors[idx] {
             for row in &out_fields[p] {
-                if !producer_of.contains_key(&row.name) {
-                    producer_of.insert(row.name.clone(), p);
+                let producers = producers_of.entry(row.name.clone()).or_default();
+                if producers.is_empty() {
+                    // First sighting fixes the column's draw order and type label.
                     col_type.insert(row.name.clone(), row.ty.clone());
                     input_cols.push(row.name.clone());
+                }
+                // Guard against a single malformed input listing the column twice
+                // so we never emit two carries to the same producer.
+                if !producers.contains(&p) {
+                    producers.push(p);
                 }
             }
         }
@@ -1193,14 +1211,18 @@ fn compute_field_lineage(
                     // edge is a passthrough; a computed emit derives its target.
                     let carried = copies.contains(target.as_str());
                     for col in support {
-                        if let Some(&p) = producer_of.get(col) {
-                            field_edges.push(FieldEdge {
-                                from_node: p,
-                                from_field: col.clone(),
-                                to_node: idx,
-                                to_field: target.clone(),
-                                passthrough: carried,
-                            });
+                        if let Some(producers) = producers_of.get(col) {
+                            // A support column present in several inputs derives
+                            // its target from each of them (#67).
+                            for &p in producers {
+                                field_edges.push(FieldEdge {
+                                    from_node: p,
+                                    from_field: col.clone(),
+                                    to_node: idx,
+                                    to_field: target.clone(),
+                                    passthrough: carried,
+                                });
+                            }
                         } else if emitted_so_far.contains(col.as_str()) {
                             field_edges.push(FieldEdge {
                                 from_node: idx,
@@ -1215,18 +1237,21 @@ fn compute_field_lineage(
                 }
 
                 // Identity edges: each input column carried through unchanged
-                // (not shadowed by an emit of the same name).
+                // (not shadowed by an emit of the same name). A column carried in
+                // from several inputs (a fan-in join key) carries from each (#67).
                 for col in &input_cols {
                     if !emitted.contains(col.as_str())
-                        && let Some(&p) = producer_of.get(col)
+                        && let Some(producers) = producers_of.get(col)
                     {
-                        field_edges.push(FieldEdge {
-                            from_node: p,
-                            from_field: col.clone(),
-                            to_node: idx,
-                            to_field: col.clone(),
-                            passthrough: true,
-                        });
+                        for &p in producers {
+                            field_edges.push(FieldEdge {
+                                from_node: p,
+                                from_field: col.clone(),
+                                to_node: idx,
+                                to_field: col.clone(),
+                                passthrough: true,
+                            });
+                        }
                     }
                 }
             }
@@ -1241,14 +1266,18 @@ fn compute_field_lineage(
                 // the rows and the identity carries are safe to draw.
                 out_fields[idx] = field_lineage::passthrough_output_fields(&input_cols);
                 for col in &input_cols {
-                    if let Some(&p) = producer_of.get(col) {
-                        field_edges.push(FieldEdge {
-                            from_node: p,
-                            from_field: col.clone(),
-                            to_node: idx,
-                            to_field: col.clone(),
-                            passthrough: true,
-                        });
+                    // A CXL-less fan-in (Merge) carries a shared column from every
+                    // input that produced it (#67).
+                    if let Some(producers) = producers_of.get(col) {
+                        for &p in producers {
+                            field_edges.push(FieldEdge {
+                                from_node: p,
+                                from_field: col.clone(),
+                                to_node: idx,
+                                to_field: col.clone(),
+                                passthrough: true,
+                            });
+                        }
                     }
                 }
             }
@@ -2828,6 +2857,216 @@ nodes:
             std::collections::HashSet::from([derive_idx]),
             "c's closure is exactly the a→c derive edge, no carries"
         );
+    }
+
+    /// Combine multi-input provenance (#67): a join key present in BOTH joined
+    /// inputs carries from EACH of them, so hovering it lights up every source
+    /// rather than only the first-seen input. A column unique to one input — and
+    /// a computed emit whose support lives in one input — still resolves to that
+    /// single producer; multi-producer fan-out never invents an edge from an
+    /// input that did not produce the column.
+    #[test]
+    fn combine_multi_input_join_key_carries_from_every_input() {
+        let yaml = r#"
+pipeline:
+  name: combine_multi_input
+nodes:
+  - type: source
+    name: products
+    config:
+      name: products
+      type: csv
+      path: ./products.csv
+      schema:
+        - { name: product_code, type: string }
+        - { name: product_name, type: string }
+  - type: source
+    name: inventory
+    config:
+      name: inventory
+      type: csv
+      path: ./inventory.csv
+      schema:
+        - { name: product_code, type: string }
+        - { name: on_hand, type: int }
+  - type: combine
+    name: joined
+    input:
+      products: products
+      inventory: inventory
+    config:
+      where: "products.product_code == inventory.product_code"
+      match: first
+      on_miss: skip
+      cxl: |
+        emit available = on_hand
+      propagate_ck: driver
+"#;
+        let config = parse_config(yaml).expect("combine multi-input pipeline parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_products = stage_idx(&view, "products");
+        let i_inventory = stage_idx(&view, "inventory");
+        let i_joined = stage_idx(&view, "joined");
+
+        // The join key `product_code` lives in BOTH inputs, so it carries from
+        // each — two passthrough edges, not one (the #67 fix).
+        let carry_from_products = FieldEdge {
+            from_node: i_products,
+            from_field: "product_code".to_string(),
+            to_node: i_joined,
+            to_field: "product_code".to_string(),
+            passthrough: true,
+        };
+        let carry_from_inventory = FieldEdge {
+            from_node: i_inventory,
+            from_field: "product_code".to_string(),
+            to_node: i_joined,
+            to_field: "product_code".to_string(),
+            passthrough: true,
+        };
+        assert!(
+            view.field_edges.contains(&carry_from_products),
+            "join key must carry from `products`, got {:?}",
+            view.field_edges
+        );
+        assert!(
+            view.field_edges.contains(&carry_from_inventory),
+            "join key must carry from `inventory`, got {:?}",
+            view.field_edges
+        );
+
+        // A column unique to one input carries from exactly that input — the
+        // fan-out is keyed on real producers, not on every predecessor.
+        assert_eq!(
+            view.field_edges
+                .iter()
+                .filter(|e| e.to_node == i_joined && e.to_field == "on_hand")
+                .count(),
+            1,
+            "a column unique to one input carries from exactly that input"
+        );
+
+        // The computed emit `available = on_hand` derives from the single input
+        // that produced `on_hand`; it is NOT fanned out to `products`.
+        let derive_available = FieldEdge {
+            from_node: i_inventory,
+            from_field: "on_hand".to_string(),
+            to_node: i_joined,
+            to_field: "available".to_string(),
+            passthrough: false,
+        };
+        assert!(
+            view.field_edges.contains(&derive_available),
+            "available derives from inventory.on_hand, got {:?}",
+            view.field_edges
+        );
+        assert_eq!(
+            view.field_edges
+                .iter()
+                .filter(|e| e.to_node == i_joined && e.to_field == "available")
+                .count(),
+            1,
+            "available has exactly one producer (on_hand is unique to inventory)"
+        );
+
+        // Hovering the join key on the combine lights up BOTH incoming carries —
+        // the legibility outcome #67 targets.
+        let closure = lineage_closure(&view.field_edges, i_joined, "product_code");
+        let idx_of = |e: &FieldEdge| {
+            view.field_edges
+                .iter()
+                .position(|x| x == e)
+                .expect("edge present")
+        };
+        assert!(
+            closure.contains(&idx_of(&carry_from_products))
+                && closure.contains(&idx_of(&carry_from_inventory)),
+            "hovering the join key reveals carries from every input, got {closure:?}"
+        );
+    }
+
+    /// CXL-less fan-in (Merge, the no-CXL lineage branch / site 3) across THREE
+    /// inputs: a column in all three carries from all three; a column in exactly
+    /// two carries from those two and NOT the third (the tightest "don't fan out
+    /// to a non-producing input" guard); a column unique to one carries once (#67).
+    #[test]
+    fn merge_multi_input_shared_column_carries_from_every_producer() {
+        let yaml = r#"
+pipeline:
+  name: merge_multi_input
+nodes:
+  - type: source
+    name: left
+    config:
+      name: left
+      type: csv
+      path: ./left.csv
+      schema:
+        - { name: id, type: string }
+        - { name: shared, type: int }
+  - type: source
+    name: mid
+    config:
+      name: mid
+      type: csv
+      path: ./mid.csv
+      schema:
+        - { name: id, type: string }
+        - { name: shared, type: int }
+  - type: source
+    name: right
+    config:
+      name: right
+      type: csv
+      path: ./right.csv
+      schema:
+        - { name: id, type: string }
+        - { name: only_right, type: int }
+  - type: merge
+    name: merged
+    inputs: [left, mid, right]
+"#;
+        let config = parse_config(yaml).expect("merge multi-input pipeline parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_left = stage_idx(&view, "left");
+        let i_mid = stage_idx(&view, "mid");
+        let i_right = stage_idx(&view, "right");
+        let i_merged = stage_idx(&view, "merged");
+
+        let carry = |from: usize, field: &str| FieldEdge {
+            from_node: from,
+            from_field: field.to_string(),
+            to_node: i_merged,
+            to_field: field.to_string(),
+            passthrough: true,
+        };
+        let carries_to = |field: &str| {
+            view.field_edges
+                .iter()
+                .filter(|e| e.to_node == i_merged && e.to_field == field)
+                .count()
+        };
+
+        // `id` is in all three inputs → carries from each.
+        assert!(view.field_edges.contains(&carry(i_left, "id")));
+        assert!(view.field_edges.contains(&carry(i_mid, "id")));
+        assert!(view.field_edges.contains(&carry(i_right, "id")));
+        assert_eq!(carries_to("id"), 3, "got {:?}", view.field_edges);
+
+        // `shared` is in left + mid ONLY → carries from those two, never `right`.
+        assert!(view.field_edges.contains(&carry(i_left, "shared")));
+        assert!(view.field_edges.contains(&carry(i_mid, "shared")));
+        assert!(
+            !view.field_edges.contains(&carry(i_right, "shared")),
+            "must not fan out to the input that never produced the column"
+        );
+        assert_eq!(carries_to("shared"), 2, "got {:?}", view.field_edges);
+
+        // `only_right` is unique to one input → exactly one carry.
+        assert!(view.field_edges.contains(&carry(i_right, "only_right")));
+        assert_eq!(carries_to("only_right"), 1, "got {:?}", view.field_edges);
     }
 
     /// Full field-rows + lineage-edges pass over the canonical chain:
