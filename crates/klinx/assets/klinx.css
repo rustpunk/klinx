@@ -4302,6 +4302,31 @@ input:-webkit-autofill:focus {
   text-overflow: ellipsis;
 }
 
+/* Correlation-key marker (#88) — a calm, always-on LEADING slot before the
+   field name for source columns that drive a correlation key. The slot has a
+   FIXED width whether or not it carries a glyph, so marked and unmarked rows
+   align identically (no reflow / layout jitter). It never sets a background,
+   so it cannot collide with the lineage hover tint (#87) or the trailing
+   `.klinx-node-field-type` label. */
+.klinx-node-field-ck {
+  flex: 0 0 auto;
+  width: 13px;
+  margin-right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* A desaturated brass tone (the engine's "key" association), dimmed so the
+     marker stays low visual weight at rest. The SHAPE (the key glyph), not the
+     color, carries the meaning — color only reinforces (WCAG 1.4.1). */
+  color: color-mix(in srgb, var(--klinx-phosphor) 70%, var(--klinx-iron));
+}
+/* The glyph is monochrome (`currentColor`) and static — no motion or glow at
+   rest keeps it non-distracting. */
+.klinx-node-field-ck-glyph {
+  display: block;
+  opacity: 0.85;
+}
+
 /* Inline datatype suffix on a field row — secondary to the name: muted and a bit
    smaller, doesn't shrink (the NAME truncates first via its `flex: 1 1 auto`),
    sits just before the out-anchor. */

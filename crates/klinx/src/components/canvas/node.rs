@@ -219,6 +219,7 @@ pub fn CanvasNode(
                             // active hover (#87). O(1) lookup in this card's
                             // pre-built endpoint set.
                             highlighted: highlighted.contains(field.name.as_str()),
+                            is_correlation_key: field.is_correlation_key,
                         }
                     }
                 }
@@ -292,6 +293,11 @@ pub fn CanvasNode(
 /// lineage endpoint of the active hover reveal (#87) — a calm, static background
 /// tint, no motion and no layout shift, so it coexists with the whole-node dim
 /// and the inline datatype label.
+///
+/// `is_correlation_key` (#88) draws a calm, always-on key glyph in a reserved
+/// LEADING slot before the field name when the field drives a Source's
+/// correlation key. The slot is always present (fixed width) so marked and
+/// unmarked rows align identically — no layout jitter when the flag flips.
 #[component]
 fn FieldRowView(
     node_index: usize,
@@ -300,6 +306,7 @@ fn FieldRowView(
     kind: FieldKind,
     ty: Option<String>,
     highlighted: bool,
+    is_correlation_key: bool,
 ) -> Element {
     let mut hovered = use_context::<HoveredField>();
 
@@ -342,6 +349,55 @@ fn FieldRowView(
                 move |_| hovered.0.set(Some((node_index, name.clone())))
             },
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
+            // Correlation-key marker (#88): a reserved LEADING slot whose width
+            // is fixed in CSS so every row aligns whether or not it carries a
+            // key. The shape (a monochrome key glyph in `currentColor`), not
+            // color alone, carries the meaning (WCAG 1.4.1); color only
+            // reinforces. The glyph (and its `title`/`aria-label`) render only
+            // for a CK row; the empty slot still reserves its width so unmarked
+            // rows do not shift.
+            span {
+                class: "klinx-node-field-ck",
+                // `role="img"` makes the slot an accessible image so its
+                // `aria-label` is reliably exposed (a roleless span does not
+                // reliably surface its accessible name); set only on a CK row,
+                // alongside the label, so the empty slot stays roleless.
+                role: if is_correlation_key { Some("img") } else { None },
+                title: if is_correlation_key { Some("Correlation key") } else { None },
+                "aria-label": if is_correlation_key { Some("Correlation key") } else { None },
+                if is_correlation_key {
+                    // Inline SVG (not a 🔑 emoji) for consistent cross-platform,
+                    // single-hue rendering. `currentColor` defers the hue to the
+                    // CSS class so the marker stays a calm, desaturated tone.
+                    svg {
+                        class: "klinx-node-field-ck-glyph",
+                        view_box: "0 0 16 16",
+                        width: "11",
+                        height: "11",
+                        // Decorative: the meaning is conveyed by the parent
+                        // span's `aria-label`, so assistive tech skips the glyph.
+                        "aria-hidden": "true",
+                        // A key: round bow (ring) on the left, shaft to the right
+                        // with two bit teeth. Stroked in `currentColor`.
+                        circle {
+                            cx: "5",
+                            cy: "8",
+                            r: "3",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.5",
+                        }
+                        path {
+                            d: "M8 8 H14 M12 8 V10.5 M14 8 V11",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.5",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                        }
+                    }
+                }
+            }
             span { class: "klinx-node-field-name", "{name}" }
             // Compact datatype suffix (e.g. `: float`) when known. Declared and
             // carried columns have a type; emitted columns don't yet (Phase 2b).

@@ -17,9 +17,15 @@ use cxl::ast::{Expr, Program, Statement};
 use cxl::parser::Parser;
 
 /// How a field on a node's output record came to exist.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FieldKind {
     /// An input/source column declared by a schema (input port or Source).
+    ///
+    /// The `Default` so [`FieldRow`] can derive `Default`: an origin/declared
+    /// column is the natural zero value (the seed kind every other row is
+    /// derived from), which lets test literals elide the field via
+    /// `..Default::default()`.
+    #[default]
     Declared,
     /// A column written by an `emit name = expr` statement.
     Emitted,
@@ -28,7 +34,11 @@ pub enum FieldKind {
 }
 
 /// One row in a node's output record: a field name plus how it arose.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Default` is derived so test literals can elide the rarely-set fields via
+/// `..Default::default()`; the zero value is a [`FieldKind::Declared`] row with
+/// no type and no correlation-key role.
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct FieldRow {
     pub name: String,
     pub kind: FieldKind,
@@ -40,6 +50,16 @@ pub struct FieldRow {
     /// engine typechecker (Phase 2b / #68) — and when the producer column has no
     /// known type.
     pub ty: Option<String>,
+    /// Whether this field is a user-declared driver of a Source's
+    /// `correlation_key` (#88). `true` for the [`FieldKind::Declared`] source
+    /// columns named in `correlation_key` (a `Single` key marks one field; a
+    /// `Compound` key marks each listed field) and for the
+    /// [`FieldKind::PassThrough`] rows that carry such a column through a
+    /// downstream node unchanged, so the marker follows a CK column along its
+    /// lineage. Never `true` for [`FieldKind::Emitted`] rows (a new identity is
+    /// not a declared driver) nor for the engine-internal `$ck.<field>` shadow
+    /// columns (those are not user-declared and klinx never surfaces them).
+    pub is_correlation_key: bool,
 }
 
 /// A field-level lineage edge: `to_node.to_field` is (partly) derived from
@@ -190,6 +210,10 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
                 name: col.clone(),
                 kind: FieldKind::PassThrough,
                 ty: None,
+                // The correlation-key flag is stamped onto carried passthrough
+                // rows by the caller (`compute_field_lineage`), mirroring the
+                // datatype carry; it cannot be known from CXL alone.
+                ..Default::default()
             });
         }
     }
@@ -203,6 +227,7 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
             name,
             kind,
             ty: None,
+            ..Default::default()
         });
     }
     rows
@@ -251,6 +276,9 @@ pub fn passthrough_output_fields(input_cols: &[String]) -> Vec<FieldRow> {
             name: col.clone(),
             kind: FieldKind::PassThrough,
             ty: None,
+            // CK flag stamped onto carried rows by the caller (see
+            // `transform_output_fields`).
+            ..Default::default()
         })
         .collect()
 }
@@ -417,16 +445,19 @@ mod tests {
                     name: "x".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: None,
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::Emitted,
                     ty: None,
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "a".to_string(),
                     kind: FieldKind::Emitted,
                     ty: None,
+                    ..Default::default()
                 },
             ]
         );
@@ -457,23 +488,27 @@ mod tests {
                     name: "x".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: None,
+                    ..Default::default()
                 },
                 // `a`, `b` are identity copies → PassThrough (carried), not Emitted.
                 FieldRow {
                     name: "a".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: None,
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: None,
+                    ..Default::default()
                 },
                 // `c` is computed → Emitted (created/altered here).
                 FieldRow {
                     name: "c".to_string(),
                     kind: FieldKind::Emitted,
                     ty: None,
+                    ..Default::default()
                 },
             ]
         );

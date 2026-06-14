@@ -1015,13 +1015,29 @@ fn node_preserves_input_schema(node: &PipelineNode) -> bool {
 /// both seed the lineage graph with [`FieldKind::Declared`] origin rows. Each
 /// row carries its declared datatype ([`ColumnDecl::ty`]) as a compact label
 /// (#73); these origin types then propagate to downstream passthrough rows.
-fn declared_rows(columns: &[clinker_plan::config::pipeline_node::ColumnDecl]) -> Vec<FieldRow> {
+///
+/// `correlation_key` is the slot's optional [`CorrelationKey`](clinker_plan::config::CorrelationKey)
+/// (#88); each declared column whose name is one of the key's driver fields
+/// ([`CorrelationKey::fields`] — one for `Single`, N for `Compound`) is flagged
+/// [`FieldRow::is_correlation_key`]. Pass `None` for slots with no correlation
+/// key (composition input ports never declare one). Matching on the
+/// user-declared `schema:` column name is what restricts the marker to driver
+/// columns — the engine's internal `$ck.<field>` shadow columns are never part
+/// of `schema.columns`, so they cannot be marked here.
+fn declared_rows(
+    columns: &[clinker_plan::config::pipeline_node::ColumnDecl],
+    correlation_key: Option<&clinker_plan::config::CorrelationKey>,
+) -> Vec<FieldRow> {
+    let ck_fields: std::collections::HashSet<&str> = correlation_key
+        .map(|ck| ck.fields().into_iter().collect())
+        .unwrap_or_default();
     columns
         .iter()
         .map(|c| FieldRow {
             name: c.name.clone(),
             kind: FieldKind::Declared,
             ty: Some(compact_type(&c.ty)),
+            is_correlation_key: ck_fields.contains(c.name.as_str()),
         })
         .collect()
 }
@@ -1065,6 +1081,26 @@ enum LineageSlot<'a> {
     /// A transform-like node analyzed against its predecessors' output columns:
     /// passthrough + emitted rows, with derive/identity edges.
     Node(&'a PipelineNode),
+}
+
+/// Carried per-column metadata folded across all producers of an input column
+/// while [`compute_field_lineage`] analyzes one node, then stamped onto the
+/// node's carried [`FieldKind::PassThrough`] rows.
+///
+/// The two facets combine DIFFERENTLY across a multi-input fan-in, which is why
+/// they share one record built in a single pass rather than two parallel maps:
+/// - `ty` (#73) is **first-producer-wins** — a shared column draws one row, so
+///   it shows the first input's type label (edges still fan to every producer,
+///   so a type disagreement never drops the column).
+/// - `is_ck` (#88) is **OR across producers** — a correlation-key role is a
+///   boolean identity, so a column carried from a fan-in is a CK driver if ANY
+///   contributing input declared it one.
+#[derive(Default)]
+struct ColMeta {
+    /// Compact datatype label carried from the first producer (#73).
+    ty: Option<String>,
+    /// Whether any producer marked this column a correlation-key driver (#88).
+    is_ck: bool,
 }
 
 /// Compute per-index output field rows and the field-level lineage edges over a
@@ -1134,22 +1170,27 @@ fn compute_field_lineage(
         let mut input_cols: Vec<String> = Vec::new();
         let mut producers_of: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
-        // Each input column's datatype label, taken from its producer row, so a
-        // carried column keeps the type it was given upstream (#73). First
-        // producer wins, matching the single row `input_cols` draws — this assumes
-        // a column shared across inputs (a join key) is the same type in each; if
-        // two inputs disagree the drawn row shows the first's type while edges
-        // still fan to both, so the marker never goes missing.
-        let mut col_type: std::collections::HashMap<String, Option<String>> =
+        // Per-column carried metadata, folded across all producers of the column
+        // in a single pass (#73 datatype + #88 correlation-key role). The two
+        // fields combine DIFFERENTLY across a fan-in (see [`ColMeta`]): `ty` is
+        // first-producer-wins while `is_ck` ORs across every producer.
+        let mut col_meta: std::collections::HashMap<String, ColMeta> =
             std::collections::HashMap::new();
         for &p in &predecessors[idx] {
             for row in &out_fields[p] {
                 let producers = producers_of.entry(row.name.clone()).or_default();
+                let meta = col_meta.entry(row.name.clone()).or_default();
                 if producers.is_empty() {
-                    // First sighting fixes the column's draw order and type label.
-                    col_type.insert(row.name.clone(), row.ty.clone());
+                    // First sighting fixes the column's draw order and type label
+                    // (#73: a shared column shows the first input's type; edges
+                    // still fan to both, so a type clash never drops the column).
+                    meta.ty = row.ty.clone();
                     input_cols.push(row.name.clone());
                 }
+                // The correlation-key role is a boolean identity: a column shared
+                // by a fan-in IS a CK driver if ANY producer marks it one, so OR
+                // across every producer rather than trusting the first (#88, #2).
+                meta.is_ck |= row.is_correlation_key;
                 // Guard against a single malformed input listing the column twice
                 // so we never emit two carries to the same producer.
                 if !producers.contains(&p) {
@@ -1283,15 +1324,20 @@ fn compute_field_lineage(
             }
         }
 
-        // Propagate carried-column datatypes onto this node's passthrough rows
-        // from their producers (#73). Declared/origin rows already carry their
-        // type; emitted rows keep `None` — typing an emit needs the engine
-        // typechecker (Phase 2b / #68).
+        // Propagate carried-column datatypes AND the correlation-key marker onto
+        // this node's passthrough rows from their producers (#73, #88), one
+        // `col_meta` lookup per row. Only PassThrough rows carry: a Declared row
+        // already holds its own metadata, and an Emitted row is a NEW identity —
+        // its value was (re)computed here, so even when it shadows a CK source
+        // column it is no longer that column's correlation-key driver and stays
+        // unmarked/untyped (typing an emit needs the engine typechecker, Phase
+        // 2b / #68).
         for row in out_fields[idx].iter_mut() {
             if matches!(row.kind, FieldKind::PassThrough)
-                && let Some(t) = col_type.get(&row.name)
+                && let Some(meta) = col_meta.get(&row.name)
             {
-                row.ty = t.clone();
+                row.ty = meta.ty.clone();
+                row.is_correlation_key = meta.is_ck;
             }
         }
     }
@@ -1328,10 +1374,21 @@ fn composition_field_lineage(
     // ports are empty origins — their downstream consumers simply have no
     // resolvable producer columns from them.
     for decl in sig.inputs.values() {
-        let rows = decl.schema.as_ref().map(|s| declared_rows(&s.columns));
+        // Composition input ports declare a shape but never a correlation key
+        // (that is a Source-only concept), so no driver columns are marked.
+        let rows = decl
+            .schema
+            .as_ref()
+            .map(|s| declared_rows(&s.columns, None));
         slots.push(LineageSlot::Origin(rows.unwrap_or_default()));
     }
-    // Body nodes analyzed as transforms.
+    // Body nodes analyzed as transforms. No CK marking happens here (#88):
+    // `correlation_key` is a Source-only concept and a composition is fed by its
+    // `signature.inputs` (input ports), never by a body `source` node — the
+    // engine's composition body model has no ingest path (its Source handling
+    // lives only in the top-level executor), and no composition fixture declares
+    // a body source. So a body Source carrying a CK is not reachable; the marker
+    // is seeded exclusively at the pipeline Source path in `pipeline_field_lineage`.
     for spanned in body {
         slots.push(LineageSlot::Node(&spanned.value));
     }
@@ -1343,6 +1400,9 @@ fn composition_field_lineage(
             kind: FieldKind::Declared,
             // The output-port placeholder row has no declared schema type.
             ty: None,
+            // An output port is a synthetic boundary label, not a source
+            // column, so it never drives a correlation key.
+            is_correlation_key: false,
         }]));
     }
 
@@ -1396,7 +1456,13 @@ fn pipeline_field_lineage(
         .iter()
         .map(|spanned| match &spanned.value {
             PipelineNode::Source { config: body, .. } => {
-                LineageSlot::Origin(declared_rows(&body.schema.columns))
+                // Mark the source columns named in `correlation_key` as CK
+                // drivers (#88). The flag then propagates onto downstream
+                // carried passthrough rows in `compute_field_lineage`.
+                LineageSlot::Origin(declared_rows(
+                    &body.schema.columns,
+                    body.correlation_key.as_ref(),
+                ))
             }
             node => LineageSlot::Node(node),
         })
@@ -2786,11 +2852,13 @@ nodes:
                     name: "a".to_string(),
                     kind: FieldKind::Declared,
                     ty: Some("int".to_string()),
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::Declared,
                     ty: Some("string".to_string()),
+                    ..Default::default()
                 },
             ]
         );
@@ -2805,16 +2873,19 @@ nodes:
                     name: "a".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: Some("int".to_string()),
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: Some("string".to_string()),
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "c".to_string(),
                     kind: FieldKind::Emitted,
                     ty: None,
+                    ..Default::default()
                 },
             ]
         );
@@ -3069,6 +3140,272 @@ nodes:
         assert_eq!(carries_to("only_right"), 1, "got {:?}", view.field_edges);
     }
 
+    /// Find a stage's output field row by name (test helper for the
+    /// correlation-key marker assertions).
+    fn field_by_name<'a>(view: &'a PipelineView, stage: usize, name: &str) -> &'a FieldRow {
+        view.stages[stage]
+            .fields
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("field {name} present on stage {stage}"))
+    }
+
+    /// #88 (a): a Source whose `correlation_key` is a single field marks exactly
+    /// that declared column as a CK driver; every other declared column is
+    /// unmarked. The engine's internal `$ck.<field>` shadow column is never part
+    /// of the declared `schema:` columns, so it cannot leak into the marked set.
+    #[test]
+    fn single_correlation_key_marks_only_the_named_source_column() {
+        let yaml = r#"
+pipeline:
+  name: ck_single
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./orders.csv
+      correlation_key: order_id
+      schema:
+        - { name: order_id, type: string }
+        - { name: amount, type: int }
+"#;
+        let config = parse_config(yaml).expect("single-CK pipeline parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "orders");
+
+        let order_id = field_by_name(&view, i_src, "order_id");
+        assert_eq!(order_id.kind, FieldKind::Declared);
+        assert!(
+            order_id.is_correlation_key,
+            "the single CK driver column `order_id` is marked"
+        );
+
+        let amount = field_by_name(&view, i_src, "amount");
+        assert!(
+            !amount.is_correlation_key,
+            "a non-driver column is not marked"
+        );
+
+        // The source declares exactly its two schema columns — no `$ck.*` shadow
+        // column surfaces, so it cannot be (mis)marked.
+        let names: Vec<&str> = view.stages[i_src]
+            .fields
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["order_id", "amount"]);
+    }
+
+    /// #88 (b): a `Compound` correlation key (`[a, b]`) marks BOTH listed source
+    /// columns and leaves the rest unmarked.
+    #[test]
+    fn compound_correlation_key_marks_every_listed_column() {
+        let yaml = r#"
+pipeline:
+  name: ck_compound
+nodes:
+  - type: source
+    name: events
+    config:
+      name: events
+      type: csv
+      path: ./events.csv
+      correlation_key: [order_id, customer_id]
+      schema:
+        - { name: order_id, type: string }
+        - { name: customer_id, type: string }
+        - { name: amount, type: int }
+"#;
+        let config = parse_config(yaml).expect("compound-CK pipeline parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "events");
+
+        assert!(
+            field_by_name(&view, i_src, "order_id").is_correlation_key,
+            "first compound-key field is marked"
+        );
+        assert!(
+            field_by_name(&view, i_src, "customer_id").is_correlation_key,
+            "second compound-key field is marked"
+        );
+        assert!(
+            !field_by_name(&view, i_src, "amount").is_correlation_key,
+            "a non-key column is not marked"
+        );
+    }
+
+    /// #88 (c): the correlation-key marker propagates onto a downstream
+    /// transform's carried `PassThrough` row — the marker follows a CK column
+    /// through a transform that does not shadow it. An emitted (new-identity)
+    /// column is never marked, even when same-named state flows nearby.
+    #[test]
+    fn correlation_key_marker_propagates_onto_carried_passthrough() {
+        let yaml = r#"
+pipeline:
+  name: ck_propagation
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./orders.csv
+      correlation_key: order_id
+      schema:
+        - { name: order_id, type: string }
+        - { name: amount, type: int }
+  - type: transform
+    name: enrich
+    input: orders
+    config:
+      cxl: |
+        emit total = amount + 1
+"#;
+        let config = parse_config(yaml).expect("CK-propagation pipeline parses");
+        let view = derive_pipeline_view(&config);
+        let i_t = stage_idx(&view, "enrich");
+
+        // `order_id` is not shadowed by the emit, so it rides through as a
+        // PassThrough row — and carries its CK marker downstream.
+        let carried = field_by_name(&view, i_t, "order_id");
+        assert_eq!(carried.kind, FieldKind::PassThrough);
+        assert!(
+            carried.is_correlation_key,
+            "the CK marker follows a carried column through the transform"
+        );
+
+        // The carried non-key column stays unmarked.
+        assert!(
+            !field_by_name(&view, i_t, "amount").is_correlation_key,
+            "a carried non-key column is not marked"
+        );
+
+        // The emitted `total` column is a new identity, never a CK driver.
+        let emitted = field_by_name(&view, i_t, "total");
+        assert_eq!(emitted.kind, FieldKind::Emitted);
+        assert!(
+            !emitted.is_correlation_key,
+            "an emitted column is never marked as a correlation-key driver"
+        );
+    }
+
+    /// #88 / #2 (multi-input OR-semantics): a column shared by two Merge inputs
+    /// where ONLY ONE input declares it a correlation key is marked CK on the
+    /// merged row — the role is a boolean identity ORed across producers, not
+    /// first-producer-wins. The non-CK source is declared FIRST, so a
+    /// first-producer-wins bug would (wrongly) leave `id` unmarked; the OR makes
+    /// it marked regardless of order.
+    #[test]
+    fn correlation_key_marker_ors_across_merge_inputs() {
+        let yaml = r#"
+pipeline:
+  name: ck_merge_or
+nodes:
+  - type: source
+    name: plain
+    config:
+      name: plain
+      type: csv
+      path: ./plain.csv
+      schema:
+        - { name: id, type: string }
+        - { name: a, type: int }
+  - type: source
+    name: keyed
+    config:
+      name: keyed
+      type: csv
+      path: ./keyed.csv
+      correlation_key: id
+      schema:
+        - { name: id, type: string }
+        - { name: b, type: int }
+  - type: merge
+    name: merged
+    inputs: [plain, keyed]
+"#;
+        let config = parse_config(yaml).expect("CK-merge-OR pipeline parses");
+        let view = derive_pipeline_view(&config);
+        let i_merged = stage_idx(&view, "merged");
+
+        // `id` comes from both inputs; only `keyed` declares it a CK driver. The
+        // merged carry row is marked because ANY producer marks it.
+        let merged_id = field_by_name(&view, i_merged, "id");
+        assert_eq!(merged_id.kind, FieldKind::PassThrough);
+        assert!(
+            merged_id.is_correlation_key,
+            "a column is a CK driver on the merge if ANY input declares it one"
+        );
+
+        // Columns unique to one input keep their own (un)marked state.
+        assert!(!field_by_name(&view, i_merged, "a").is_correlation_key);
+        assert!(!field_by_name(&view, i_merged, "b").is_correlation_key);
+    }
+
+    /// #88 / #4 (emit-shadow boundary): a CK source column re-emitted by a
+    /// value-CHANGING expression becomes an `Emitted` (new identity) row and
+    /// LOSES the marker, while an identity-copy re-emit stays `PassThrough` and
+    /// KEEPS it. Two transforms over the same CK source pin both halves.
+    #[test]
+    fn correlation_key_marker_lost_on_value_changing_reemit_kept_on_identity_copy() {
+        let yaml = r#"
+pipeline:
+  name: ck_emit_shadow
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./orders.csv
+      correlation_key: order_id
+      schema:
+        - { name: order_id, type: int }
+        - { name: amount, type: int }
+  - type: transform
+    name: bumped
+    input: orders
+    config:
+      cxl: |
+        emit order_id = order_id + 1
+  - type: transform
+    name: copied
+    input: orders
+    config:
+      cxl: |
+        emit order_id = order_id
+"#;
+        let config = parse_config(yaml).expect("CK-emit-shadow pipeline parses");
+        let view = derive_pipeline_view(&config);
+
+        // Value-changing re-emit: `order_id` is recomputed → Emitted, unmarked.
+        let bumped = field_by_name(&view, stage_idx(&view, "bumped"), "order_id");
+        assert_eq!(
+            bumped.kind,
+            FieldKind::Emitted,
+            "a value-changing re-emit produces a new identity"
+        );
+        assert!(
+            !bumped.is_correlation_key,
+            "a recomputed value is no longer the CK driver, so it loses the marker"
+        );
+
+        // Identity-copy re-emit: `emit order_id = order_id` is a passthrough copy
+        // → PassThrough, marker kept.
+        let copied = field_by_name(&view, stage_idx(&view, "copied"), "order_id");
+        assert_eq!(
+            copied.kind,
+            FieldKind::PassThrough,
+            "an identity-copy re-emit carries the column unchanged"
+        );
+        assert!(
+            copied.is_correlation_key,
+            "an identity-copy re-emit keeps the CK marker"
+        );
+    }
+
     /// Full field-rows + lineage-edges pass over the canonical chain:
     /// input port {a:float} → t1 `emit b = a*2` → t2 `emit c = b + a` → output.
     /// Asserts the EXACT field set per node and the EXACT edge set.
@@ -3112,6 +3449,7 @@ nodes:
                 name: "a".to_string(),
                 kind: FieldKind::Declared,
                 ty: Some("float".to_string()),
+                ..Default::default()
             }]
         );
 
@@ -3124,11 +3462,13 @@ nodes:
                     name: "a".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: Some("float".to_string()),
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::Emitted,
                     ty: None,
+                    ..Default::default()
                 },
             ]
         );
@@ -3142,16 +3482,19 @@ nodes:
                     name: "a".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: Some("float".to_string()),
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: None,
+                    ..Default::default()
                 },
                 FieldRow {
                     name: "c".to_string(),
                     kind: FieldKind::Emitted,
                     ty: None,
+                    ..Default::default()
                 },
             ]
         );
@@ -3164,6 +3507,7 @@ nodes:
                 name: "result".to_string(),
                 kind: FieldKind::Declared,
                 ty: None,
+                ..Default::default()
             }]
         );
 
@@ -3399,6 +3743,7 @@ nodes:
                 // CXL failed to parse (the type comes from the producer, not the
                 // emit analysis).
                 ty: Some("float".to_string()),
+                ..Default::default()
             }]
         );
         // No field edge — derive OR carry — terminates at the parse-error node:
