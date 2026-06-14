@@ -4027,9 +4027,29 @@ input:-webkit-autofill:focus {
     14px 100%,
     0 calc(100% - 14px)
   );
-  padding: 10px 12px 10px 12px;
+  /* No card padding: the fixed-height `.klinx-node-header` owns the top region
+     and field rows abut it exactly, so the SVG field anchors land on the DOM
+     dots. `border-box` keeps `width:NODE_WIDTH` (inline) the real border-box
+     width despite the 1px side borders. Horizontal inset moves into the header
+     and the rows. */
+  box-sizing: border-box;
+  padding: 0;
   cursor: default;
   transition: border-color 300ms ease, box-shadow 300ms ease;
+}
+
+/* Fixed-height header region: badge + label + rust-line + subtitle. Height is
+   `FIELD_HEADER_HEIGHT - 3px` so that, together with `.klinx-node`'s 3px
+   `border-top-width` above it, the field-row region begins exactly
+   `FIELD_HEADER_HEIGHT` (= NODE_HEIGHT = 92px) below the card's border-box top —
+   which is `StageView::field_row_y`'s reference point. `overflow:hidden` clips a
+   long subtitle so the header can never grow and de-sync the geometry. Keep this
+   in lockstep with `FIELD_HEADER_HEIGHT` and the 3px border in pipeline_view.rs. */
+.klinx-node-header {
+  box-sizing: border-box;
+  height: 89px;
+  overflow: hidden;
+  padding: 10px 12px;
 }
 
 .klinx-node:hover {
@@ -4134,6 +4154,136 @@ input:-webkit-autofill:focus {
 
 .klinx-node-port--out {
   right: -5px;
+}
+
+/* ── Field-level lineage: rows, anchors, collapse, dimming ────────────────── */
+
+/* Collapse/expand toggle for field-bearing cards. Lives in the badge row so it
+   never overlaps the port squares or the drill button. */
+.klinx-node-collapse-btn {
+  margin-left: auto;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  cursor: pointer;
+  color: var(--klinx-iron);
+  font-size: 10px;
+  line-height: 1;
+}
+.klinx-node-collapse-btn:hover {
+  color: var(--klinx-bone);
+}
+
+/* Composition drill-in button. Absolutely positioned so it overlays the card
+   chrome instead of adding flow height — a composition card stays exactly
+   `NODE_HEIGHT` tall, keeping its node-level ports (placed at `NODE_HEIGHT/2`)
+   aligned. */
+.klinx-node-drill-btn {
+  position: absolute;
+  bottom: 6px;
+  right: 8px;
+  z-index: 6;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  cursor: pointer;
+  color: var(--klinx-verdigris);
+  font-size: 11px;
+  line-height: 1;
+}
+.klinx-node-drill-btn:hover {
+  color: var(--klinx-bone);
+}
+
+/* Field-row list: abuts the fixed-height header with NO margin, so the first
+   row starts exactly `FIELD_HEADER_HEIGHT` below the card top. Any margin here
+   would shift every row off its `field_row_y(i)` anchor. */
+.klinx-node-fields {
+  margin-top: 0;
+}
+
+/* Each row is EXACTLY FIELD_ROW_HEIGHT (22px) tall via border-box so its
+   mid-line sits at `field_row_y(i)` in world space; `overflow:hidden` keeps a
+   long field name from growing the row and de-syncing every row below it. Keep
+   the 22px in lockstep with FIELD_ROW_HEIGHT in pipeline_view.rs. The 12px
+   horizontal padding insets the text without moving the anchors (an absolutely
+   positioned anchor is offset from the row's padding box, not its content). */
+.klinx-node-field {
+  position: relative;
+  box-sizing: border-box;
+  height: 22px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-family: var(--klinx-font-code);
+  font-size: 11px;
+  color: var(--klinx-bone);
+}
+.klinx-node-field:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.klinx-node-field-name {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Pass-through fields read dimmer than declared/emitted ones — they are merely
+   carried, not produced here. */
+.klinx-node-field[data-field-kind="passthrough"] .klinx-node-field-name {
+  color: var(--klinx-iron);
+}
+.klinx-node-field[data-field-kind="emitted"] .klinx-node-field-name {
+  color: var(--klinx-verdigris);
+}
+
+/* Per-field LEFT/RIGHT anchor dots — the visual endpoints field cables attach
+   to. Centered on the row's mid-line via `top:50%` + `translateY(-50%)`: with
+   the row exactly FIELD_ROW_HEIGHT tall, the dot center lands at
+   `field_row_y(row_index)` in world space, matching `field_anchor_*`. The 6px
+   dot at `left:-4px`/`right:-4px` (offset from the row's padding box, which
+   spans the card content width) puts each center on `canvas_x` / `canvas_x +
+   NODE_WIDTH` — the x of `field_anchor_in`/`field_anchor_out`. */
+.klinx-node-field-anchor {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--klinx-char-raised);
+  border: 1px solid var(--klinx-border-medium);
+  transform: translateY(-50%);
+}
+.klinx-node-field-anchor--in {
+  left: -4px;
+}
+.klinx-node-field-anchor--out {
+  right: -4px;
+}
+
+/* Dimmed node — outside the hovered field's lineage closure. */
+.klinx-node--dimmed {
+  opacity: 0.3;
+  transition: opacity 150ms ease;
+}
+
+/* Node-level cable overlay fades while a field's lineage is revealed. */
+.klinx-canvas-svg--dimmed {
+  opacity: 0.15;
+  transition: opacity 150ms ease;
+}
+
+/* Field-lineage cables (drawn only on hover-reveal). Derive edges read solid;
+   passthrough carries read with a lighter dash so a reader can tell a
+   computed/renamed column from an identity carry. */
+.klinx-field-edge--passthrough {
+  opacity: 0.7;
+}
+.klinx-field-edge--derive {
+  opacity: 1;
 }
 
 /* ── 8b. Composition nodes — dashed verdigris border ─────────────────────── */

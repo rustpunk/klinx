@@ -5,13 +5,43 @@ use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 
 use crate::pipeline_view::{
-    NODE_HEIGHT, NODE_WIDTH, derive_body_view, derive_partial_pipeline_view, derive_pipeline_view,
-    fit_transform, layout_bounds,
+    FieldEdge, NODE_WIDTH, StageView, derive_body_view, derive_partial_pipeline_view,
+    derive_pipeline_view, fit_transform, layout_bounds, lineage_closure,
 };
 use crate::state::{ChannelViewMode, use_app_state};
 
-use super::connector::Connector;
+use super::HoveredField;
+use super::connector::{Connector, FieldConnector};
 use super::node::CanvasNode;
+
+/// Resolved world-space endpoints + accent for one field-lineage cable.
+///
+/// A [`FieldEdge`] names `(node, field)` endpoints; this is the geometry the
+/// SVG cable actually draws — the producer row's RIGHT anchor to the consumer
+/// row's LEFT anchor, plus the producer's `data-stage-kind` for the accent.
+#[derive(Clone, PartialEq)]
+struct FieldEdgeAnchors {
+    start: (f32, f32),
+    end: (f32, f32),
+    kind_attr: String,
+    passthrough: bool,
+}
+
+/// Resolve a [`FieldEdge`] to drawable anchor geometry, or `None` if either
+/// endpoint field is absent from its stage's rows (defensive — a well-formed
+/// edge set always resolves, but the canvas renders pre-validation input).
+fn resolve_edge_anchors(stages: &[StageView], edge: &FieldEdge) -> Option<FieldEdgeAnchors> {
+    let from = stages.get(edge.from_node)?;
+    let to = stages.get(edge.to_node)?;
+    let fi = from.field_index(&edge.from_field)?;
+    let ti = to.field_index(&edge.to_field)?;
+    Some(FieldEdgeAnchors {
+        start: from.field_anchor_out(fi),
+        end: to.field_anchor_in(ti),
+        kind_attr: from.kind.kind_attr().to_string(),
+        passthrough: edge.passthrough,
+    })
+}
 
 // ── Canvas transform constants ───────────────────────────────────────────────
 const ZOOM_MIN: f32 = 0.25;
@@ -75,10 +105,7 @@ pub fn CanvasPanel() -> Element {
             .and_then(|plan| plan.body_of(frame.body_id))
         {
             Some(body) => derive_body_view(body),
-            None => crate::pipeline_view::PipelineView {
-                stages: Vec::new(),
-                connections: Vec::new(),
-            },
+            None => crate::pipeline_view::PipelineView::default(),
         }
     } else {
         // Top-level: dispatch on view mode
@@ -89,10 +116,7 @@ pub fn CanvasPanel() -> Element {
                     Some(plan) => derive_pipeline_view(plan.config()),
                     None => match &*(state.pipeline).read() {
                         Some(config) => derive_pipeline_view(config),
-                        None => crate::pipeline_view::PipelineView {
-                            stages: Vec::new(),
-                            connections: Vec::new(),
-                        },
+                        None => crate::pipeline_view::PipelineView::default(),
                     },
                 }
             }
@@ -100,10 +124,7 @@ pub fn CanvasPanel() -> Element {
                 Some(config) => derive_pipeline_view(config),
                 None => match &*(state.partial_pipeline).read() {
                     Some(partial) => derive_partial_pipeline_view(partial),
-                    None => crate::pipeline_view::PipelineView {
-                        stages: Vec::new(),
-                        connections: Vec::new(),
-                    },
+                    None => crate::pipeline_view::PipelineView::default(),
                 },
             },
         }
@@ -119,7 +140,88 @@ pub fn CanvasPanel() -> Element {
             )
         })
         .collect();
+    let field_edges = pipeline_view.field_edges;
     let stages = pipeline_view.stages;
+
+    // ── Field-level lineage hover state ──────────────────────────────────────
+    // `Some((stage_idx, field_name))` while a field row is hovered. Provided as
+    // a canvas-scoped context so each `CanvasNode`'s field rows can set/clear it.
+    // DEFAULT (None) draws node-level connectors only — field cables appear ONLY
+    // for the hovered field's lineage closure, never the whole edge set.
+    //
+    // D2 (Phase 2, perf): a field hover writes this signal, re-rendering the
+    // whole canvas. Acceptable for Phase-1's small graphs; a future pass can
+    // scope the highlight to the affected cards/cables only.
+    let hovered_field = use_context_provider(|| HoveredField(Signal::new(None)));
+
+    // D1: clear a stale hover when the active view swaps. A hovered
+    // `(node_idx, field)` is only meaningful against the CURRENT view's
+    // `field_edges`/`stages`; after a drill in/out, a Raw↔Resolved toggle, or a
+    // composition switch, that index would re-run the closure against a
+    // different graph and highlight the wrong rows.
+    //
+    // The effect reads the signals that SELECT which view is shown — the
+    // composition document, the drill stack, the channel view mode, and the
+    // underlying pipeline/plan signals — so it re-subscribes to each and re-runs
+    // whenever any of them changes (i.e. on exactly the swaps above), resetting
+    // the hover. It does NOT read pan/zoom/hover, so a pure interaction never
+    // clears the highlight. Reading reactive signals *inside* the effect is what
+    // drives re-runs (a captured plain value would not); the write lives in the
+    // effect, never the render body.
+    use_effect(move || {
+        // Fingerprint the active view by reading its selecting signals. We read
+        // the displayed stages' identities under each branch so a composition
+        // switch (same Raw view, different document) also re-runs the effect.
+        let comp_ids: Option<Vec<String>> = state
+            .composition_view
+            .read()
+            .as_ref()
+            .map(|v| v.stages.iter().map(|s| s.id.clone()).collect());
+        let drill_key: Vec<u32> = state
+            .composition_drill_stack
+            .read()
+            .iter()
+            .map(|f| f.body_id.0)
+            .collect();
+        let mode = *state.channel_view_mode.read();
+        let pipeline_present = state.pipeline.read().is_some();
+        let plan_present = state.compiled_plan.read().is_some();
+        let partial_present = state.partial_pipeline.read().is_some();
+        // Bind the fingerprint so the reads above are retained as subscriptions.
+        let _ = (
+            &comp_ids,
+            &drill_key,
+            mode,
+            pipeline_present,
+            plan_present,
+            partial_present,
+        );
+
+        let mut hovered = hovered_field;
+        hovered.0.set(None);
+    });
+
+    // The participating field-edge indices for the hovered field: the transitive
+    // upstream+downstream closure over `field_edges`. Empty when nothing is
+    // hovered. Computed each render as a pure function of the (reactive) hover
+    // signal and the derived `field_edges`; the stage set the cables connect is
+    // resolved alongside.
+    let mut active_field_edges: Vec<(usize, FieldEdgeAnchors)> = Vec::new();
+    let mut participating_nodes: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
+    if let Some((node, field)) = &*hovered_field.0.read() {
+        let closure = lineage_closure(&field_edges, *node, field);
+        for &ei in &closure {
+            let edge = &field_edges[ei];
+            if let Some(anchors) = resolve_edge_anchors(&stages, edge) {
+                participating_nodes.insert(edge.from_node);
+                participating_nodes.insert(edge.to_node);
+                active_field_edges.push((ei, anchors));
+            }
+        }
+    }
+    // Any field hovered with a non-empty closure dims the rest of the canvas.
+    let hover_active = !active_field_edges.is_empty();
 
     // ── Transform state (local — only the canvas needs these) ────────────────
     let mut pan_x = use_signal(|| 0.0_f32);
@@ -264,9 +366,12 @@ pub fn CanvasPanel() -> Element {
             .iter()
             .map(|s| s.canvas_x + NODE_WIDTH)
             .fold(0.0_f32, f32::max);
+        // Use each card's own height: a field-bearing card extends below
+        // `NODE_HEIGHT`, so its bottom-row cables (and their hover hit-areas)
+        // would be clipped if the overlay were sized by the fixed header height.
         let max_y = stages
             .iter()
-            .map(|s| s.canvas_y + NODE_HEIGHT)
+            .map(|s| s.canvas_y + s.card_height())
             .fold(0.0_f32, f32::max);
         let min_y = stages.iter().map(|s| s.canvas_y).fold(f32::MAX, f32::min);
         // Ensure SVG covers negative-Y nodes (secondary inputs above the chain).
@@ -404,9 +509,12 @@ pub fn CanvasPanel() -> Element {
 
                 // SVG connector overlay — rendered first (lower z-index).
                 svg {
-                    class: "klinx-canvas-svg",
+                    // While a field's lineage is revealed, the node-level cables
+                    // recede so the field cables read clearly. No hover → normal.
+                    class: if hover_active { "klinx-canvas-svg klinx-canvas-svg--dimmed" } else { "klinx-canvas-svg" },
                     width: "{svg_w}",
                     height: "{svg_h}",
+                    // Node-level connectors — the DEFAULT view.
                     for (from, to) in connections {
                         Connector {
                             key: "{from.id}-{to.id}",
@@ -414,13 +522,27 @@ pub fn CanvasPanel() -> Element {
                             to,
                         }
                     }
+                    // Field-level cables — ONLY the hovered field's lineage
+                    // closure, never the whole field-edge set.
+                    for (ei, anchors) in active_field_edges {
+                        FieldConnector {
+                            key: "field-{ei}",
+                            start: anchors.start,
+                            end: anchors.end,
+                            kind_attr: anchors.kind_attr,
+                            passthrough: anchors.passthrough,
+                        }
+                    }
                 }
 
                 // Node cards
-                for stage in stages {
+                for (index, stage) in stages.into_iter().enumerate() {
                     CanvasNode {
                         key: "{stage.id}",
                         stage,
+                        index,
+                        // Dim cards outside the revealed field's lineage closure.
+                        dimmed: hover_active && !participating_nodes.contains(&index),
                     }
                 }
             }

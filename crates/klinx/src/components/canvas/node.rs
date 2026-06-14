@@ -1,11 +1,19 @@
 use dioxus::prelude::*;
 
-use crate::pipeline_view::{NODE_HEIGHT, NODE_WIDTH, StageKind, StageView};
+use crate::pipeline_view::{FieldKind, NODE_HEIGHT, NODE_WIDTH, StageKind, StageView};
 use crate::state::{CompositionDrillFrame, use_app_state};
 
+use super::HoveredField;
+
 /// A single pipeline stage rendered as a rustpunk node card on the canvas.
+///
+/// `index` is the stage's position in the current [`crate::pipeline_view::PipelineView`]
+/// — the identity a [`crate::pipeline_view::FieldEdge`] uses for its endpoints,
+/// so field-row hover reports `(index, field_name)` to the canvas's
+/// [`HoveredField`] context. `dimmed` fades the card when a field's lineage is
+/// being revealed and this node is outside that closure.
 #[component]
-pub fn CanvasNode(stage: StageView) -> Element {
+pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
     let state = use_app_state();
     let kind_attr = stage.kind.kind_attr();
     let badge = stage.kind.badge_label();
@@ -15,7 +23,15 @@ pub fn CanvasNode(stage: StageView) -> Element {
     let is_selected = state.selected_stages.read().contains(stage_id.as_str());
     let is_error = matches!(&stage.kind, StageKind::Error);
 
-    let node_class = match (is_selected, is_error, is_composition) {
+    // Local collapse state — a field-bearing card can be folded back to the
+    // compact header-only look. Local (not app-state) because collapse is a
+    // pure view concern with no model meaning. Cards without fields never show
+    // the toggle, so this signal is inert for them.
+    let mut collapsed = use_signal(|| false);
+    let has_fields = !stage.fields.is_empty();
+    let show_rows = has_fields && !*collapsed.read();
+
+    let base_class = match (is_selected, is_error, is_composition) {
         (_, _, true) => {
             if is_selected {
                 "klinx-node klinx-node--selected klinx-node--composition"
@@ -27,6 +43,13 @@ pub fn CanvasNode(stage: StageView) -> Element {
         (false, true, _) => "klinx-node klinx-node--error",
         (true, false, _) => "klinx-node klinx-node--selected",
         (false, false, _) => "klinx-node",
+    };
+    // Append the dim modifier when this node is outside the revealed field's
+    // lineage closure; an undimmed card keeps exactly its classic class string.
+    let node_class = if dimmed {
+        format!("{base_class} klinx-node--dimmed")
+    } else {
+        base_class.to_string()
     };
 
     let border_style = format!(
@@ -75,15 +98,52 @@ pub fn CanvasNode(stage: StageView) -> Element {
                 }
             },
 
-            div {
-                class: "klinx-node-badge",
-                style: "color: var(--klinx-stage-accent);",
-                span { class: "klinx-node-type-badge", "{badge}" }
+            // ── Fixed-height header region ───────────────────────────────────
+            // Exactly `FIELD_HEADER_HEIGHT` px tall (CSS), so the field-row
+            // region below it begins at that offset from the card top and the
+            // SVG world-space anchors line up with the rendered dots. `overflow`
+            // is clipped in CSS so a long subtitle never grows the header.
+            div { class: "klinx-node-header",
+                div {
+                    class: "klinx-node-badge",
+                    style: "color: var(--klinx-stage-accent);",
+                    span { class: "klinx-node-type-badge", "{badge}" }
+                    // Collapse/expand toggle — only on cards that carry field rows.
+                    if has_fields {
+                        button {
+                            class: "klinx-node-collapse-btn",
+                            title: if *collapsed.read() { "Expand fields" } else { "Collapse fields" },
+                            onclick: move |e: MouseEvent| {
+                                // Toggle only; never select. Stop propagation so the
+                                // card's onclick selection handler does not also fire.
+                                e.stop_propagation();
+                                let now = *collapsed.read();
+                                collapsed.set(!now);
+                            },
+                            if *collapsed.read() { "▸" } else { "▾" }
+                        }
+                    }
+                }
+
+                div { class: "klinx-node-label", "{stage.label}" }
+                hr { class: "klinx-rust-line" }
+                div { class: "klinx-node-subtitle", "{stage.subtitle}" }
             }
 
-            div { class: "klinx-node-label", "{stage.label}" }
-            hr { class: "klinx-rust-line" }
-            div { class: "klinx-node-subtitle", "{stage.subtitle}" }
+            // ── Field-row list (variable height) ─────────────────────────────
+            if show_rows {
+                div { class: "klinx-node-fields",
+                    for (i, field) in stage.fields.iter().enumerate() {
+                        FieldRowView {
+                            key: "{field.name}",
+                            node_index: index,
+                            row_index: i,
+                            name: field.name.clone(),
+                            kind: field.kind,
+                        }
+                    }
+                }
+            }
 
             // Drill-in button for composition nodes
             if is_composition {
@@ -110,6 +170,46 @@ pub fn CanvasNode(stage: StageView) -> Element {
                 class: "klinx-node-port klinx-node-port--out",
                 style: "top: {port_y}px;",
             }
+        }
+    }
+}
+
+/// One field row inside an expanded node card.
+///
+/// Carries LEFT and RIGHT anchor dots (the visual endpoints field-edge cables
+/// connect to) and `data-field-kind` for CSS. Hovering the row publishes
+/// `(node_index, name)` to the [`HoveredField`] context so the canvas can reveal
+/// that field's lineage closure; mouse-leave clears it.
+#[component]
+fn FieldRowView(node_index: usize, row_index: usize, name: String, kind: FieldKind) -> Element {
+    let mut hovered = use_context::<HoveredField>();
+
+    let kind_attr = match kind {
+        FieldKind::Declared => "declared",
+        FieldKind::Emitted => "emitted",
+        FieldKind::PassThrough => "passthrough",
+    };
+
+    // The row is exactly `FIELD_ROW_HEIGHT` px tall (CSS, box-sizing:border-box)
+    // and starts at `FIELD_HEADER_HEIGHT + row_index*FIELD_ROW_HEIGHT` from the
+    // card top, so its CSS-centered anchor dots (`top:50%; translateY(-50%)`)
+    // sit at exactly `field_row_y(row_index)` in world space. `row_index` is no
+    // longer read here (the geometry is fully CSS-driven) but stays on the props
+    // as the row's stable identity for keying and future per-row styling.
+    let _ = row_index;
+
+    rsx! {
+        div {
+            class: "klinx-node-field",
+            "data-field-kind": kind_attr,
+            onmouseenter: {
+                let name = name.clone();
+                move |_| hovered.0.set(Some((node_index, name.clone())))
+            },
+            onmouseleave: move |_| hovered.0.set(None),
+            span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
+            span { class: "klinx-node-field-name", "{name}" }
+            span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }
         }
     }
 }

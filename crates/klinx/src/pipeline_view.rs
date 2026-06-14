@@ -10,8 +10,35 @@ use clinker_core::config::node_header::NodeInput;
 use clinker_core::config::{PipelineConfig, PipelineNode};
 use clinker_core::yaml::Spanned;
 
+mod field_lineage;
+
+pub use field_lineage::{FieldEdge, FieldKind, FieldRow, lineage_closure};
+
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;
+
+/// Pixel height of a node card's header (badge + label + rust-line + subtitle)
+/// above the first field row, measured from the card's border-box top.
+///
+/// WHY this exact value: the SVG field-lineage overlay draws cables to
+/// world-space anchors at `field_anchor_*(i)`, while the DOM card is a flow box;
+/// the two only coincide if the header occupies a *fixed* height. The matching
+/// CSS rule is `.klinx-node-header { height: calc(FIELD_HEADER_HEIGHT - 3px) }`
+/// (the 3px is `.klinx-node`'s `border-top-width`, which sits above the header
+/// content inside the same border box), plus `overflow:hidden` so a long
+/// subtitle clips instead of growing the header. A card with no fields is just
+/// this header, so keeping it equal to [`NODE_HEIGHT`] also keeps the node-level
+/// port geometry (`port_in`/`port_out` at `NODE_HEIGHT/2`) exact.
+pub const FIELD_HEADER_HEIGHT: f32 = NODE_HEIGHT;
+
+/// Pixel pitch of one field row in an expanded node card. The row's SVG anchor
+/// sits at its vertical center, so anchor `y = canvas_y + header + i*ROW + ROW/2`.
+///
+/// WHY this exact value: it must equal `.klinx-node-field`'s CSS
+/// `height: 22px` (with `box-sizing:border-box; overflow:hidden`) so each row's
+/// rendered mid-line lands on `field_row_y(i)`. Changing one without the other
+/// silently de-syncs the cables from the dots.
+pub const FIELD_ROW_HEIGHT: f32 = 22.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StageKind {
@@ -96,6 +123,12 @@ pub struct StageView {
     pub cxl_source: Option<String>,
     pub description: Option<String>,
     pub error_message: Option<String>,
+    /// Per-field output rows for field-level lineage. Empty for nodes the
+    /// field-lineage pass does not analyze (every pipeline-path node, and
+    /// composition nodes before #66) — an empty `fields` keeps the card at its
+    /// classic [`NODE_HEIGHT`] and leaves the node-level connector geometry
+    /// (`port_in`/`port_out`) unchanged, so existing rendering is untouched.
+    pub fields: Vec<FieldRow>,
 }
 
 impl StageView {
@@ -108,6 +141,41 @@ impl StageView {
 
     pub fn port_in(&self) -> (f32, f32) {
         (self.canvas_x, self.canvas_y + NODE_HEIGHT / 2.0)
+    }
+
+    /// World-space vertical center of field row `i` inside this card.
+    ///
+    /// Rows stack below the [`FIELD_HEADER_HEIGHT`] header at the fixed
+    /// [`FIELD_ROW_HEIGHT`] pitch; the anchor sits at the row's mid-line.
+    pub fn field_row_y(&self, i: usize) -> f32 {
+        self.canvas_y + FIELD_HEADER_HEIGHT + i as f32 * FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0
+    }
+
+    /// World-space coordinate of field row `i`'s LEFT (input) anchor dot.
+    pub fn field_anchor_in(&self, i: usize) -> (f32, f32) {
+        (self.canvas_x, self.field_row_y(i))
+    }
+
+    /// World-space coordinate of field row `i`'s RIGHT (output) anchor dot.
+    pub fn field_anchor_out(&self, i: usize) -> (f32, f32) {
+        (self.canvas_x + NODE_WIDTH, self.field_row_y(i))
+    }
+
+    /// Index of the field named `name` in this stage's output rows, if present.
+    /// Used to resolve a `FieldEdge`'s endpoint to a row anchor.
+    pub fn field_index(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|f| f.name == name)
+    }
+
+    /// Full world-space card height, growing with the field-row list. A card
+    /// with no fields is exactly [`NODE_HEIGHT`] (the classic look), so this is
+    /// safe to use uniformly in bounds/layout math.
+    pub fn card_height(&self) -> f32 {
+        if self.fields.is_empty() {
+            NODE_HEIGHT
+        } else {
+            FIELD_HEADER_HEIGHT + self.fields.len() as f32 * FIELD_ROW_HEIGHT
+        }
     }
 }
 
@@ -122,11 +190,15 @@ const INPUT_Y_OFFSET: f32 = 30.0;
 /// instead of a top-anchored ragged stack.
 const COLUMN_CENTER_Y: f32 = 260.0;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PipelineView {
     pub stages: Vec<StageView>,
     /// Explicit connections between stages: `(from_idx, to_idx)`.
     pub connections: Vec<(usize, usize)>,
+    /// Field-level lineage edges between stage rows. Empty for every view
+    /// except composition views with the #66 field-lineage pass; an empty
+    /// `field_edges` means the canvas draws node-level connectors only.
+    pub field_edges: Vec<FieldEdge>,
 }
 
 /// Axis-aligned bounding box of a node layout in world coordinates.
@@ -149,21 +221,23 @@ impl LayoutBounds {
 }
 
 /// World-space bounding box enclosing every stage card, or `None` when there
-/// are no stages. Each card spans [`NODE_WIDTH`] × [`NODE_HEIGHT`] from its
-/// top-left `(canvas_x, canvas_y)`; the box is the union of all card rects.
+/// are no stages. Each card spans [`NODE_WIDTH`] × [`StageView::card_height`]
+/// from its top-left `(canvas_x, canvas_y)`; the box is the union of all card
+/// rects. A card with field rows is taller than [`NODE_HEIGHT`], so the box must
+/// read each card's own height for fit-to-view to frame the whole graph.
 pub fn layout_bounds(stages: &[StageView]) -> Option<LayoutBounds> {
     let first = stages.first()?;
     let mut b = LayoutBounds {
         min_x: first.canvas_x,
         min_y: first.canvas_y,
         max_x: first.canvas_x + NODE_WIDTH,
-        max_y: first.canvas_y + NODE_HEIGHT,
+        max_y: first.canvas_y + first.card_height(),
     };
     for s in &stages[1..] {
         b.min_x = b.min_x.min(s.canvas_x);
         b.min_y = b.min_y.min(s.canvas_y);
         b.max_x = b.max_x.max(s.canvas_x + NODE_WIDTH);
-        b.max_y = b.max_y.max(s.canvas_y + NODE_HEIGHT);
+        b.max_y = b.max_y.max(s.canvas_y + s.card_height());
     }
     Some(b)
 }
@@ -223,15 +297,26 @@ pub fn fit_transform(
 /// fan-in / fan-out DAGs. The sort is stable, so nodes that share a barycenter
 /// (or have no resolved predecessors) keep their declaration order.
 ///
-/// Spacing: within each column the ordered nodes are evenly stacked and the
+/// Spacing: within each column the ordered nodes are stacked by their own card
+/// heights (so a tall field-bearing card never overlaps the next one) and the
 /// whole column is centered on [`COLUMN_CENTER_Y`], so columns with different
 /// node counts share a midline. The returned `Vec` is indexed by node index
 /// (parallel to `cols`).
-fn layout_positions(cols: &[usize], predecessors: &[Vec<usize>]) -> Vec<(f32, f32)> {
+///
+/// `heights[i]` is node `i`'s rendered card height — [`StageView::card_height`]
+/// for field-bearing cards, [`NODE_HEIGHT`] for everything else. The pipeline
+/// path (no fields) passes [`NODE_HEIGHT`] for every node, so its layout is
+/// byte-for-byte what fixed-`NODE_HEIGHT` stacking produced before this change.
+fn layout_positions(
+    cols: &[usize],
+    predecessors: &[Vec<usize>],
+    heights: &[f32],
+) -> Vec<(f32, f32)> {
     use std::collections::BTreeMap;
 
     let n = cols.len();
     debug_assert_eq!(n, predecessors.len());
+    debug_assert_eq!(n, heights.len());
     if n == 0 {
         return Vec::new();
     }
@@ -257,13 +342,20 @@ fn layout_positions(cols: &[usize], predecessors: &[Vec<usize>]) -> Vec<(f32, f3
             ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        // Stack each card below the previous one by that card's own height plus
+        // the gap, so two field-bearing cards in one column have disjoint
+        // y-extents. The column's total height is the sum of card heights plus
+        // the gaps between them; centering keeps it on the shared midline.
         let count = ordered.len();
-        let total_h = count as f32 * NODE_HEIGHT + (count.saturating_sub(1)) as f32 * STACK_GAP;
+        let sum_h: f32 = ordered.iter().map(|&idx| heights[idx]).sum();
+        let total_h = sum_h + (count.saturating_sub(1)) as f32 * STACK_GAP;
         let top = COLUMN_CENTER_Y - total_h / 2.0;
         let x = LEFT_MARGIN + (col as f32) * (NODE_WIDTH + NODE_GAP);
+        let mut y = top;
         for (row, &idx) in ordered.iter().enumerate() {
             row_of[idx] = row;
-            positions[idx] = (x, top + row as f32 * (NODE_HEIGHT + STACK_GAP));
+            positions[idx] = (x, y);
+            y += heights[idx] + STACK_GAP;
         }
     }
 
@@ -377,17 +469,24 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
     }
 
     // Place nodes: barycenter ordering within each column + even centered
-    // spacing. `positions` is parallel to `nodes`.
-    let positions = layout_positions(&cols, &predecessors);
+    // spacing. `positions` is parallel to `nodes`. Pipeline-path nodes carry no
+    // field rows, so every card is the classic [`NODE_HEIGHT`] — the layout is
+    // identical to fixed-height stacking.
+    let heights = vec![NODE_HEIGHT; nodes.len()];
+    let positions = layout_positions(&cols, &predecessors, &heights);
     let stages: Vec<StageView> = nodes
         .iter()
         .zip(positions)
         .map(|(spanned, (x, y))| build_stage_view(&spanned.value, x, y))
         .collect();
 
+    // Pipelines (and a composition's body rendered via this path) carry no
+    // field-level lineage in Phase 1 — only `derive_composition_view` populates
+    // `field_edges`. An empty list keeps the canvas at node-level connectors.
     PipelineView {
         stages,
         connections,
+        field_edges: Vec::new(),
     }
 }
 
@@ -505,26 +604,239 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
         }
     }
 
-    let positions = layout_positions(&cols, &predecessors);
+    // ── Field-level lineage pass (#66) ───────────────────────────────────────
+    // Predecessors are now fully known, so we compute each node's output field
+    // rows and the per-field edges between them. `out_fields[u]` is the ordered
+    // output record of unified index `u`. Body nodes are visited in declaration
+    // order, which is a topological order over `predecessors` (a body node's
+    // preds are only input ports or earlier body nodes), so every predecessor's
+    // field set is final before its consumer reads it.
+    let (out_fields, field_edges) = compute_field_lineage(sig, body, n_in, n_body, &predecessors);
+
+    // Per-node card heights drive the stacking so tall field cards in one column
+    // never overlap. A node with field rows is `header + n*row` tall (matching
+    // [`StageView::card_height`]); a row-less node is the classic [`NODE_HEIGHT`].
+    let heights: Vec<f32> = out_fields
+        .iter()
+        .map(|rows| {
+            if rows.is_empty() {
+                NODE_HEIGHT
+            } else {
+                FIELD_HEADER_HEIGHT + rows.len() as f32 * FIELD_ROW_HEIGHT
+            }
+        })
+        .collect();
+    let positions = layout_positions(&cols, &predecessors, &heights);
 
     let mut stages: Vec<StageView> = Vec::with_capacity(total);
     for (i, (port, decl)) in sig.inputs.iter().enumerate() {
         let (x, y) = positions[i];
-        stages.push(input_port_stage(port, decl, x, y));
+        let mut stage = input_port_stage(port, decl, x, y);
+        stage.fields = out_fields[i].clone();
+        stages.push(stage);
     }
     for (bi, spanned) in body.iter().enumerate() {
         let (x, y) = positions[n_in + bi];
-        stages.push(build_stage_view(&spanned.value, x, y));
+        let mut stage = build_stage_view(&spanned.value, x, y);
+        stage.fields = out_fields[n_in + bi].clone();
+        stages.push(stage);
     }
     for (oi, (port, alias)) in sig.outputs.iter().enumerate() {
         let (x, y) = positions[n_in + n_body + oi];
-        stages.push(output_port_stage(port, alias, x, y));
+        let mut stage = output_port_stage(port, alias, x, y);
+        stage.fields = out_fields[n_in + n_body + oi].clone();
+        stages.push(stage);
     }
 
     PipelineView {
         stages,
         connections,
+        field_edges,
     }
+}
+
+/// Source of the CXL program for a body node, if it carries one.
+///
+/// Only Transform / Aggregate / Combine bodies hold a `cxl:` block; every other
+/// variant returns `None` and is treated as passthrough-only in Phase 1.
+fn node_cxl(node: &PipelineNode) -> Option<&str> {
+    match node {
+        PipelineNode::Transform { config, .. } => Some(config.cxl.as_ref()),
+        PipelineNode::Aggregate { config, .. } => Some(config.cxl.as_ref()),
+        PipelineNode::Combine { config, .. } => Some(config.cxl.as_ref()),
+        _ => None,
+    }
+}
+
+/// Compute per-unified-index output field rows and the field-level lineage
+/// edges for a composition.
+///
+/// Returns `(out_fields, field_edges)` where `out_fields[u]` is the ordered
+/// output record of unified index `u` (input ports, then body nodes, then
+/// output ports) and `field_edges` carries every producer-column → consumer-
+/// column relationship discovered.
+///
+/// Per-node rules (Phase 1, transforms-precise):
+/// - **Input port**: declared `schema.columns` → [`FieldKind::Declared`]
+///   (empty when the port is accept-any).
+/// - **Body node with parseable CXL**: passthrough rows for input columns not
+///   shadowed by an emit, then emitted rows — see
+///   [`field_lineage::transform_output_fields`]. Edges: each emit's let-resolved
+///   support ∩ input columns yields derive edges; each surviving passthrough
+///   column yields an identity edge.
+/// - **Body node without CXL / on parse error**: passthrough of its input
+///   columns, no lineage edges (fields still render).
+/// - **Output port**: empty (it only receives edges; the producer's row carries
+///   the field).
+///
+/// `predecessors` is the unified-index predecessor relation already built by the
+/// caller (input-port and earlier-body-node indices feeding each body node).
+fn compute_field_lineage(
+    sig: &clinker_core::config::composition::CompositionSignature,
+    body: &[Spanned<PipelineNode>],
+    n_in: usize,
+    n_body: usize,
+    predecessors: &[Vec<usize>],
+) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+    let total = n_in + n_body + sig.outputs.len();
+    let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
+    let mut field_edges: Vec<FieldEdge> = Vec::new();
+
+    // Input ports: declared columns are Declared rows. Accept-any (`schema:
+    // None`) ports contribute nothing — their downstream consumers simply have
+    // no resolvable producer columns from them.
+    for (i, decl) in sig.inputs.values().enumerate() {
+        if let Some(schema) = &decl.schema {
+            out_fields[i] = schema
+                .columns
+                .iter()
+                .map(|c| FieldRow {
+                    name: c.name.clone(),
+                    kind: FieldKind::Declared,
+                })
+                .collect();
+        }
+    }
+
+    // Body nodes in declaration (topological) order.
+    for (bi, spanned) in body.iter().enumerate() {
+        let idx = n_in + bi;
+        let node = &spanned.value;
+
+        // Ordered, de-duplicated union of predecessor output column names, with
+        // the producer's unified index recorded per column so edges can name a
+        // concrete source. First producer wins for a duplicated column name.
+        let mut input_cols: Vec<String> = Vec::new();
+        let mut producer_of: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for &p in &predecessors[idx] {
+            for row in &out_fields[p] {
+                if !producer_of.contains_key(&row.name) {
+                    producer_of.insert(row.name.clone(), p);
+                    input_cols.push(row.name.clone());
+                }
+            }
+        }
+
+        // Three cases, deliberately distinct:
+        //  - no CXL at all (Source/Route/Output/… in P1): passthrough rows +
+        //    safe identity carries — the node forwards its input columns.
+        //  - CXL present but unparseable: passthrough rows, NO edges — we will
+        //    not infer lineage from a partial/garbled AST (per the spec's
+        //    "no edges for it" rule on parse error).
+        //  - CXL parses: full transform-precise rows + derive/identity edges.
+        let cxl = node_cxl(node);
+        match cxl.map(field_lineage::parse_clean) {
+            Some(Some(program)) => {
+                // Output rows: passthrough (unshadowed inputs) then emitted.
+                out_fields[idx] = field_lineage::transform_output_fields(&input_cols, &program);
+
+                // Per-emit let-resolved support, in emit order. The order is
+                // load-bearing for intra-node chained emits below.
+                let supports = field_lineage::emit_supports(&program);
+                let emitted: std::collections::HashSet<&str> =
+                    supports.iter().map(|(name, _)| name.as_str()).collect();
+
+                // Derive edges: each emit's let-resolved support resolved to its
+                // producer. A support column is one of:
+                //  - a predecessor output column → INTER-node derive edge, OR
+                //  - a field this same node emitted in an EARLIER statement →
+                //    INTRA-node derive edge (`emit c = b + 1.0` after `emit b`),
+                //    so chained emits form a same-card cable the hover closure
+                //    walks transitively. `emitted_so_far` tracks the prior emits
+                //    in declaration order; we record the current target only
+                //    after its own edges, so an emit never reads itself.
+                // A support column that is neither resolves to nothing (it names
+                // no producible field — e.g. an accept-any input).
+                let mut emitted_so_far: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for (target, support) in &supports {
+                    for col in support {
+                        if let Some(&p) = producer_of.get(col) {
+                            field_edges.push(FieldEdge {
+                                from_node: p,
+                                from_field: col.clone(),
+                                to_node: idx,
+                                to_field: target.clone(),
+                                passthrough: false,
+                            });
+                        } else if emitted_so_far.contains(col.as_str()) {
+                            field_edges.push(FieldEdge {
+                                from_node: idx,
+                                from_field: col.clone(),
+                                to_node: idx,
+                                to_field: target.clone(),
+                                passthrough: false,
+                            });
+                        }
+                    }
+                    emitted_so_far.insert(target.as_str());
+                }
+
+                // Identity edges: each input column carried through unchanged
+                // (not shadowed by an emit of the same name).
+                for col in &input_cols {
+                    if !emitted.contains(col.as_str())
+                        && let Some(&p) = producer_of.get(col)
+                    {
+                        field_edges.push(FieldEdge {
+                            from_node: p,
+                            from_field: col.clone(),
+                            to_node: idx,
+                            to_field: col.clone(),
+                            passthrough: true,
+                        });
+                    }
+                }
+            }
+            Some(None) => {
+                // CXL present but it failed to parse: render passthrough rows so
+                // the card still shows its shape, but emit NO lineage edges — a
+                // garbled AST can't be trusted to compute lineage.
+                out_fields[idx] = field_lineage::passthrough_output_fields(&input_cols);
+            }
+            None => {
+                // No CXL block at all: the node forwards its input columns. Both
+                // the rows and the identity carries are safe to draw.
+                out_fields[idx] = field_lineage::passthrough_output_fields(&input_cols);
+                for col in &input_cols {
+                    if let Some(&p) = producer_of.get(col) {
+                        field_edges.push(FieldEdge {
+                            from_node: p,
+                            from_field: col.clone(),
+                            to_node: idx,
+                            to_field: col.clone(),
+                            passthrough: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Output ports keep an empty output record (they receive edges only); the
+    // producing body node's row already carries the field downstream.
+    (out_fields, field_edges)
 }
 
 /// Synthetic boundary node for a composition input port.
@@ -549,6 +861,7 @@ fn input_port_stage(name: &str, decl: &PortDecl, x: f32, y: f32) -> StageView {
         cxl_source: None,
         description: decl.description.clone(),
         error_message: None,
+        fields: Vec::new(),
     }
 }
 
@@ -565,6 +878,7 @@ fn output_port_stage(name: &str, alias: &OutputAlias, x: f32, y: f32) -> StageVi
         cxl_source: None,
         description: alias.description.clone(),
         error_message: None,
+        fields: Vec::new(),
     }
 }
 
@@ -586,6 +900,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             cxl_source: None,
             description: header.description.clone(),
             error_message: None,
+            fields: Vec::new(),
         },
         PipelineNode::Transform {
             header,
@@ -602,6 +917,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 cxl_source: Some(cxl_src.to_string()),
                 description: header.description.clone(),
                 error_message: None,
+                fields: Vec::new(),
             }
         }
         PipelineNode::Aggregate {
@@ -624,6 +940,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 cxl_source: Some(cxl_src.to_string()),
                 description: header.description.clone(),
                 error_message: None,
+                fields: Vec::new(),
             }
         }
         PipelineNode::Route {
@@ -646,6 +963,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 cxl_source: None,
                 description: header.description.clone(),
                 error_message: None,
+                fields: Vec::new(),
             }
         }
         PipelineNode::Merge { header, .. } => StageView {
@@ -658,6 +976,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             cxl_source: None,
             description: header.description.clone(),
             error_message: None,
+            fields: Vec::new(),
         },
         PipelineNode::Combine {
             header,
@@ -674,6 +993,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 cxl_source: Some(cxl_src.to_string()),
                 description: header.description.clone(),
                 error_message: None,
+                fields: Vec::new(),
             }
         }
         PipelineNode::Output {
@@ -689,6 +1009,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             cxl_source: None,
             description: header.description.clone(),
             error_message: None,
+            fields: Vec::new(),
         },
         PipelineNode::Composition { header, r#use, .. } => StageView {
             id: header.name.clone(),
@@ -700,6 +1021,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             cxl_source: None,
             description: header.description.clone(),
             error_message: None,
+            fields: Vec::new(),
         },
     }
 }
@@ -783,6 +1105,7 @@ pub fn derive_partial_pipeline_view(
                     cxl_source: Some(t.cxl_source().to_string()),
                     description: t.description.clone(),
                     error_message: None,
+                    fields: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -796,6 +1119,7 @@ pub fn derive_partial_pipeline_view(
                     cxl_source: None,
                     description: None,
                     error_message: Some(message.clone()),
+                    fields: Vec::new(),
                 });
             }
         }
@@ -833,6 +1157,7 @@ pub fn derive_partial_pipeline_view(
                     cxl_source: None,
                     description: None,
                     error_message: None,
+                    fields: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -846,6 +1171,7 @@ pub fn derive_partial_pipeline_view(
                     cxl_source: None,
                     description: None,
                     error_message: Some(message.clone()),
+                    fields: Vec::new(),
                 });
             }
         }
@@ -873,6 +1199,7 @@ pub fn derive_partial_pipeline_view(
                     cxl_source: None,
                     description: None,
                     error_message: None,
+                    fields: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -886,6 +1213,7 @@ pub fn derive_partial_pipeline_view(
                     cxl_source: None,
                     description: None,
                     error_message: Some(message.clone()),
+                    fields: Vec::new(),
                 });
             }
         }
@@ -901,6 +1229,7 @@ pub fn derive_partial_pipeline_view(
     PipelineView {
         stages,
         connections,
+        field_edges: Vec::new(),
     }
 }
 
@@ -1003,6 +1332,7 @@ pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) 
             cxl_source: None,
             description: None,
             error_message: None,
+            fields: Vec::new(),
         });
     }
 
@@ -1022,7 +1352,9 @@ pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) 
         }
     }
 
-    let positions = layout_positions(&slot_cols, &predecessors);
+    // Drilled-in body nodes carry no field rows, so every card is [`NODE_HEIGHT`].
+    let heights = vec![NODE_HEIGHT; stages.len()];
+    let positions = layout_positions(&slot_cols, &predecessors, &heights);
     for (stage, (x, y)) in stages.iter_mut().zip(positions) {
         stage.canvas_x = x;
         stage.canvas_y = y;
@@ -1031,6 +1363,7 @@ pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) 
     PipelineView {
         stages,
         connections,
+        field_edges: Vec::new(),
     }
 }
 
@@ -1385,6 +1718,317 @@ nodes:
             "output whose ref names no body node is drawn but unconnected"
         );
     }
+
+    /// Index of a stage by label (panics if absent — tests assert presence).
+    fn stage_idx(view: &PipelineView, label: &str) -> usize {
+        view.stages
+            .iter()
+            .position(|s| s.label == label)
+            .unwrap_or_else(|| panic!("stage {label} present"))
+    }
+
+    /// Full field-rows + lineage-edges pass over the canonical chain:
+    /// input port {a:float} → t1 `emit b = a*2` → t2 `emit c = b + a` → output.
+    /// Asserts the EXACT field set per node and the EXACT edge set.
+    #[test]
+    fn composition_fields_and_lineage() {
+        let yaml = r#"_compose:
+  name: chain
+  inputs:
+    src:
+      schema:
+        - { name: a, type: float }
+  outputs:
+    result: t2
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: t1
+    input: src
+    config:
+      cxl: |
+        emit b = a * 2.0
+  - type: transform
+    name: t2
+    input: t1
+    config:
+      cxl: |
+        emit c = b + a
+"#;
+        let view = derive_composition_view(&parse_comp(yaml));
+
+        let i_src = stage_idx(&view, "src");
+        let i_t1 = stage_idx(&view, "t1");
+        let i_t2 = stage_idx(&view, "t2");
+        let i_out = stage_idx(&view, "result");
+
+        // Input port: the one declared column, kind Declared.
+        assert_eq!(
+            view.stages[i_src].fields,
+            vec![FieldRow {
+                name: "a".to_string(),
+                kind: FieldKind::Declared
+            }]
+        );
+
+        // t1: passthrough `a` (not shadowed) then emitted `b`.
+        assert_eq!(
+            view.stages[i_t1].fields,
+            vec![
+                FieldRow {
+                    name: "a".to_string(),
+                    kind: FieldKind::PassThrough
+                },
+                FieldRow {
+                    name: "b".to_string(),
+                    kind: FieldKind::Emitted
+                },
+            ]
+        );
+
+        // t2: passthrough `a`, `b` (input order) then emitted `c`.
+        assert_eq!(
+            view.stages[i_t2].fields,
+            vec![
+                FieldRow {
+                    name: "a".to_string(),
+                    kind: FieldKind::PassThrough
+                },
+                FieldRow {
+                    name: "b".to_string(),
+                    kind: FieldKind::PassThrough
+                },
+                FieldRow {
+                    name: "c".to_string(),
+                    kind: FieldKind::Emitted
+                },
+            ]
+        );
+
+        // Output port: receives edges only, carries no own row.
+        assert!(view.stages[i_out].fields.is_empty());
+
+        // Exact edge set. Build the expected set and compare as multisets.
+        let derive = |fn_: usize, ff: &str, tn: usize, tf: &str| FieldEdge {
+            from_node: fn_,
+            from_field: ff.to_string(),
+            to_node: tn,
+            to_field: tf.to_string(),
+            passthrough: false,
+        };
+        let pass = |fn_: usize, ff: &str, tn: usize, tf: &str| FieldEdge {
+            from_node: fn_,
+            from_field: ff.to_string(),
+            to_node: tn,
+            to_field: tf.to_string(),
+            passthrough: true,
+        };
+        let expected = [
+            // t1: b derives from a; a carries through.
+            derive(i_src, "a", i_t1, "b"),
+            pass(i_src, "a", i_t1, "a"),
+            // t2: c derives from b and a; a, b carry through.
+            derive(i_t1, "b", i_t2, "c"),
+            derive(i_t1, "a", i_t2, "c"),
+            pass(i_t1, "a", i_t2, "a"),
+            pass(i_t1, "b", i_t2, "b"),
+        ];
+        assert_eq!(
+            view.field_edges.len(),
+            expected.len(),
+            "exact edge count; got {:?}",
+            view.field_edges
+        );
+        for e in &expected {
+            assert!(
+                view.field_edges.contains(e),
+                "missing expected field edge {e:?} in {:?}",
+                view.field_edges
+            );
+        }
+    }
+
+    /// Intra-node chained emits: a later emit reading an EARLIER emit's output
+    /// of the SAME node gets a same-node derive edge, and the hover closure
+    /// chains through it. Here `emit b = a*2` then `emit c = b + 1` produces both
+    /// the inter-node edge a→b and the intra-node edge b→c (both on node `t`),
+    /// so hovering `c` reveals the full a→b→c lineage.
+    #[test]
+    fn intra_node_chained_emit_lineage() {
+        let yaml = r#"_compose:
+  name: chained
+  inputs:
+    src:
+      schema:
+        - { name: a, type: float }
+  outputs:
+    result: t
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: t
+    input: src
+    config:
+      cxl: |
+        emit b = a * 2.0
+        emit c = b + 1.0
+"#;
+        let view = derive_composition_view(&parse_comp(yaml));
+        let i_src = stage_idx(&view, "src");
+        let i_t = stage_idx(&view, "t");
+
+        // Inter-node derive: `b` reads input column `a` from the source.
+        let a_to_b = FieldEdge {
+            from_node: i_src,
+            from_field: "a".to_string(),
+            to_node: i_t,
+            to_field: "b".to_string(),
+            passthrough: false,
+        };
+        // Intra-node derive: `c` reads `b`, an EARLIER emit of the SAME node `t`.
+        let b_to_c = FieldEdge {
+            from_node: i_t,
+            from_field: "b".to_string(),
+            to_node: i_t,
+            to_field: "c".to_string(),
+            passthrough: false,
+        };
+        assert!(
+            view.field_edges.contains(&a_to_b),
+            "inter-node a→b derive edge missing: {:?}",
+            view.field_edges
+        );
+        assert!(
+            view.field_edges.contains(&b_to_c),
+            "intra-node b→c derive edge missing: {:?}",
+            view.field_edges
+        );
+        // `c`'s support is the column `b`, not the let-free input `a` directly —
+        // so there must be NO direct a→c edge (the chain runs a→b→c).
+        let a_to_c = FieldEdge {
+            from_node: i_src,
+            from_field: "a".to_string(),
+            to_node: i_t,
+            to_field: "c".to_string(),
+            passthrough: false,
+        };
+        assert!(
+            !view.field_edges.contains(&a_to_c),
+            "c must chain through b, not derive from a directly: {:?}",
+            view.field_edges
+        );
+
+        // Hover closure on `c` walks the full chain: it must include BOTH the
+        // a→b and b→c edge indices (upstream-transitive), proving the intra-node
+        // edge participates in the same closure the canvas highlights.
+        let closure = lineage_closure(&view.field_edges, i_t, "c");
+        let idx_of = |e: &FieldEdge| view.field_edges.iter().position(|x| x == e).unwrap();
+        assert!(
+            closure.contains(&idx_of(&b_to_c)),
+            "closure of c must contain b→c: {closure:?}"
+        );
+        assert!(
+            closure.contains(&idx_of(&a_to_b)),
+            "closure of c must transitively contain a→b: {closure:?}"
+        );
+    }
+
+    /// `let` chains resolve to base input columns: `let w = a + 1.0; emit y = w
+    /// * 2.0` makes `y` derive from `a`, NOT from `w`. The composition view must
+    /// therefore draw a derive edge from the input column `a`, never from `w`.
+    #[test]
+    fn let_chain_resolution() {
+        let yaml = r#"_compose:
+  name: lets
+  inputs:
+    src:
+      schema:
+        - { name: a, type: float }
+  outputs:
+    result: t
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: t
+    input: src
+    config:
+      cxl: |
+        let w = a + 1.0
+        emit y = w * 2.0
+"#;
+        let view = derive_composition_view(&parse_comp(yaml));
+        let i_src = stage_idx(&view, "src");
+        let i_t = stage_idx(&view, "t");
+
+        // y's lineage points at the input column `a` (let `w` is resolved away).
+        let derive_a_y = FieldEdge {
+            from_node: i_src,
+            from_field: "a".to_string(),
+            to_node: i_t,
+            to_field: "y".to_string(),
+            passthrough: false,
+        };
+        assert!(
+            view.field_edges.contains(&derive_a_y),
+            "y must derive from input column a, got {:?}",
+            view.field_edges
+        );
+        // No edge may name `w` (a let, not a column) at either endpoint.
+        assert!(
+            !view
+                .field_edges
+                .iter()
+                .any(|e| e.from_field == "w" || e.to_field == "w"),
+            "no field edge may reference the let name `w`: {:?}",
+            view.field_edges
+        );
+    }
+
+    /// A body node with invalid CXL still renders its fields (passthrough of its
+    /// input columns) and produces NO lineage edges for that node — never a
+    /// panic.
+    #[test]
+    fn lineage_skipped_on_parse_error() {
+        let yaml = r#"_compose:
+  name: broken
+  inputs:
+    src:
+      schema:
+        - { name: a, type: float }
+  outputs: {}
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: bad
+    input: src
+    config:
+      cxl: |
+        emit y = a +
+"#;
+        let view = derive_composition_view(&parse_comp(yaml));
+        let _i_src = stage_idx(&view, "src");
+        let i_bad = stage_idx(&view, "bad");
+
+        // Fields still render: the input column carried through as passthrough.
+        assert_eq!(
+            view.stages[i_bad].fields,
+            vec![FieldRow {
+                name: "a".to_string(),
+                kind: FieldKind::PassThrough
+            }]
+        );
+        // No field edge — derive OR carry — terminates at the parse-error node:
+        // a garbled CXL AST is never trusted to compute any lineage.
+        assert!(
+            view.field_edges.iter().all(|e| e.to_node != i_bad),
+            "a parse-error node yields no field edges at all: {:?}",
+            view.field_edges
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1404,7 +2048,8 @@ mod layout_tests {
         // Three nodes: one in column 0, two in column 1 (a fan-out).
         let cols = vec![0, 1, 1];
         let preds = vec![vec![], vec![0], vec![0]];
-        let pos = layout_positions(&cols, &preds);
+        let heights = vec![NODE_HEIGHT; 3];
+        let pos = layout_positions(&cols, &preds, &heights);
 
         assert_eq!(pos[0].0, col_x(0));
         assert_eq!(pos[1].0, col_x(1));
@@ -1423,7 +2068,7 @@ mod layout_tests {
     /// center minus half the card height).
     #[test]
     fn single_node_centered_on_midline() {
-        let pos = layout_positions(&[0], &[vec![]]);
+        let pos = layout_positions(&[0], &[vec![]], &[NODE_HEIGHT]);
         assert_eq!(pos.len(), 1);
         assert!((pos[0].1 - (COLUMN_CENTER_Y - NODE_HEIGHT / 2.0)).abs() < 0.01);
     }
@@ -1441,7 +2086,8 @@ mod layout_tests {
         // Indices: 0=a, 1=b (column 0); 2=feeds_b, 3=feeds_a (column 1).
         let cols = vec![0, 0, 1, 1];
         let preds = vec![vec![], vec![], vec![1], vec![0]];
-        let pos = layout_positions(&cols, &preds);
+        let heights = vec![NODE_HEIGHT; 4];
+        let pos = layout_positions(&cols, &preds, &heights);
 
         // Node 3 (fed by a, the top input) should end up above node 2.
         assert!(
@@ -1539,6 +2185,86 @@ nodes:
         assert_eq!(b.max_y, 100.0 + NODE_HEIGHT);
     }
 
+    /// Two field-bearing cards in the SAME column must not overlap: their
+    /// world-space y-extents `[canvas_y, canvas_y + card_height)` are disjoint.
+    /// Stacking by each card's own `card_height` (not a fixed `NODE_HEIGHT`) is
+    /// what guarantees this once a card grows with its field-row list.
+    #[test]
+    fn field_cards_in_one_column_do_not_overlap() {
+        use clinker_core::config::composition::CompositionFile;
+        use clinker_core::span::FileId;
+        use std::num::NonZeroU32;
+
+        // One input port fans out to two independent transforms, so both land
+        // in column 1. `wide` emits three fields (tall card); `narrow` emits
+        // one (short card) — distinct heights exercise per-card stacking.
+        let yaml = r#"_compose:
+  name: fanout
+  inputs:
+    src:
+      schema:
+        - { name: a, type: float }
+  outputs: {}
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: wide
+    input: src
+    config:
+      cxl: |
+        emit p = a + 1.0
+        emit q = a + 2.0
+        emit r = a + 3.0
+  - type: transform
+    name: narrow
+    input: src
+    config:
+      cxl: |
+        emit s = a * 2.0
+"#;
+        let comp = CompositionFile::parse(
+            yaml,
+            FileId::new(NonZeroU32::new(1).expect("nonzero")),
+            std::path::PathBuf::new(),
+        )
+        .expect("composition parses");
+        let view = derive_composition_view(&comp);
+
+        let stage = |label: &str| {
+            view.stages
+                .iter()
+                .find(|s| s.label == label)
+                .unwrap_or_else(|| panic!("stage {label} present"))
+        };
+        let wide = stage("wide");
+        let narrow = stage("narrow");
+
+        // Both fanned-out transforms share column 1 (same x).
+        assert_eq!(wide.canvas_x, narrow.canvas_x, "both cards in one column");
+
+        // The taller card carries more rows, so the heights genuinely differ —
+        // a fixed-NODE_HEIGHT stack would have collided the tall card into the
+        // next one. (wide: a passthrough + p,q,r = 4 rows; narrow: a + s = 2.)
+        assert!(wide.card_height() > narrow.card_height());
+
+        // Disjoint y-extents: the upper card's bottom is at or above the lower
+        // card's top. Order is unknown (barycenter ties), so test both ways.
+        let (top, bottom) = if wide.canvas_y <= narrow.canvas_y {
+            (wide, narrow)
+        } else {
+            (narrow, wide)
+        };
+        assert!(
+            top.canvas_y + top.card_height() <= bottom.canvas_y,
+            "cards overlap: top [{}, {}) intersects bottom [{}, {})",
+            top.canvas_y,
+            top.canvas_y + top.card_height(),
+            bottom.canvas_y,
+            bottom.canvas_y + bottom.card_height(),
+        );
+    }
+
     fn stage_at(x: f32, y: f32) -> StageView {
         StageView {
             id: format!("{x}_{y}"),
@@ -1550,6 +2276,7 @@ nodes:
             cxl_source: None,
             description: None,
             error_message: None,
+            fields: Vec::new(),
         }
     }
 
