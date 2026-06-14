@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::pipeline_view::StageView;
+use crate::pipeline_view::{FieldEdgeKind, StageView};
 
 /// Three-layer SVG connector between two adjacent pipeline stages.
 ///
@@ -50,32 +50,34 @@ pub fn Connector(props: ConnectorProps) -> Element {
 
 /// Field-level connector between two explicit anchor points.
 ///
-/// Used only on hover-reveal: a single field's lineage closure draws one of
-/// these per participating [`crate::pipeline_view::FieldEdge`], from the
-/// producer row's RIGHT anchor to the consumer row's LEFT anchor. `passthrough`
-/// drives the visual (a carry vs. a derive); `dimmed` fades edges outside the
-/// hovered closure.
+/// Used only on hover-reveal: a hover scope's edge set draws one of these per
+/// participating [`crate::pipeline_view::FieldEdge`], from the producer row's
+/// RIGHT anchor to the consumer row's LEFT anchor. `kind` drives the visual —
+/// the three relationship flavours read as distinct stroke colours (#72).
 #[derive(Props, Clone, PartialEq)]
 pub struct FieldConnectorProps {
     pub start: (f32, f32),
     pub end: (f32, f32),
     /// `data-stage-kind` of the producer node, so the cable inherits its accent.
     pub kind_attr: String,
-    /// Identity carry (`col` → same `col`) vs. a derivation. Distinguishes the
-    /// CSS treatment of the two field-edge flavours.
-    pub passthrough: bool,
+    /// The relationship the edge expresses ([`FieldEdgeKind`]) — selects the CSS
+    /// class and therefore the stroke colour: pure carry, accessed carry, or
+    /// derive.
+    pub kind: FieldEdgeKind,
 }
 
 #[component]
 pub fn FieldConnector(props: FieldConnectorProps) -> Element {
     let (sx, sy) = props.start;
     let (tx, ty) = props.end;
-    // A passthrough carry reads as a quieter line than a compute/derive edge.
-    let extra_class = if props.passthrough {
-        "klinx-field-edge klinx-field-edge--passthrough".to_string()
-    } else {
-        "klinx-field-edge klinx-field-edge--derive".to_string()
-    };
+    // Each relationship kind reads as a distinct hue: a pure pass-through is the
+    // quietest, an accessed carry a warm highlight, a derive the active accent.
+    let extra_class = match props.kind {
+        FieldEdgeKind::Passthrough => "klinx-field-edge klinx-field-edge--passthrough",
+        FieldEdgeKind::Access => "klinx-field-edge klinx-field-edge--access",
+        FieldEdgeKind::Derive => "klinx-field-edge klinx-field-edge--derive",
+    }
+    .to_string();
 
     rsx! {
         ConnectorPath {
@@ -86,10 +88,10 @@ pub fn FieldConnector(props: FieldConnectorProps) -> Element {
             kind_attr: props.kind_attr.clone(),
             extra_class,
             // Field cables do NOT inline a stroke: the CSS classes
-            // `.klinx-field-edge--derive` / `--passthrough` own the stroke COLOUR
-            // (set on the `<g>`, inherited by each path), so passthrough vs.
-            // derive read as distinct hues — not just distinct opacity. An inline
-            // stroke would override the class and erase that distinction.
+            // `.klinx-field-edge--derive` / `--access` / `--passthrough` own the
+            // stroke COLOUR (set on the `<g>`, inherited by each path), so the
+            // three kinds read as distinct hues — not just distinct opacity. An
+            // inline stroke would override the class and erase that distinction.
             inline_accent_stroke: false,
         }
     }

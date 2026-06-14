@@ -12,7 +12,10 @@ use clinker_plan::yaml::Spanned;
 
 mod field_lineage;
 
-pub use field_lineage::{FieldEdge, FieldKind, FieldRow, group_endpoints_by_node, lineage_closure};
+pub use field_lineage::{
+    FieldEdge, FieldEdgeKind, FieldKind, FieldRow, field_lineage_full, group_endpoints_by_node,
+    lineage_closure, node_carry_edges,
+};
 
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;
@@ -1234,6 +1237,31 @@ fn compute_field_lineage(
                 // so their edge reads as an identity carry.
                 let copies = field_lineage::emit_copy_targets(&program, &input_cols);
 
+                // Columns read by a COMPUTED or renamed emit (a pure copy is
+                // excluded, so `emit c = src.c` does not mark `c` accessed by its
+                // own identity copy). A carried column that ALSO appears here is
+                // an `Access` carry — it rides through unchanged AND feeds a
+                // computation — as opposed to a pure `Passthrough` (#72). The
+                // exclusion deviates from the research's literal "union of all
+                // emit supports" wording on purpose: a pure copy is not an
+                // "access" of the column it copies. (No effect on the canonical
+                // value_tier fixture, which has no copy emits.)
+                let used_cols: std::collections::HashSet<&str> = supports
+                    .iter()
+                    .filter(|(target, _)| !copies.contains(target.as_str()))
+                    .flat_map(|(_, support)| support.iter().map(String::as_str))
+                    .collect();
+                // Classify one identity (`c → c`) carry of column `col`: an
+                // `Access` carry when `col` also feeds a computed emit, else a
+                // pure `Passthrough`.
+                let carry_kind = |col: &str| {
+                    if used_cols.contains(col) {
+                        FieldEdgeKind::Access
+                    } else {
+                        FieldEdgeKind::Passthrough
+                    }
+                };
+
                 // Derive edges: each emit's let-resolved support resolved to its
                 // producer. A support column is one of:
                 //  - a predecessor output column → INTER-node derive edge, OR
@@ -1249,9 +1277,15 @@ fn compute_field_lineage(
                     std::collections::HashSet::new();
                 for (target, support) in &supports {
                     // An identity-copy emit carries its column unchanged, so its
-                    // edge is a passthrough; a computed emit derives its target.
+                    // edge is a carry (Passthrough/Access); a computed or renamed
+                    // emit derives its target.
                     let carried = copies.contains(target.as_str());
                     for col in support {
+                        let kind = if carried {
+                            carry_kind(col)
+                        } else {
+                            FieldEdgeKind::Derive
+                        };
                         if let Some(producers) = producers_of.get(col) {
                             // A support column present in several inputs derives
                             // its target from each of them (#67).
@@ -1261,7 +1295,7 @@ fn compute_field_lineage(
                                     from_field: col.clone(),
                                     to_node: idx,
                                     to_field: target.clone(),
-                                    passthrough: carried,
+                                    kind,
                                 });
                             }
                         } else if emitted_so_far.contains(col.as_str()) {
@@ -1270,7 +1304,7 @@ fn compute_field_lineage(
                                 from_field: col.clone(),
                                 to_node: idx,
                                 to_field: target.clone(),
-                                passthrough: carried,
+                                kind,
                             });
                         }
                     }
@@ -1284,13 +1318,17 @@ fn compute_field_lineage(
                     if !emitted.contains(col.as_str())
                         && let Some(producers) = producers_of.get(col)
                     {
+                        // An unshadowed carried column is a pure Passthrough
+                        // unless it also feeds a computed emit, which makes it an
+                        // Access carry (#72).
+                        let kind = carry_kind(col);
                         for &p in producers {
                             field_edges.push(FieldEdge {
                                 from_node: p,
                                 from_field: col.clone(),
                                 to_node: idx,
                                 to_field: col.clone(),
-                                passthrough: true,
+                                kind,
                             });
                         }
                     }
@@ -1308,7 +1346,8 @@ fn compute_field_lineage(
                 out_fields[idx] = field_lineage::passthrough_output_fields(&input_cols);
                 for col in &input_cols {
                     // A CXL-less fan-in (Merge) carries a shared column from every
-                    // input that produced it (#67).
+                    // input that produced it (#67). With no emits on the node,
+                    // every carry is a pure pass-through (#72).
                     if let Some(producers) = producers_of.get(col) {
                         for &p in producers {
                             field_edges.push(FieldEdge {
@@ -1316,7 +1355,7 @@ fn compute_field_lineage(
                                 from_field: col.clone(),
                                 to_node: idx,
                                 to_field: col.clone(),
-                                passthrough: true,
+                                kind: FieldEdgeKind::Passthrough,
                             });
                         }
                     }
@@ -1428,13 +1467,20 @@ fn composition_field_lineage(
         let Some(producer_field) = producer_field else {
             continue;
         };
-        let passthrough = producer_field == *port;
+        // A same-named port surfaces its producer column unchanged (a pure
+        // pass-through — a port reads nothing, so never an Access carry); a
+        // differently-named port is a rename → derive.
+        let kind = if producer_field == *port {
+            FieldEdgeKind::Passthrough
+        } else {
+            FieldEdgeKind::Derive
+        };
         field_edges.push(FieldEdge {
             from_node: producer,
             from_field: producer_field,
             to_node: out_idx,
             to_field: port.to_string(),
-            passthrough,
+            kind,
         });
     }
 
@@ -2896,7 +2942,7 @@ nodes:
             from_field: "a".to_string(),
             to_node: i_t,
             to_field: "c".to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         assert!(
             view.field_edges.contains(&derive_a_c),
@@ -2981,20 +3027,21 @@ nodes:
         let i_joined = stage_idx(&view, "joined");
 
         // The join key `product_code` lives in BOTH inputs, so it carries from
-        // each — two passthrough edges, not one (the #67 fix).
+        // each — two carry edges, not one (the #67 fix). It is a pure
+        // Passthrough: it is not read by the node's emit (`available = on_hand`).
         let carry_from_products = FieldEdge {
             from_node: i_products,
             from_field: "product_code".to_string(),
             to_node: i_joined,
             to_field: "product_code".to_string(),
-            passthrough: true,
+            kind: FieldEdgeKind::Passthrough,
         };
         let carry_from_inventory = FieldEdge {
             from_node: i_inventory,
             from_field: "product_code".to_string(),
             to_node: i_joined,
             to_field: "product_code".to_string(),
-            passthrough: true,
+            kind: FieldEdgeKind::Passthrough,
         };
         assert!(
             view.field_edges.contains(&carry_from_products),
@@ -3025,7 +3072,7 @@ nodes:
             from_field: "on_hand".to_string(),
             to_node: i_joined,
             to_field: "available".to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         assert!(
             view.field_edges.contains(&derive_available),
@@ -3055,6 +3102,125 @@ nodes:
                 && closure.contains(&idx_of(&carry_from_inventory)),
             "hovering the join key reveals carries from every input, got {closure:?}"
         );
+    }
+
+    /// #72 classifier acceptance: the canonical `value_tier` node yields one
+    /// edge of EACH kind, and a self-shadowing computed emit
+    /// (`emit status = status + 1`) stays a `Derive` with its row `Emitted` —
+    /// never an `Access` carry.
+    ///
+    /// Source emits `line_total, status, shipping_method`; the node runs
+    /// `emit value_tier = line_total * 2.0` and `emit status = status + 1`:
+    ///   - `line_total → value_tier`         : Derive (input feeds a compute)
+    ///   - `line_total → line_total`          : Access (carried AND feeds value_tier)
+    ///   - `shipping_method → shipping_method`: Passthrough (carried, read by none)
+    ///   - `status → status`                  : Derive (self-shadow compute, no carry)
+    #[test]
+    fn field_edge_kind_classifier_value_tier_fixture() {
+        let yaml = r#"
+pipeline:
+  name: value_tier_kinds
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./orders.csv
+      schema:
+        - { name: line_total, type: float }
+        - { name: status, type: string }
+        - { name: shipping_method, type: string }
+  - type: transform
+    name: tier
+    input: orders
+    config:
+      cxl: |
+        emit value_tier = line_total * 2.0
+        emit status = status + 1
+"#;
+        let config = parse_config(yaml).expect("value_tier pipeline parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "orders");
+        let i_t = stage_idx(&view, "tier");
+
+        let mk = |ff: &str, tf: &str, kind: FieldEdgeKind| FieldEdge {
+            from_node: i_src,
+            from_field: ff.to_string(),
+            to_node: i_t,
+            to_field: tf.to_string(),
+            kind,
+        };
+
+        // One edge of each kind.
+        assert!(
+            view.field_edges
+                .contains(&mk("line_total", "value_tier", FieldEdgeKind::Derive)),
+            "line_total → value_tier must be Derive, got {:?}",
+            view.field_edges
+        );
+        assert!(
+            view.field_edges
+                .contains(&mk("line_total", "line_total", FieldEdgeKind::Access)),
+            "line_total → line_total must be Access (carried AND feeds value_tier), got {:?}",
+            view.field_edges
+        );
+        assert!(
+            view.field_edges.contains(&mk(
+                "shipping_method",
+                "shipping_method",
+                FieldEdgeKind::Passthrough
+            )),
+            "shipping_method → shipping_method must be Passthrough, got {:?}",
+            view.field_edges
+        );
+
+        // Self-shadow compute: `status → status` is a Derive, NOT an Access carry —
+        // the value is recomputed here, so the column is not "carried".
+        assert!(
+            view.field_edges
+                .contains(&mk("status", "status", FieldEdgeKind::Derive)),
+            "status → status (self-shadow) must be Derive, got {:?}",
+            view.field_edges
+        );
+        assert!(
+            !view
+                .field_edges
+                .contains(&mk("status", "status", FieldEdgeKind::Access)),
+            "status → status must NOT be an Access carry: {:?}",
+            view.field_edges
+        );
+
+        // Row kinds: the self-shadowed and computed columns are Emitted; the
+        // carried columns stay PassThrough.
+        assert_eq!(
+            field_by_name(&view, i_t, "status").kind,
+            FieldKind::Emitted,
+            "a computed self-shadow row stays Emitted, not a carry"
+        );
+        assert_eq!(
+            field_by_name(&view, i_t, "value_tier").kind,
+            FieldKind::Emitted
+        );
+        assert_eq!(
+            field_by_name(&view, i_t, "line_total").kind,
+            FieldKind::PassThrough
+        );
+        assert_eq!(
+            field_by_name(&view, i_t, "shipping_method").kind,
+            FieldKind::PassThrough
+        );
+
+        // Clean one-of-each sample: 2 derives (value_tier + the self-shadow),
+        // 1 access, 1 passthrough — no other edges.
+        let count = |k: FieldEdgeKind| view.field_edges.iter().filter(|e| e.kind == k).count();
+        assert_eq!(count(FieldEdgeKind::Access), 1, "exactly one Access edge");
+        assert_eq!(
+            count(FieldEdgeKind::Passthrough),
+            1,
+            "exactly one Passthrough edge"
+        );
+        assert_eq!(count(FieldEdgeKind::Derive), 2, "exactly two Derive edges");
     }
 
     /// CXL-less fan-in (Merge, the no-CXL lineage branch / site 3) across THREE
@@ -3111,7 +3277,8 @@ nodes:
             from_field: field.to_string(),
             to_node: i_merged,
             to_field: field.to_string(),
-            passthrough: true,
+            // A CXL-less merge has no emits, so every carry is a pure Passthrough.
+            kind: FieldEdgeKind::Passthrough,
         };
         let carries_to = |field: &str| {
             view.field_edges
@@ -3517,24 +3684,27 @@ nodes:
             from_field: ff.to_string(),
             to_node: tn,
             to_field: tf.to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
-        let pass = |fn_: usize, ff: &str, tn: usize, tf: &str| FieldEdge {
+        // Every carried column in this chain ALSO feeds a downstream emit (`a`
+        // feeds `b`, then `a`/`b` feed `c`), so each carry is an Access carry, not
+        // a pure Passthrough (#72).
+        let access = |fn_: usize, ff: &str, tn: usize, tf: &str| FieldEdge {
             from_node: fn_,
             from_field: ff.to_string(),
             to_node: tn,
             to_field: tf.to_string(),
-            passthrough: true,
+            kind: FieldEdgeKind::Access,
         };
         let expected = [
-            // t1: b derives from a; a carries through.
+            // t1: b derives from a; a carries through AND feeds b (Access).
             derive(i_src, "a", i_t1, "b"),
-            pass(i_src, "a", i_t1, "a"),
-            // t2: c derives from b and a; a, b carry through.
+            access(i_src, "a", i_t1, "a"),
+            // t2: c derives from b and a; a, b carry through AND feed c (Access).
             derive(i_t1, "b", i_t2, "c"),
             derive(i_t1, "a", i_t2, "c"),
-            pass(i_t1, "a", i_t2, "a"),
-            pass(i_t1, "b", i_t2, "b"),
+            access(i_t1, "a", i_t2, "a"),
+            access(i_t1, "b", i_t2, "b"),
             // Producer → output port (FIX E): the port name `result` matches no
             // t2 field, so its representative field is t2's last field `c` — a
             // rename, hence a derive edge t2.c → result.
@@ -3592,7 +3762,7 @@ nodes:
             from_field: "a".to_string(),
             to_node: i_t,
             to_field: "b".to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         // Intra-node derive: `c` reads `b`, an EARLIER emit of the SAME node `t`.
         let b_to_c = FieldEdge {
@@ -3600,7 +3770,7 @@ nodes:
             from_field: "b".to_string(),
             to_node: i_t,
             to_field: "c".to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         assert!(
             view.field_edges.contains(&a_to_b),
@@ -3619,7 +3789,7 @@ nodes:
             from_field: "a".to_string(),
             to_node: i_t,
             to_field: "c".to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         assert!(
             !view.field_edges.contains(&a_to_c),
@@ -3637,7 +3807,7 @@ nodes:
             from_field: "c".to_string(),
             to_node: i_out,
             to_field: "result".to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         let closure = lineage_closure(&view.field_edges, i_t, "c");
         let idx_of = |e: &FieldEdge| view.field_edges.iter().position(|x| x == e).unwrap();
@@ -3689,7 +3859,7 @@ nodes:
             from_field: "a".to_string(),
             to_node: i_t,
             to_field: "y".to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         assert!(
             view.field_edges.contains(&derive_a_y),
