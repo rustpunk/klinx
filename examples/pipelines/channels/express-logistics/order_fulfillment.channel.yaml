@@ -1,10 +1,10 @@
 # Express Logistics channel for the order_fulfillment pipeline.
 #
-# New-engine channels (rev 997ea7d) bind only the target's *declared*
-# configuration — they no longer patch the graph mid-stream. This channel
-# pins the express surcharge knob (declared as `$vars.express_surcharge` on
-# order_fulfillment) to a premium rate via a `fixed` var override so it cannot
-# be relaxed downstream.
+# New-engine channels (rev 997ea7d) bind only the target's *declared* vars and
+# config — they no longer patch the graph mid-stream. This channel raises the
+# express surcharge to a premium 8.99 (pipeline default is 5.99). The knob is
+# read in order_fulfillment's `product_lookup` node, where it is added to the
+# `shipping_cost` of expedited orders, so this override genuinely changes output.
 channel:
   name: express-logistics
   target: ../../order_fulfillment.yaml

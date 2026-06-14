@@ -1,8 +1,10 @@
 # Warehouse West channel for the order_fulfillment pipeline.
 #
-# West-coast pricing uses a lower high-value threshold than the pipeline
-# default. The channel re-declares the `$vars.high_value_threshold` knob with
-# a regional default; the surcharge knob is left at the pipeline default.
+# West-coast pricing flags orders as high-value at a lower line total: this
+# channel lowers `$vars.high_value_threshold` to 300 (pipeline default is 500).
+# The knob drives the `is_high_value` flag emitted in `product_lookup`, so a
+# wider band of orders is flagged high-value for this tenant. The surcharge
+# knob is left at the pipeline default.
 channel:
   name: warehouse-west
   target: ../../order_fulfillment.yaml

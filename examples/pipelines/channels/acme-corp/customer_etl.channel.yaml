@@ -1,8 +1,9 @@
 # Acme Corp channel for the customer_etl pipeline.
 #
-# Acme runs a higher-value customer base, so it re-pins the gold/standard
-# tier boundary (`$vars.tier_threshold`, declared on customer_etl) upward via
-# a `fixed` override that downstream layers cannot relax.
+# Acme runs a higher-value customer base, so it raises the gold/standard tier
+# boundary to 50000 (pipeline default is 10000). The `$vars.tier_threshold`
+# knob is read in customer_etl's `final_flag` transform, so this override
+# genuinely shifts which customers are tagged "gold".
 channel:
   name: acme-corp
   target: ../../customer_etl.yaml
