@@ -23,6 +23,11 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
     let is_selected = state.selected_stages.read().contains(stage_id.as_str());
     let is_error = matches!(&stage.kind, StageKind::Error);
 
+    // Hover context for the field-lineage reveal. Acquired once in the component
+    // body (hooks must not run inside event handlers/conditionals); the inner
+    // `Signal` is `Copy`, so the container's `onmouseleave` captures it directly.
+    let mut hovered = use_context::<HoveredField>();
+
     // Local collapse state — a field-bearing card can be folded back to the
     // compact header-only look. Local (not app-state) because collapse is a
     // pure view concern with no model meaning. Cards without fields never show
@@ -119,6 +124,15 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
                                 e.stop_propagation();
                                 let now = *collapsed.read();
                                 collapsed.set(!now);
+                                // Collapsing unmounts the field rows, so their
+                                // container `onmouseleave` can never fire to clear a
+                                // hover that targets this node — clear it here to
+                                // avoid a permanently stuck lineage reveal.
+                                if !now
+                                    && matches!(hovered.0.peek().as_ref(), Some((n, _)) if *n == index)
+                                {
+                                    hovered.0.set(None);
+                                }
                             },
                             if *collapsed.read() { "▸" } else { "▾" }
                         }
@@ -132,7 +146,26 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
 
             // ── Field-row list (variable height) ─────────────────────────────
             if show_rows {
-                div { class: "klinx-node-fields",
+                div {
+                    class: "klinx-node-fields",
+                    // Clear the revealed field on ONE container-level leave, not
+                    // per row. Sweeping row→row would otherwise fire a row's
+                    // leave (hover→None) before the next row's enter, flashing a
+                    // transient empty closure between every row. Rows abut at the
+                    // fixed FIELD_ROW_HEIGHT pitch, so moving within the list
+                    // never crosses this boundary; hover stays Some(A)→Some(B)
+                    // and only resets when the pointer truly leaves the fields.
+                    onmouseleave: move |_| {
+                        // Clear only THIS node's hover. Guarding on the node index
+                        // (not a bare `is_some`) keeps the clear order-independent:
+                        // if the pointer jumped straight onto another node's row,
+                        // that row's `onmouseenter` may set `Some(other)` before this
+                        // container's leave fires — wiping on `is_some` would then
+                        // erase the newer hover. `peek()` reads without subscribing.
+                        if matches!(hovered.0.peek().as_ref(), Some((n, _)) if *n == index) {
+                            hovered.0.set(None);
+                        }
+                    },
                     for (i, field) in stage.fields.iter().enumerate() {
                         FieldRowView {
                             key: "{field.name}",
@@ -179,7 +212,9 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
 /// Carries LEFT and RIGHT anchor dots (the visual endpoints field-edge cables
 /// connect to) and `data-field-kind` for CSS. Hovering the row publishes
 /// `(node_index, name)` to the [`HoveredField`] context so the canvas can reveal
-/// that field's lineage closure; mouse-leave clears it.
+/// that field's lineage closure. The reveal is *cleared* by a single
+/// `onmouseleave` on the parent `.klinx-node-fields` container, not per row:
+/// sweeping row→row stays `Some(A)→Some(B)` with no transient `None` flash.
 #[component]
 fn FieldRowView(node_index: usize, row_index: usize, name: String, kind: FieldKind) -> Element {
     let mut hovered = use_context::<HoveredField>();
@@ -206,7 +241,6 @@ fn FieldRowView(node_index: usize, row_index: usize, name: String, kind: FieldKi
                 let name = name.clone();
                 move |_| hovered.0.set(Some((node_index, name.clone())))
             },
-            onmouseleave: move |_| hovered.0.set(None),
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
             span { class: "klinx-node-field-name", "{name}" }
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }

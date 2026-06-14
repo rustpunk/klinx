@@ -201,9 +201,10 @@ pub fn CanvasPanel() -> Element {
         hovered.0.set(None);
     });
 
-    // The participating field-edge indices for the hovered field: the transitive
-    // upstream+downstream closure over `field_edges`. Empty when nothing is
-    // hovered. Computed each render as a pure function of the (reactive) hover
+    // The participating field-edge indices for the hovered field: the DIRECT
+    // (1-hop) neighbourhood over `field_edges` — every edge incident to the
+    // hovered `(node, field)`, including passthrough carries. Empty when nothing
+    // is hovered. Computed each render as a pure function of the (reactive) hover
     // signal and the derived `field_edges`; the stage set the cables connect is
     // resolved alongside.
     let mut active_field_edges: Vec<(usize, FieldEdgeAnchors)> = Vec::new();
@@ -507,23 +508,32 @@ pub fn CanvasPanel() -> Element {
                 class: "klinx-canvas-viewport",
                 style: "transform: translate({pan_x}px, {pan_y}px) scale({zoom});",
 
-                // SVG connector overlay — rendered first (lower z-index).
+                // SVG connector overlay — rendered first (lower z-index). The
+                // `<svg>` itself is NEVER dimmed: dimming the whole overlay
+                // crushed the field cables we want to highlight along with the
+                // node cables. Instead the node-level cables live in a `<g>` that
+                // recedes on hover, while the field cables render OUTSIDE that
+                // group at full opacity.
                 svg {
-                    // While a field's lineage is revealed, the node-level cables
-                    // recede so the field cables read clearly. No hover → normal.
-                    class: if hover_active { "klinx-canvas-svg klinx-canvas-svg--dimmed" } else { "klinx-canvas-svg" },
+                    class: "klinx-canvas-svg",
                     width: "{svg_w}",
                     height: "{svg_h}",
-                    // Node-level connectors — the DEFAULT view.
-                    for (from, to) in connections {
-                        Connector {
-                            key: "{from.id}-{to.id}",
-                            from,
-                            to,
+                    // Node-level connectors — the DEFAULT view. While a field's
+                    // lineage is revealed, only THIS group recedes so the field
+                    // cables read clearly against it.
+                    g {
+                        class: if hover_active { "klinx-canvas-edges klinx-canvas-edges--recede" } else { "klinx-canvas-edges" },
+                        for (from, to) in connections {
+                            Connector {
+                                key: "{from.id}-{to.id}",
+                                from,
+                                to,
+                            }
                         }
                     }
                     // Field-level cables — ONLY the hovered field's lineage
-                    // closure, never the whole field-edge set.
+                    // closure, never the whole field-edge set. Rendered outside
+                    // the receding group so they stay at full opacity on hover.
                     for (ei, anchors) in active_field_edges {
                         FieldConnector {
                             key: "field-{ei}",

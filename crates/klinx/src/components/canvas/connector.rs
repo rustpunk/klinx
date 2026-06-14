@@ -32,6 +32,9 @@ pub fn Connector(props: ConnectorProps) -> Element {
             ty,
             kind_attr: kind_attr.to_string(),
             extra_class: String::new(),
+            // Node-level cables keep their per-kind stage accent, inlined so the
+            // stroke follows `--klinx-stage-accent` from the `data-stage-kind`.
+            inline_accent_stroke: true,
         }
     }
 }
@@ -73,6 +76,12 @@ pub fn FieldConnector(props: FieldConnectorProps) -> Element {
             ty,
             kind_attr: props.kind_attr.clone(),
             extra_class,
+            // Field cables do NOT inline a stroke: the CSS classes
+            // `.klinx-field-edge--derive` / `--passthrough` own the stroke COLOUR
+            // (set on the `<g>`, inherited by each path), so passthrough vs.
+            // derive read as distinct hues — not just distinct opacity. An inline
+            // stroke would override the class and erase that distinction.
+            inline_accent_stroke: false,
         }
     }
 }
@@ -90,6 +99,12 @@ struct ConnectorPathProps {
     ty: f32,
     kind_attr: String,
     extra_class: String,
+    /// Whether to inline `stroke: var(--klinx-stage-accent)` on each path. Node
+    /// connectors set this so their stroke follows the per-kind accent; field
+    /// connectors clear it so the `.klinx-field-edge--*` CSS classes own the
+    /// stroke colour (inline styles outrank class rules, so the inline stroke
+    /// must be ABSENT for the class colour to apply).
+    inline_accent_stroke: bool,
 }
 
 #[component]
@@ -101,7 +116,17 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
         ty,
         kind_attr,
         extra_class,
+        inline_accent_stroke,
     } = props;
+
+    // Empty when the CSS class owns the stroke (field edges); the accent style
+    // otherwise (node edges). An empty `style` leaves the path's stroke to be
+    // inherited from the `<g>`'s class-set value.
+    let stroke_style = if inline_accent_stroke {
+        "stroke: var(--klinx-stage-accent);"
+    } else {
+        ""
+    };
 
     // Cubic S-curve: control points at 1/3 of horizontal distance from each end.
     let cp_offset = (tx - sx).abs() / 3.0;
@@ -130,7 +155,7 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
                 fill: "none",
                 stroke_width: "5",
                 stroke_opacity: "0.1",
-                style: "stroke: var(--klinx-stage-accent);",
+                style: "{stroke_style}",
             }
             // Layer 2 — dashed core cable
             path {
@@ -139,7 +164,7 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
                 stroke_width: "2",
                 stroke_dasharray: "8 4",
                 stroke_opacity: "0.7",
-                style: "stroke: var(--klinx-stage-accent);",
+                style: "{stroke_style}",
             }
             // Layer 3 — bright centre hairline
             path {
@@ -147,7 +172,7 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
                 fill: "none",
                 stroke_width: "0.75",
                 stroke_opacity: "0.9",
-                style: "stroke: var(--klinx-stage-accent);",
+                style: "{stroke_style}",
             }
             // Open chevron arrowhead
             path {
@@ -157,7 +182,7 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
                 stroke_opacity: "0.8",
                 stroke_linejoin: "round",
                 stroke_linecap: "round",
-                style: "stroke: var(--klinx-stage-accent);",
+                style: "{stroke_style}",
             }
         }
     }

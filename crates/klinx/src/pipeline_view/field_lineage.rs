@@ -237,43 +237,34 @@ pub fn emit_supports(program: &Program) -> Vec<(String, HashSet<String>)> {
     out
 }
 
-/// Compute the transitive lineage closure of one `(node, field)` anchor over a
+/// The DIRECT (1-hop) lineage neighbourhood of one `(node, field)` anchor over a
 /// field-edge set.
 ///
-/// Walks both directions: *upstream* via edges whose `to == anchor`, *downstream*
-/// via edges whose `from == anchor`, transitively, until no new anchor is
-/// found. Returns the indices (into `edges`) of every edge that participates in
-/// the closure. The canvas draws exactly these edges on hover and dims the rest
-/// — never the whole field-edge set, which is the documented
-/// research-failure mode this design avoids.
+/// Returns the indices (into `edges`) of every edge *incident* to the anchor —
+/// every edge whose source OR target is exactly `(node, field)`, in EITHER
+/// direction, INCLUDING passthrough carries. There is deliberately NO transitive
+/// walk and NO edge-kind filter.
+///
+/// WHY 1-hop, both kinds: hovering a field should reveal its immediate
+/// neighbourhood — the producers it reads from and the consumers it feeds at the
+/// ADJACENT nodes — so a reader sees a passthrough column's 1:1 carry to the next
+/// node alongside any derive it participates in. A transitive walk re-creates the
+/// "light up half the graph" failure mode (a passthrough column threads through
+/// every node, so following carries floods the closure); a 1-hop neighbourhood
+/// stays locally legible. Including passthrough edges is the FIX (#70 follow-up):
+/// the prior derive-only walk hid the 1:1 carries the user wanted to see.
+///
+/// The canvas draws exactly these edges on hover and dims the rest.
 pub fn lineage_closure(edges: &[FieldEdge], node: usize, field: &str) -> HashSet<usize> {
-    // BFS frontier of (node, field) anchors reached so far.
-    let mut seen: HashSet<(usize, String)> = HashSet::new();
-    let mut frontier: Vec<(usize, String)> = vec![(node, field.to_string())];
-    seen.insert((node, field.to_string()));
-
-    let mut participating: HashSet<usize> = HashSet::new();
-    while let Some((cur_node, cur_field)) = frontier.pop() {
-        for (i, e) in edges.iter().enumerate() {
-            // Downstream: this anchor is the source of `e`.
-            if e.from_node == cur_node && e.from_field == cur_field {
-                participating.insert(i);
-                let next = (e.to_node, e.to_field.clone());
-                if seen.insert(next.clone()) {
-                    frontier.push(next);
-                }
-            }
-            // Upstream: this anchor is the target of `e`.
-            if e.to_node == cur_node && e.to_field == cur_field {
-                participating.insert(i);
-                let prev = (e.from_node, e.from_field.clone());
-                if seen.insert(prev.clone()) {
-                    frontier.push(prev);
-                }
-            }
-        }
-    }
-    participating
+    edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            (e.from_node == node && e.from_field == field)
+                || (e.to_node == node && e.to_field == field)
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 #[cfg(test)]
@@ -341,8 +332,8 @@ mod tests {
         );
     }
 
-    /// The lineage closure follows edges both upstream and downstream from the
-    /// hovered anchor, transitively, and returns only participating edges.
+    /// The 1-hop neighbourhood includes edges incident to the anchor in BOTH
+    /// directions, but never a transitive (2-hop) edge.
     #[test]
     fn closure_walks_both_directions() {
         // Chain: 0.a -> 1.b -> 2.c, plus an unrelated edge 0.z -> 1.w.
@@ -369,13 +360,111 @@ mod tests {
                 passthrough: false,
             },
         ];
-        // Hovering the middle anchor (1.b) pulls in both the upstream edge 0
-        // and the downstream edge 1, but not the unrelated edge 2.
+        // Hovering the middle anchor (1.b): edge 0 (its incoming) and edge 1 (its
+        // outgoing) are both 1-hop incident; the unrelated edge 2 is not.
         let closure = lineage_closure(&edges, 1, "b");
         assert_eq!(closure, HashSet::from([0, 1]));
 
+        // Hovering the chain head (0.a): only its outgoing edge 0 is incident —
+        // the downstream b→c edge is 2 hops away and is NOT pulled in (1-hop).
+        assert_eq!(lineage_closure(&edges, 0, "a"), HashSet::from([0]));
+
         // Hovering the unrelated target reaches only its own edge.
         assert_eq!(lineage_closure(&edges, 1, "w"), HashSet::from([2]));
+    }
+
+    /// The 1-hop neighbourhood INCLUDES passthrough carries (the FIX): a field
+    /// reached only by an identity carry is no longer hidden.
+    ///
+    /// FIX C (#70 follow-up): the prior walk was transitive AND derive-only, so a
+    /// 1:1 carry never appeared on hover. The model is
+    /// `input{a} -> t1 emit b = a*2 -> t2 emit c = b + 1` with the realistic
+    /// passthrough carries `a`/`b` ride through on; hovering a carried column now
+    /// reveals its in/out carries, and hovering a derived column reveals exactly
+    /// its immediate (1-hop) producers and consumers.
+    #[test]
+    fn closure_is_direct_one_hop_including_passthrough() {
+        // Indices: 0=input, 1=t1, 2=t2.
+        let derive = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            passthrough: false,
+        };
+        let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            passthrough: true,
+        };
+        let edges = vec![
+            derive(0, "a", 1, "b"), // 0: t1 computes b from a
+            carry(0, "a", 1, "a"),  // 1: a rides through t1
+            derive(1, "b", 2, "c"), // 2: t2 computes c from b
+            carry(1, "a", 2, "a"),  // 3: a rides through t2
+            carry(1, "b", 2, "b"),  // 4: b rides through t2
+        ];
+
+        // Hovering `c` on t2: only its single incoming derive edge (2) is 1-hop
+        // incident. The upstream a→b derive (edge 0) is now 2 hops away and is
+        // NOT pulled in — direct-neighbour scope, not transitive.
+        assert_eq!(
+            lineage_closure(&edges, 2, "c"),
+            HashSet::from([2]),
+            "c's 1-hop closure is exactly its incoming derive edge"
+        );
+
+        // Hovering the carried column `a` on t2: its incoming carry (edge 3) is
+        // incident and IS revealed — passthrough is no longer excluded.
+        assert_eq!(
+            lineage_closure(&edges, 2, "a"),
+            HashSet::from([3]),
+            "a carried field reveals its incident passthrough carry"
+        );
+    }
+
+    /// A hovered passthrough field surfaces its incoming AND outgoing passthrough
+    /// carries PLUS any derive edge it feeds — all in a single 1-hop neighbourhood.
+    ///
+    /// Models the spec's `order_age.status` example: `status` rides through as a
+    /// passthrough into the node, feeds a `fulfillment_risk` derive on that node,
+    /// and carries on to the next node as a passthrough. Hovering `status` on the
+    /// middle node must return its incoming carry, its outgoing carry, AND the
+    /// derive it feeds — but not edges anchored on a different field.
+    #[test]
+    fn passthrough_field_returns_carries_and_fed_derive() {
+        // Indices: 0=order_age (producer), 1=mid node, 2=next node.
+        let derive = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            passthrough: false,
+        };
+        let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            passthrough: true,
+        };
+        let edges = vec![
+            carry(0, "status", 1, "status"), // 0: status rides INTO node 1
+            derive(1, "status", 1, "fulfillment_risk"), // 1: status feeds a derive on node 1
+            carry(1, "status", 2, "status"), // 2: status rides OUT of node 1
+            derive(0, "age", 1, "fulfillment_risk"), // 3: unrelated input feeding the derive
+        ];
+
+        // Hovering `status` on node 1 returns: its incoming carry (0), the derive
+        // it feeds (1), and its outgoing carry (2). Edge 3 is anchored on `age`,
+        // not `status`, so it is excluded.
+        assert_eq!(
+            lineage_closure(&edges, 1, "status"),
+            HashSet::from([0, 1, 2]),
+            "a passthrough field surfaces its in/out carries plus the derive it feeds"
+        );
     }
 
     /// A cyclic let-support map must not loop forever; the visiting guard makes
