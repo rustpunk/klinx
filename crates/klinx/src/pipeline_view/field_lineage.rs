@@ -62,20 +62,43 @@ pub struct FieldRow {
     pub is_correlation_key: bool,
 }
 
+/// How a [`FieldEdge`] relates its two endpoints — the three relationship
+/// types the canvas colour-codes (#72).
+///
+/// A 3-way widening of the original `passthrough: bool` split: an identity
+/// carry (`c → c`, value unchanged) is now sub-divided by whether the carried
+/// column *also* feeds a computed/renamed output. The renderer maps each
+/// variant to a distinct stroke colour; [`node_carry_edges`] keeps only the two
+/// carry variants for the node-overview reveal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldEdgeKind {
+    /// Identity carry (`c → c`) whose column is read by no derive — it rides
+    /// through the node untouched and unreferenced.
+    Passthrough,
+    /// Identity carry (`c → c`) whose column ALSO appears in some computed or
+    /// renamed emit's support on the consumer: carried *and* accessed. The
+    /// value still passes through unchanged, but the column is not inert here.
+    Access,
+    /// An input column feeding an `emit`-produced output field (computed or
+    /// renamed), e.g. `line_total → value_tier`. The output value is (re)made
+    /// from this input, not carried.
+    Derive,
+}
+
 /// A field-level lineage edge: `to_node.to_field` is (partly) derived from
 /// `from_node.from_field`.
 ///
-/// `passthrough` distinguishes an identity carry (`col` → same `col`, the
-/// value is unchanged) from a derivation (`col` participates in an expression
-/// that produces a differently-named output column). The canvas renders the
-/// two differently so a reader can tell a rename/compute from a carry.
+/// `kind` ([`FieldEdgeKind`]) distinguishes an identity carry — pure
+/// (`Passthrough`) or also-accessed (`Access`) — from a derivation (`Derive`).
+/// The canvas renders the three differently so a reader can tell a
+/// rename/compute from a carry, and a referenced carry from an inert one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldEdge {
     pub from_node: usize,
     pub from_field: String,
     pub to_node: usize,
     pub to_field: String,
-    pub passthrough: bool,
+    pub kind: FieldEdgeKind,
 }
 
 /// Resolve the let-expanded input-column support of a single `emit`
@@ -392,6 +415,88 @@ pub fn lineage_closure(edges: &[FieldEdge], node: usize, field: &str) -> HashSet
         .collect()
 }
 
+/// The CARRY edges incident to a whole node — its node-scope hover reveal (#72).
+///
+/// Returns the indices (into `edges`) of every edge whose source OR target node
+/// is `node` AND whose kind is a carry ([`FieldEdgeKind::Passthrough`] or
+/// [`FieldEdgeKind::Access`]) — i.e. every identity (`c → c`) line entering the
+/// node from a predecessor OR leaving it to a successor. Derives are excluded.
+///
+/// WHY carries-only, both directions: hovering a node (off any row) answers
+/// "what flows *through* this node" — the columns that ride in unchanged and
+/// the columns that ride back out. Those are near-horizontal 1:1 lines that
+/// don't fan or cross, so showing all of them at once stays an *overview*
+/// (Dataplex-style highlight), unlike the unreadable full column graph that
+/// including every derive would produce — derives are reserved for the
+/// per-field (row) hover detail. A field-less node yields an empty set, so a
+/// node-scope hover on such a card reveals nothing (the desired no-op).
+pub fn node_carry_edges(edges: &[FieldEdge], node: usize) -> HashSet<usize> {
+    edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            // Allowlist the two carry kinds rather than denylisting Derive, so a
+            // future `FieldEdgeKind` variant is conservatively excluded from the
+            // node-overview carry set instead of silently appearing in it.
+            matches!(e.kind, FieldEdgeKind::Passthrough | FieldEdgeKind::Access)
+                && (e.from_node == node || e.to_node == node)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The FULL pipeline lineage of one `(node, field)` anchor — its complete
+/// transitive provenance AND impact across the whole pipeline (#75 click).
+///
+/// Where [`lineage_closure`] is deliberately 1-hop (the hover reveal, kept
+/// locally legible), this is the CLICK-to-select reveal: it walks the column's
+/// entire directed lineage — every upstream edge it (transitively) derives from
+/// or is carried from, UNION every downstream edge that (transitively) carries
+/// or derives from it. Returns the indices (into `edges`) of every edge on those
+/// paths.
+///
+/// The walk is DIRECTED (ancestors via `to → from`, descendants via
+/// `from → to`), not an undirected connected-component flood: a sibling column
+/// that merely shares a downstream consumer with the anchor is NOT pulled in
+/// unless it is itself up- or down-stream of the anchor. This keeps "select a
+/// column" to that column's real lineage. Drawing a whole column's transitive
+/// lineage at once is permitted ONLY on explicit click (one column on demand) —
+/// hover stays 1-hop to avoid flooding the canvas.
+pub fn field_lineage_full(edges: &[FieldEdge], node: usize, field: &str) -> HashSet<usize> {
+    let mut result: HashSet<usize> = HashSet::new();
+
+    // Upstream (provenance): follow edges INTO the current endpoint, back to
+    // origins. Downstream (impact): follow edges OUT to sinks. Each direction is
+    // its own breadth-first walk over the (node, field) endpoint graph, with its
+    // own visited set; both deposit edge indices into the shared `result`.
+    for forward in [false, true] {
+        let mut seen: HashSet<(usize, String)> = HashSet::new();
+        let start = (node, field.to_string());
+        seen.insert(start.clone());
+        let mut frontier = vec![start];
+        while let Some((n, f)) = frontier.pop() {
+            for (i, e) in edges.iter().enumerate() {
+                // Forward walk steps producer→consumer (match the `from` side and
+                // hop to `to`); backward walk steps consumer→producer.
+                let next = if forward && e.from_node == n && e.from_field == f {
+                    Some((e.to_node, e.to_field.clone()))
+                } else if !forward && e.to_node == n && e.to_field == f {
+                    Some((e.from_node, e.from_field.clone()))
+                } else {
+                    None
+                };
+                if let Some(other) = next {
+                    result.insert(i);
+                    if seen.insert(other.clone()) {
+                        frontier.push(other);
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,21 +639,21 @@ mod tests {
                 from_field: "a".to_string(),
                 to_node: 1,
                 to_field: "b".to_string(),
-                passthrough: false,
+                kind: FieldEdgeKind::Derive,
             },
             FieldEdge {
                 from_node: 1,
                 from_field: "b".to_string(),
                 to_node: 2,
                 to_field: "c".to_string(),
-                passthrough: false,
+                kind: FieldEdgeKind::Derive,
             },
             FieldEdge {
                 from_node: 0,
                 from_field: "z".to_string(),
                 to_node: 1,
                 to_field: "w".to_string(),
-                passthrough: false,
+                kind: FieldEdgeKind::Derive,
             },
         ];
         // Hovering the middle anchor (1.b): edge 0 (its incoming) and edge 1 (its
@@ -576,7 +681,7 @@ mod tests {
             from_field: ff.to_string(),
             to_node: tnode,
             to_field: tf.to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         // Middle node 1 carries `status`, which also feeds a derive (`risk`) on
         // its OWN node — a self-loop on field `status`. Edge 3 is unrelated.
@@ -642,14 +747,14 @@ mod tests {
             from_field: ff.to_string(),
             to_node: tnode,
             to_field: tf.to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
             from_node: fnode,
             from_field: ff.to_string(),
             to_node: tnode,
             to_field: tf.to_string(),
-            passthrough: true,
+            kind: FieldEdgeKind::Passthrough,
         };
         let edges = vec![
             derive(0, "a", 1, "b"), // 0: t1 computes b from a
@@ -693,14 +798,14 @@ mod tests {
             from_field: ff.to_string(),
             to_node: tnode,
             to_field: tf.to_string(),
-            passthrough: false,
+            kind: FieldEdgeKind::Derive,
         };
         let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
             from_node: fnode,
             from_field: ff.to_string(),
             to_node: tnode,
             to_field: tf.to_string(),
-            passthrough: true,
+            kind: FieldEdgeKind::Passthrough,
         };
         let edges = vec![
             carry(0, "status", 1, "status"), // 0: status rides INTO node 1
@@ -717,6 +822,117 @@ mod tests {
             HashSet::from([0, 1, 2]),
             "a passthrough field surfaces its in/out carries plus the derive it feeds"
         );
+    }
+
+    /// `node_carry_edges` returns every CARRY edge (Passthrough + Access)
+    /// incident to a node in BOTH directions, and excludes derives plus carries
+    /// not incident to the node — the node-scope hover's edge set (#72).
+    #[test]
+    fn node_carry_edges_are_incident_carries_both_directions() {
+        let edge =
+            |fnode: usize, ff: &str, tnode: usize, tf: &str, kind: FieldEdgeKind| FieldEdge {
+                from_node: fnode,
+                from_field: ff.to_string(),
+                to_node: tnode,
+                to_field: tf.to_string(),
+                kind,
+            };
+        // Node 1 is the focus: an incoming pure carry, an incoming accessed
+        // carry, an outgoing carry, an incident derive (excluded), and a carry
+        // between two OTHER nodes (excluded — not incident to 1).
+        let edges = vec![
+            edge(0, "a", 1, "a", FieldEdgeKind::Passthrough), // 0: incoming carry
+            edge(0, "k", 1, "k", FieldEdgeKind::Access),      // 1: incoming accessed carry
+            edge(1, "a", 2, "a", FieldEdgeKind::Passthrough), // 2: outgoing carry
+            edge(0, "k", 1, "score", FieldEdgeKind::Derive),  // 3: incident derive — excluded
+            edge(0, "z", 2, "z", FieldEdgeKind::Passthrough), // 4: carry not incident to 1
+        ];
+        assert_eq!(
+            node_carry_edges(&edges, 1),
+            HashSet::from([0, 1, 2]),
+            "incident carries both directions; derive and non-incident carry excluded"
+        );
+        // A node touched by no edge reveals nothing (field-less / isolated node).
+        assert!(
+            node_carry_edges(&edges, 5).is_empty(),
+            "a node with no incident edges reveals nothing"
+        );
+    }
+
+    /// `field_lineage_full` walks the column's COMPLETE directed lineage
+    /// (transitive upstream ∪ downstream) — the click-to-select reveal (#75) —
+    /// unlike the deliberately 1-hop `lineage_closure`; and it stays DIRECTED, so
+    /// it does not flood into a sibling branch that merely shares an ancestor.
+    #[test]
+    fn field_lineage_full_is_transitive_directed_not_sibling_flood() {
+        let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            kind: FieldEdgeKind::Passthrough,
+        };
+        let derive = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            kind: FieldEdgeKind::Derive,
+        };
+        let edges = vec![
+            carry(0, "a", 1, "a"),  // 0: a carried 0→1
+            carry(1, "a", 2, "a"),  // 1: a carried 1→2 (a sibling downstream branch)
+            derive(1, "a", 1, "b"), // 2: a feeds b on node 1
+            carry(1, "b", 2, "b"),  // 3: b carried 1→2
+            carry(0, "z", 1, "z"),  // 4: unrelated column
+        ];
+
+        // From the origin `a`: the downstream walk reaches the whole a/b subtree
+        // (edges 0,1,2,3); there is no upstream. Transitive, not 1-hop.
+        assert_eq!(
+            field_lineage_full(&edges, 0, "a"),
+            HashSet::from([0, 1, 2, 3])
+        );
+        // Contrast: the HOVER (1-hop) reveal on the same anchor is just its single
+        // outgoing carry.
+        assert_eq!(lineage_closure(&edges, 0, "a"), HashSet::from([0]));
+
+        // From the downstream `b` on node 2: the upstream walk reaches b←b←a←a
+        // (edges 3,2,0) but NOT the sibling branch a→2.a (edge 1): `2.a` is a
+        // different descendant of `a`, not part of `2.b`'s lineage — a directed
+        // walk, not an undirected connected-component flood.
+        let from_b = field_lineage_full(&edges, 2, "b");
+        assert_eq!(from_b, HashSet::from([0, 2, 3]));
+        assert!(
+            !from_b.contains(&1),
+            "sibling branch a→2.a is not in 2.b's lineage"
+        );
+        assert!(
+            !from_b.contains(&4),
+            "the unrelated column z is never reached"
+        );
+    }
+
+    /// `field_lineage_full` must TERMINATE on a cyclic edge set — the canvas
+    /// renders pre-validation input, which can contain a column that carries back
+    /// into an upstream node. The per-direction `seen` set bounds the walk; both
+    /// edges of the cycle are still returned (a back-edge is recorded, just not
+    /// re-traversed).
+    #[test]
+    fn field_lineage_full_terminates_on_cycle() {
+        let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            kind: FieldEdgeKind::Passthrough,
+        };
+        // 0.a → 1.a → 0.a: a 2-edge cycle over the (node, field) endpoint graph.
+        let edges = vec![carry(0, "a", 1, "a"), carry(1, "a", 0, "a")];
+        // Terminates (no hang / stack overflow) and reaches both edges from either
+        // anchor — downstream and upstream each close the loop in one extra hop.
+        assert_eq!(field_lineage_full(&edges, 0, "a"), HashSet::from([0, 1]));
+        assert_eq!(field_lineage_full(&edges, 1, "a"), HashSet::from([0, 1]));
     }
 
     /// A cyclic let-support map must not loop forever; the visiting guard makes

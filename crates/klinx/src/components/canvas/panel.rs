@@ -5,26 +5,28 @@ use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 
 use crate::pipeline_view::{
-    FieldEdge, NODE_WIDTH, StageView, derive_body_view, derive_partial_pipeline_view,
-    derive_pipeline_view, fit_transform, group_endpoints_by_node, layout_bounds, lineage_closure,
+    FieldEdge, FieldEdgeKind, NODE_WIDTH, StageView, derive_body_view,
+    derive_partial_pipeline_view, derive_pipeline_view, field_lineage_full, fit_transform,
+    group_endpoints_by_node, layout_bounds, lineage_closure, node_carry_edges,
 };
 use crate::state::{ChannelViewMode, use_app_state};
 
-use super::HoveredField;
 use super::connector::{Connector, FieldConnector};
 use super::node::CanvasNode;
+use super::{CanvasHover, HoverTarget, PinnedField};
 
 /// Resolved world-space endpoints + accent for one field-lineage cable.
 ///
 /// A [`FieldEdge`] names `(node, field)` endpoints; this is the geometry the
 /// SVG cable actually draws — the producer row's RIGHT anchor to the consumer
-/// row's LEFT anchor, plus the producer's `data-stage-kind` for the accent.
+/// row's LEFT anchor, plus the producer's `data-stage-kind` for the accent and
+/// the edge's [`FieldEdgeKind`] for the relationship-type stroke colour.
 #[derive(Clone, PartialEq)]
 struct FieldEdgeAnchors {
     start: (f32, f32),
     end: (f32, f32),
     kind_attr: String,
-    passthrough: bool,
+    kind: FieldEdgeKind,
 }
 
 /// Resolve a [`FieldEdge`] to drawable anchor geometry, or `None` if either
@@ -39,7 +41,7 @@ fn resolve_edge_anchors(stages: &[StageView], edge: &FieldEdge) -> Option<FieldE
         start: from.field_anchor_out(fi),
         end: to.field_anchor_in(ti),
         kind_attr: from.kind.kind_attr().to_string(),
-        passthrough: edge.passthrough,
+        kind: edge.kind,
     })
 }
 
@@ -148,15 +150,21 @@ pub fn CanvasPanel() -> Element {
     let stages = pipeline_view.stages;
 
     // ── Field-level lineage hover state ──────────────────────────────────────
-    // `Some((stage_idx, field_name))` while a field row is hovered. Provided as
-    // a canvas-scoped context so each `CanvasNode`'s field rows can set/clear it.
-    // DEFAULT (None) draws node-level connectors only — field cables appear ONLY
-    // for the hovered field's lineage closure, never the whole edge set.
+    // The current pointer [`HoverTarget`] (None / Node / Field), provided as a
+    // canvas-scoped context so each `CanvasNode` card and field row can set it.
+    // DEFAULT (`None`) draws node-level connectors only; a `Node` hover reveals
+    // that node's carries; a `Field` hover reveals one field's 1-hop closure —
+    // never the whole field-edge set at once (#72).
     //
-    // D2 (Phase 2, perf): a field hover writes this signal, re-rendering the
-    // whole canvas. Acceptable for Phase-1's small graphs; a future pass can
-    // scope the highlight to the affected cards/cables only.
-    let hovered_field = use_context_provider(|| HoveredField(Signal::new(None)));
+    // D2 (Phase 2, perf): a hover writes this signal, re-rendering the whole
+    // canvas. A node hover's active set is larger than a field's but still bounded
+    // by one node's carry count, an O(edges) filter. Acceptable for Phase-1's
+    // small graphs; a future pass can scope the highlight to affected cards.
+    let hovered_field = use_context_provider(|| CanvasHover(Signal::new(HoverTarget::None)));
+    // The pinned (clicked-to-select) column (#75) — sticky across pointer moves,
+    // takes precedence over the hover in the reveal computation below. Cleared by
+    // a canvas-background click and by the view-swap effect.
+    let pinned_field = use_context_provider(|| PinnedField(Signal::new(None)));
 
     // D1: clear a stale hover when the active view swaps. A hovered
     // `(node_idx, field)` is only meaningful against the CURRENT view's
@@ -202,44 +210,56 @@ pub fn CanvasPanel() -> Element {
         );
 
         let mut hovered = hovered_field;
-        hovered.0.set(None);
+        hovered.0.set(HoverTarget::None);
+        let mut pinned = pinned_field;
+        pinned.0.set(None);
     });
 
-    // The participating field-edge indices for the hovered field: the DIRECT
-    // (1-hop) neighbourhood over `field_edges` — every edge incident to the
-    // hovered `(node, field)`, including passthrough carries. Empty when nothing
-    // is hovered. Computed each render as a pure function of the (reactive) hover
-    // signal and the derived `field_edges`; the stage set the cables connect is
-    // resolved alongside.
+    // The participating field-edge indices for the active reveal. A PIN (#75) wins
+    // over the hover (#72) — a clicked column stays revealed across pointer moves:
+    //  - pinned `(node, f)` → that column's FULL transitive pipeline lineage
+    //    (`field_lineage_full`: every up- and down-stream edge), the click reveal.
+    //  - else `Field(node, f)` → that field's DIRECT (1-hop) neighbourhood (hover).
+    //  - else `Node(node)`     → that node's CARRY edges (Passthrough + Access,
+    //    both directions, no derives) — the node-overview hover.
+    //  - else empty (the node-level DAG only).
+    // Computed each render as a pure function of the (reactive) pin/hover signals
+    // and the derived `field_edges`; an empty set means no field cables and no dim.
     let mut active_field_edges: Vec<(usize, FieldEdgeAnchors)> = Vec::new();
     let mut participating_nodes: std::collections::HashSet<usize> =
         std::collections::HashSet::new();
+    let closure: std::collections::HashSet<usize> = match &*pinned_field.0.read() {
+        Some((node, field)) => field_lineage_full(&field_edges, *node, field),
+        None => match &*hovered_field.0.read() {
+            HoverTarget::None => std::collections::HashSet::new(),
+            HoverTarget::Field(node, field) => lineage_closure(&field_edges, *node, field),
+            HoverTarget::Node(node) => node_carry_edges(&field_edges, *node),
+        },
+    };
+    // Resolve each participating edge to drawable anchors in ONE pass, collecting
+    // the participating nodes (for the dim exemption) and the resolved edges. Only
+    // edges whose anchors RESOLVE feed the highlight/dim/cable sets, so all three
+    // derive from one set — a tinted cell can never land on a dimmed, cable-less
+    // card.
+    let mut resolved_edges: Vec<&FieldEdge> = Vec::with_capacity(closure.len());
+    for &ei in &closure {
+        let edge = &field_edges[ei];
+        if let Some(anchors) = resolve_edge_anchors(&stages, edge) {
+            participating_nodes.insert(edge.from_node);
+            participating_nodes.insert(edge.to_node);
+            active_field_edges.push((ei, anchors));
+            resolved_edges.push(edge);
+        }
+    }
     // Per-node lineage-endpoint field names (#87): node index → the field rows on
     // that card to tint, so a multi-field node shows *which row* is the
     // source/target — not just that the card participates (the whole-node dim
-    // conveys the latter). Built from ONLY the edges whose anchors resolve, in the
-    // SAME pass that fills `participating_nodes`/`active_field_edges`: the
-    // highlight, the dim exemption, and the drawn cable therefore derive from one
-    // resolved-edge set, so a tinted cell can never land on a dimmed, cable-less
-    // card. Empty map when nothing is hovered (each card then gets an empty Vec
-    // without any per-node scan). `group_endpoints_by_node` returns sorted,
-    // de-duplicated names so each card's prop is stable across renders.
-    let mut highlighted_by_node: std::collections::HashMap<usize, Vec<String>> =
-        std::collections::HashMap::new();
-    if let Some((node, field)) = &*hovered_field.0.read() {
-        let closure = lineage_closure(&field_edges, *node, field);
-        let mut resolved_edges: Vec<&FieldEdge> = Vec::with_capacity(closure.len());
-        for &ei in &closure {
-            let edge = &field_edges[ei];
-            if let Some(anchors) = resolve_edge_anchors(&stages, edge) {
-                participating_nodes.insert(edge.from_node);
-                participating_nodes.insert(edge.to_node);
-                active_field_edges.push((ei, anchors));
-                resolved_edges.push(edge);
-            }
-        }
-        highlighted_by_node = group_endpoints_by_node(resolved_edges);
-    }
+    // conveys the latter). `group_endpoints_by_node` returns sorted, de-duplicated
+    // names so each card's prop is stable across renders, and an empty map when
+    // nothing is hovered (each card then gets an empty Vec without a per-node scan).
+    // `mut` because each card's names are MOVED out below via `.remove(&index)`
+    // (each index is visited once, so this never loses a card's names).
+    let mut highlighted_by_node = group_endpoints_by_node(resolved_edges);
     // Any field hovered with a non-empty closure dims the rest of the canvas.
     let hover_active = !active_field_edges.is_empty();
 
@@ -515,11 +535,14 @@ pub fn CanvasPanel() -> Element {
             // Double-click empty canvas fits all nodes to view. Node cards
             // stop_propagation() on mousedown, so this fires only on the background.
             ondoubleclick: move |_| fit_to_view(pan_x, pan_y, zoom),
-            // Clicking empty canvas deselects any selected node.
-            // Node clicks call stop_propagation(), so this only fires on empty space.
+            // Clicking empty canvas deselects any selected node AND clears a pinned
+            // field lineage (#75). Node and field-row clicks call stop_propagation(),
+            // so this only fires on empty space.
             onclick: move |_| {
                 let mut sel = state.selected_stages;
                 sel.set(std::collections::HashSet::new());
+                let mut pinned = pinned_field;
+                pinned.0.set(None);
             },
 
             // ── Transformed viewport ──────────────────────────────────────
@@ -560,7 +583,7 @@ pub fn CanvasPanel() -> Element {
                             start: anchors.start,
                             end: anchors.end,
                             kind_attr: anchors.kind_attr,
-                            passthrough: anchors.passthrough,
+                            kind: anchors.kind,
                         }
                     }
                 }

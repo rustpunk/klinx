@@ -4295,6 +4295,22 @@ input:-webkit-autofill:focus {
   box-shadow: inset 2px 0 0 #1F7A74;
 }
 
+/* Pinned (clicked-to-select) field (#75) — the anchor of the persistent
+   full-lineage reveal. A stronger wash than the hover endpoint tint plus a full
+   inset ring marks WHICH column is selected; background + box-shadow only, so
+   toggling it never reflows the fixed-pitch rows. Declared after `--lineage` so a
+   pinned cell (always also a lineage endpoint) takes this selected treatment. */
+.klinx-node-field--pinned,
+.klinx-node-field--pinned:hover {
+  background: rgba(67, 179, 174, 0.28);
+  box-shadow: inset 0 0 0 1px var(--klinx-verdigris);
+}
+[data-theme="enamel"] .klinx-node-field--pinned,
+[data-theme="enamel"] .klinx-node-field--pinned:hover {
+  background: rgba(31, 122, 116, 0.26);
+  box-shadow: inset 0 0 0 1px #1F7A74;
+}
+
 .klinx-node-field-name {
   flex: 1 1 auto;
   white-space: nowrap;
@@ -4442,15 +4458,23 @@ input:-webkit-autofill:focus {
   transition: opacity 150ms ease;
 }
 
-/* Field-lineage cables (drawn only on hover-reveal). The two flavours read as
-   DISTINCT COLOURS, not just distinct opacity: derive cables use the verdigris
-   accent (a computed/renamed column), passthrough carries use the muted
-   text-floor neutral (an identity 1:1 carry). The stroke is owned here (the
-   FieldConnector inlines no stroke) and set on the `<g>` so every layer/path
-   inherits it; both colours read clearly in the dark and Enamel themes. */
+/* Field-lineage cables (drawn only on hover-reveal). The three relationship
+   flavours (#72) read as DISTINCT COLOURS, not just distinct opacity:
+     - derive       — verdigris accent (an input feeds a computed/renamed output);
+     - access       — hazard amber (a carried 1:1 column that ALSO feeds a
+       compute — a referenced carry, louder than a pure carry, cooler than a
+       derive);
+     - passthrough  — muted text-floor neutral (an inert identity 1:1 carry).
+   The stroke is owned here (the FieldConnector inlines no stroke) and set on the
+   `<g>` so every layer/path inherits it; `--klinx-hazard` is defined in both the
+   dark and Enamel themes, so all three read clearly in each. */
 .klinx-field-edge--derive {
   stroke: var(--klinx-verdigris);
   opacity: 1;
+}
+.klinx-field-edge--access {
+  stroke: var(--klinx-hazard);
+  opacity: 0.9;
 }
 .klinx-field-edge--passthrough {
   stroke: var(--klinx-text-floor);

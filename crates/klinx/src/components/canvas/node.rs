@@ -3,15 +3,16 @@ use dioxus::prelude::*;
 use crate::pipeline_view::{FieldKind, HEADER_PORT_Y, NODE_WIDTH, StageKind, StageView};
 use crate::state::{CompositionDrillFrame, use_app_state};
 
-use super::HoveredField;
+use super::{CanvasHover, HoverTarget, PinnedField};
 
 /// A single pipeline stage rendered as a rustpunk node card on the canvas.
 ///
 /// `index` is the stage's position in the current [`crate::pipeline_view::PipelineView`]
-/// — the identity a [`crate::pipeline_view::FieldEdge`] uses for its endpoints,
-/// so field-row hover reports `(index, field_name)` to the canvas's
-/// [`HoveredField`] context. `dimmed` fades the card when a field's lineage is
-/// being revealed and this node is outside that closure.
+/// — the identity a [`crate::pipeline_view::FieldEdge`] uses for its endpoints, so
+/// a card hover reports `HoverTarget::Node(index)` and a field-row hover reports
+/// `HoverTarget::Field(index, name)` to the canvas's [`super::CanvasHover`]
+/// context. `dimmed` fades the card when a field's lineage is being revealed and
+/// this node is outside that closure.
 ///
 /// `highlighted_fields` names THIS card's own field rows that are lineage
 /// endpoints of the active hover reveal (#87) — the rows to tint so a reader of
@@ -36,10 +37,11 @@ pub fn CanvasNode(
     let is_selected = state.selected_stages.read().contains(stage_id.as_str());
     let is_error = matches!(&stage.kind, StageKind::Error);
 
-    // Hover context for the field-lineage reveal. Acquired once in the component
-    // body (hooks must not run inside event handlers/conditionals); the inner
-    // `Signal` is `Copy`, so the container's `onmouseleave` captures it directly.
-    let mut hovered = use_context::<HoveredField>();
+    // Hover + pin contexts for the field-lineage reveal. Acquired once in the
+    // component body (hooks must not run inside event handlers/conditionals); the
+    // inner `Signal` is `Copy`, so the handlers capture them directly.
+    let mut hovered = use_context::<CanvasHover>();
+    let mut pinned = use_context::<PinnedField>();
 
     // Local collapse state — a field-bearing card can be folded back to the
     // compact header-only look. Local (not app-state) because collapse is a
@@ -107,6 +109,36 @@ pub fn CanvasNode(
             "data-stage-kind": kind_attr,
             style: "{border_style}",
             onmousedown: move |e: MouseEvent| e.stop_propagation(),
+            // Node-scope lineage reveal (#72): entering the card (off any row)
+            // reveals this node's identity carries — but only when the card shows
+            // field rows (a collapsed/field-less card has no rendered anchors, so
+            // its carries would draw to phantom positions → reveal nothing).
+            //
+            // The `node() != Some(index)` guard is load-bearing: when the pointer
+            // arrives directly on a field row, BOTH this card's `onmouseenter`
+            // (Node) and the row's `onmouseenter` (Field) fire, and their relative
+            // order is NOT guaranteed under WebKitGTK (it fires the card enter even
+            // on a move that lands on a child). Without the guard a card-enter that
+            // runs after the row-enter clobbers the row's `Field` reveal back to the
+            // whole-node overview. The guard makes card-enter claim node-scope only
+            // when the hover is not already anchored on this card, so a row's
+            // `Field` always wins regardless of event order.
+            onmouseenter: move |_| {
+                if !show_rows {
+                    hovered.0.set(HoverTarget::None);
+                } else if hovered.0.peek().node() != Some(index) {
+                    hovered.0.set(HoverTarget::Node(index));
+                }
+            },
+            // Leaving the card clears only THIS node's hover. The node-index
+            // guard keeps the reset order-independent: if the pointer jumped onto
+            // another card whose enter already set the new target, this stale
+            // leave does not clobber it. `peek` reads without subscribing.
+            onmouseleave: move |_| {
+                if hovered.0.peek().node() == Some(index) {
+                    hovered.0.set(HoverTarget::None);
+                }
+            },
             onclick: {
                 let stage_id = stage_id.clone();
                 move |e: MouseEvent| {
@@ -159,12 +191,17 @@ pub fn CanvasNode(
                                 collapsed.set(!now);
                                 // Collapsing unmounts the field rows, so their
                                 // container `onmouseleave` can never fire to clear a
-                                // hover that targets this node — clear it here to
-                                // avoid a permanently stuck lineage reveal.
-                                if !now
-                                    && matches!(hovered.0.peek().as_ref(), Some((n, _)) if *n == index)
-                                {
-                                    hovered.0.set(None);
+                                // hover that targets this node — and a Node-scope or
+                                // pinned reveal would now point at phantom row
+                                // anchors. Clear both here to avoid a stuck lineage
+                                // reveal; a later pointer move / click re-establishes.
+                                if !now {
+                                    if hovered.0.peek().node() == Some(index) {
+                                        hovered.0.set(HoverTarget::None);
+                                    }
+                                    if matches!(&*pinned.0.peek(), Some((n, _)) if *n == index) {
+                                        pinned.0.set(None);
+                                    }
                                 }
                             },
                             if *collapsed.read() { "▸" } else { "▾" }
@@ -189,22 +226,24 @@ pub fn CanvasNode(
             if show_rows {
                 div {
                     class: "klinx-node-fields",
-                    // Clear the revealed field on ONE container-level leave, not
-                    // per row. Sweeping row→row would otherwise fire a row's
-                    // leave (hover→None) before the next row's enter, flashing a
-                    // transient empty closure between every row. Rows abut at the
-                    // fixed FIELD_ROW_HEIGHT pitch, so moving within the list
-                    // never crosses this boundary; hover stays Some(A)→Some(B)
-                    // and only resets when the pointer truly leaves the fields.
+                    // Downgrade Field→Node on ONE container-level leave, not per
+                    // row. Sweeping row→row would otherwise fire a row's leave
+                    // before the next row's enter, flashing a transient empty
+                    // closure between every row. Rows abut at the fixed
+                    // FIELD_ROW_HEIGHT pitch, so moving within the list never
+                    // crosses this boundary; the field hover stays Field(A)→Field(B).
+                    //
+                    // Leaving the list means the pointer is either still inside
+                    // this card (moved off the rows onto the header/padding) →
+                    // downgrade to the node-scope carry reveal; or it left the
+                    // card entirely → the card's own `onmouseleave` fires too and
+                    // clears to None. Guarding on `Field(index, _)` makes this
+                    // order-independent against the card-leave and against a jump
+                    // straight onto another card's row (which already set the new
+                    // target). `peek()` reads without subscribing.
                     onmouseleave: move |_| {
-                        // Clear only THIS node's hover. Guarding on the node index
-                        // (not a bare `is_some`) keeps the clear order-independent:
-                        // if the pointer jumped straight onto another node's row,
-                        // that row's `onmouseenter` may set `Some(other)` before this
-                        // container's leave fires — wiping on `is_some` would then
-                        // erase the newer hover. `peek()` reads without subscribing.
-                        if matches!(hovered.0.peek().as_ref(), Some((n, _)) if *n == index) {
-                            hovered.0.set(None);
+                        if matches!(&*hovered.0.peek(), HoverTarget::Field(n, _) if *n == index) {
+                            hovered.0.set(HoverTarget::Node(index));
                         }
                     },
                     for (i, field) in stage.fields.iter().enumerate() {
@@ -284,10 +323,11 @@ pub fn CanvasNode(
 ///
 /// Carries LEFT and RIGHT anchor dots (the visual endpoints field-edge cables
 /// connect to) and `data-field-kind` for CSS. Hovering the row publishes
-/// `(node_index, name)` to the [`HoveredField`] context so the canvas can reveal
-/// that field's lineage closure. The reveal is *cleared* by a single
-/// `onmouseleave` on the parent `.klinx-node-fields` container, not per row:
-/// sweeping row→row stays `Some(A)→Some(B)` with no transient `None` flash.
+/// `HoverTarget::Field(node_index, name)` to the [`super::CanvasHover`] context
+/// (upgrading the card's `Node` hover) so the canvas can reveal that field's
+/// lineage closure. On leaving the row list a single `onmouseleave` on the parent
+/// `.klinx-node-fields` container downgrades back to `Node`, not per row: sweeping
+/// row→row stays `Field(A)→Field(B)` with no transient flash.
 ///
 /// `highlighted` tints THIS cell (`klinx-node-field--lineage`) when the row is a
 /// lineage endpoint of the active hover reveal (#87) — a calm, static background
@@ -308,7 +348,13 @@ fn FieldRowView(
     highlighted: bool,
     is_correlation_key: bool,
 ) -> Element {
-    let mut hovered = use_context::<HoveredField>();
+    let mut hovered = use_context::<CanvasHover>();
+    let mut pinned = use_context::<PinnedField>();
+
+    // This row is the pinned (clicked-to-select) anchor when the pin names it.
+    // `read` subscribes the row so it restyles when the pin is set/cleared.
+    let is_pinned =
+        matches!(&*pinned.0.read(), Some((n, f)) if *n == node_index && f.as_str() == name);
 
     let kind_attr = match kind {
         FieldKind::Declared => "declared",
@@ -331,13 +377,17 @@ fn FieldRowView(
         None => name.clone(),
     };
 
-    // Append the lineage-tint modifier only when this cell is an endpoint of the
-    // active hover; an un-highlighted row keeps exactly its classic class string.
-    let row_class = if highlighted {
-        "klinx-node-field klinx-node-field--lineage"
-    } else {
-        "klinx-node-field"
-    };
+    // Append modifiers only when active; an inert row keeps exactly its classic
+    // class string. `--lineage` tints a hover/pin endpoint cell (#87); `--pinned`
+    // marks the clicked-to-select anchor (#75) so the user can see WHICH column
+    // the persistent full-lineage reveal is anchored on.
+    let mut row_class = String::from("klinx-node-field");
+    if highlighted {
+        row_class.push_str(" klinx-node-field--lineage");
+    }
+    if is_pinned {
+        row_class.push_str(" klinx-node-field--pinned");
+    }
 
     rsx! {
         div {
@@ -345,8 +395,30 @@ fn FieldRowView(
             "data-field-kind": kind_attr,
             title: "{tip}",
             onmouseenter: {
+                // Row-scope reveal (#72): upgrade the card's Node hover to this
+                // field's 1-hop closure. `mouseenter` does not bubble, so the
+                // card's enter does not re-fire and clobber this.
                 let name = name.clone();
-                move |_| hovered.0.set(Some((node_index, name.clone())))
+                move |_| hovered.0.set(HoverTarget::Field(node_index, name.clone()))
+            },
+            onclick: {
+                // Click-to-select (#75): pin this column to reveal its FULL
+                // transitive pipeline lineage, sticky across pointer moves.
+                // Clicking the pinned column again unpins it. `stop_propagation`
+                // keeps the click from bubbling to the card's node-select handler —
+                // a field click selects the FIELD, not the node.
+                let name = name.clone();
+                move |e: MouseEvent| {
+                    e.stop_propagation();
+                    let already = matches!(
+                        &*pinned.0.peek(), Some((n, f)) if *n == node_index && f.as_str() == name
+                    );
+                    if already {
+                        pinned.0.set(None);
+                    } else {
+                        pinned.0.set(Some((node_index, name.clone())));
+                    }
+                }
             },
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
             // Correlation-key marker (#88): a reserved LEADING slot whose width
