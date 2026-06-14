@@ -34,8 +34,13 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
     // the toggle, so this signal is inert for them.
     let mut collapsed = use_signal(|| false);
     let has_fields = !stage.fields.is_empty();
-    // Route nodes carry output branches (rendered as ports below the columns).
+    // Route and Cull nodes carry extra output ports (rendered as branch ports
+    // below the columns): a Route's condition/default branches, or a Cull's
+    // `removed_to` side-output.
     let has_branches = !stage.branches.is_empty();
+    // A Route's outputs ARE its branch ports, so it has no node-level output
+    // port; a Cull keeps its node-level main output ALONGSIDE the side-output.
+    let keeps_node_out = stage.keeps_node_output_port();
     let show_rows = has_fields && !*collapsed.read();
     let show_branches = has_branches && !*collapsed.read();
 
@@ -237,10 +242,11 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
                 class: "klinx-node-port klinx-node-port--in",
                 style: "top: {port_y}px;",
             }
-            // A Route node's outputs ARE its branch ports — the shared node-level
-            // output port is never used, so omit it (your point 2). Every other
-            // node keeps its single node-level output port.
-            if !has_branches {
+            // A Route node's outputs ARE its branch ports, so its node-level
+            // output port is omitted. A Cull keeps its node-level main output
+            // (the unremoved groups) alongside the `removed_to` side-output
+            // branch port; every non-branching node keeps its single output port.
+            if keeps_node_out {
                 div {
                     class: "klinx-node-port klinx-node-port--out",
                     style: "top: {port_y}px;",
