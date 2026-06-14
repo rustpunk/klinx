@@ -34,7 +34,10 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
     // the toggle, so this signal is inert for them.
     let mut collapsed = use_signal(|| false);
     let has_fields = !stage.fields.is_empty();
+    // Route nodes carry output branches (rendered as ports below the columns).
+    let has_branches = !stage.branches.is_empty();
     let show_rows = has_fields && !*collapsed.read();
+    let show_branches = has_branches && !*collapsed.read();
 
     let base_class = match (is_selected, is_error, is_composition) {
         (_, _, true) => {
@@ -113,8 +116,9 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
                     class: "klinx-node-badge",
                     style: "color: var(--klinx-stage-accent);",
                     span { class: "klinx-node-type-badge", "{badge}" }
-                    // Collapse/expand toggle — only on cards that carry field rows.
-                    if has_fields {
+                    // Collapse/expand toggle — on any card that carries field rows
+                    // or Route branch ports.
+                    if has_fields || has_branches {
                         button {
                             class: "klinx-node-collapse-btn",
                             title: if *collapsed.read() { "Expand fields" } else { "Collapse fields" },
@@ -186,6 +190,26 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
                 }
             }
 
+            // ── Route branch ports (variable height) ─────────────────────────
+            // A Route node's output ports, stacked directly below the column rows
+            // at the same FIELD_ROW_HEIGHT pitch so each branch's right anchor
+            // lands on `branch_anchor_out(i)` (where the per-branch cable attaches).
+            // The default/fallback branch renders distinctly; a condition branch
+            // shows its predicate on hover.
+            if show_branches {
+                div {
+                    class: "klinx-node-branches",
+                    for branch in stage.branches.iter() {
+                        BranchPortView {
+                            key: "{branch.name}",
+                            name: branch.name.clone(),
+                            predicate: branch.predicate.clone(),
+                            is_default: branch.is_default,
+                        }
+                    }
+                }
+            }
+
             // Drill-in button for composition nodes
             if is_composition {
                 button {
@@ -252,6 +276,34 @@ fn FieldRowView(node_index: usize, row_index: usize, name: String, kind: FieldKi
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
             span { class: "klinx-node-field-name", "{name}" }
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }
+        }
+    }
+}
+
+/// One output-branch port on a Route node card.
+///
+/// Renders below the column rows at the same row pitch, carrying a RIGHT (output)
+/// anchor that the downstream cable for `route.name` attaches to (matching
+/// [`crate::pipeline_view::StageView::branch_anchor_out`]). The default/fallback
+/// branch is styled distinctly via `data-default`. A condition branch surfaces
+/// its CXL predicate on hover via a native `title` tooltip (details-on-demand —
+/// the predicate is never crammed onto the card).
+#[component]
+fn BranchPortView(name: String, predicate: Option<String>, is_default: bool) -> Element {
+    // Tooltip: the branch's predicate, or a note that the default catches the
+    // records no condition matched.
+    let tip = match &predicate {
+        Some(p) => p.clone(),
+        None => "default — records matching no condition".to_string(),
+    };
+
+    rsx! {
+        div {
+            class: "klinx-node-branch",
+            "data-default": if is_default { "true" } else { "false" },
+            title: "{tip}",
+            span { class: "klinx-node-branch-label", "{name}" }
+            span { class: "klinx-node-branch-anchor" }
         }
     }
 }

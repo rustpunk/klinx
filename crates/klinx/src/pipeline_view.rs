@@ -112,6 +112,100 @@ fn node_input_name(ni: &NodeInput) -> &str {
     }
 }
 
+/// The branch (port) a `node.port` reference selects, or `None` for a bare
+/// `node` reference. For a reference to a Route node this is the branch name.
+fn node_input_port(ni: &NodeInput) -> Option<&str> {
+    match ni {
+        NodeInput::Single(_) => None,
+        NodeInput::Port { port, .. } => Some(port.as_str()),
+    }
+}
+
+/// A node's output branches: every condition branch in declaration order
+/// followed by the always-present `default`. Empty for every non-Route node.
+fn route_branches(node: &PipelineNode) -> Vec<RouteBranch> {
+    match node {
+        PipelineNode::Route { config: body, .. } => {
+            let mut branches: Vec<RouteBranch> = body
+                .conditions
+                .iter()
+                .map(|(name, predicate)| RouteBranch {
+                    name: name.clone(),
+                    predicate: Some(predicate.as_ref().to_string()),
+                    is_default: false,
+                })
+                .collect();
+            // The default/fallback is a first-class output port, distinct from
+            // the predicate branches and always present.
+            branches.push(RouteBranch {
+                name: body.default.clone(),
+                predicate: None,
+                is_default: true,
+            });
+            branches
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Index of the branch a `node.port` reference selects in the source's branch
+/// list, or `None` for a bare reference or a source with no branches.
+fn resolve_from_branch(
+    ni: &NodeInput,
+    from: usize,
+    node_branches: &[Vec<RouteBranch>],
+) -> Option<usize> {
+    let port = node_input_port(ni)?;
+    node_branches[from].iter().position(|b| b.name == port)
+}
+
+/// Append one resolved input edge: looks up the source by name, records the
+/// source branch (if it leaves a Route via `route.branch`), and extends the
+/// predecessor relation. A reference that names no declared node is skipped.
+fn push_input_edge(
+    ni: &NodeInput,
+    to: usize,
+    name_to_idx: &std::collections::HashMap<String, usize>,
+    node_branches: &[Vec<RouteBranch>],
+    connections: &mut Vec<Connection>,
+    predecessors: &mut [Vec<usize>],
+) {
+    if let Some(&from) = name_to_idx.get(node_input_name(ni)) {
+        let from_branch = resolve_from_branch(ni, from, node_branches);
+        connections.push(Connection {
+            from,
+            to,
+            from_branch,
+        });
+        predecessors[to].push(from);
+    }
+}
+
+/// Card height for a stack of `rows` field+branch rows below the header — the
+/// free-function form of [`StageView::card_height`], used during layout before a
+/// `StageView` exists. `0` rows keeps the classic [`NODE_HEIGHT`].
+fn row_stack_height(rows: usize) -> f32 {
+    if rows == 0 {
+        NODE_HEIGHT
+    } else {
+        FIELD_HEADER_HEIGHT + rows as f32 * FIELD_ROW_HEIGHT
+    }
+}
+
+/// One output branch of a [`StageKind::Route`] node: a named output port the
+/// route forwards matching records to. `predicate` is the branch's CXL condition
+/// (`None` for the always-present `default`/fallback branch). Downstream nodes
+/// consume a specific branch via `route_name.branch` — so each branch is an
+/// individually-addressable port, not "just another rule" (#77).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteBranch {
+    pub name: String,
+    /// The branch's CXL boolean predicate; `None` for the default/fallback.
+    pub predicate: Option<String>,
+    /// The default/fallback branch — always present, rendered distinctly.
+    pub is_default: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StageView {
     pub id: String,
@@ -131,18 +225,31 @@ pub struct StageView {
     /// unchanged, so existing rendering is untouched. Both the composition
     /// canvas (#66) and the pipeline canvas (#68) populate this.
     pub fields: Vec<FieldRow>,
+    /// Per-branch output ports for a Route node — condition branches in
+    /// declaration order followed by the `default` branch. Empty for every
+    /// non-Route node. Rendered as labelled output ports below the field rows;
+    /// each downstream edge that consumes `route.branch` anchors at the matching
+    /// branch port (see [`StageView::branch_anchor_out`]).
+    pub branches: Vec<RouteBranch>,
 }
 
 impl StageView {
+    /// Node-level OUTPUT port — the default cable origin. Anchored at the card's
+    /// VERTICAL CENTER (`card_height/2`), not a fixed offset, so on a tall
+    /// field-bearing card the node cables meet the card body instead of riding
+    /// along its top edge (#77). A field-less, branch-less card is exactly
+    /// [`NODE_HEIGHT`] tall, so this matches the classic geometry there.
     pub fn port_out(&self) -> (f32, f32) {
         (
             self.canvas_x + NODE_WIDTH,
-            self.canvas_y + NODE_HEIGHT / 2.0,
+            self.canvas_y + self.card_height() / 2.0,
         )
     }
 
+    /// Node-level INPUT port — see [`StageView::port_out`]; anchored at the
+    /// card's vertical center.
     pub fn port_in(&self) -> (f32, f32) {
-        (self.canvas_x, self.canvas_y + NODE_HEIGHT / 2.0)
+        (self.canvas_x, self.canvas_y + self.card_height() / 2.0)
     }
 
     /// World-space vertical center of field row `i` inside this card.
@@ -169,14 +276,32 @@ impl StageView {
         self.fields.iter().position(|f| f.name == name)
     }
 
-    /// Full world-space card height, growing with the field-row list. A card
-    /// with no fields is exactly [`NODE_HEIGHT`] (the classic look), so this is
-    /// safe to use uniformly in bounds/layout math.
+    /// World-space vertical center of branch-port row `i`. Branch ports stack
+    /// BELOW the field rows at the same [`FIELD_ROW_HEIGHT`] pitch, so branch row
+    /// `i` occupies field-row slot `fields.len() + i`.
+    pub fn branch_row_y(&self, i: usize) -> f32 {
+        self.canvas_y
+            + FIELD_HEADER_HEIGHT
+            + (self.fields.len() + i) as f32 * FIELD_ROW_HEIGHT
+            + FIELD_ROW_HEIGHT / 2.0
+    }
+
+    /// World-space coordinate of branch-port row `i`'s RIGHT (output) anchor —
+    /// the point a downstream edge that consumes that branch attaches to.
+    pub fn branch_anchor_out(&self, i: usize) -> (f32, f32) {
+        (self.canvas_x + NODE_WIDTH, self.branch_row_y(i))
+    }
+
+    /// Full world-space card height. Field rows and branch ports both stack
+    /// below the header at the [`FIELD_ROW_HEIGHT`] pitch, so the card grows with
+    /// their combined count. A card with neither is exactly [`NODE_HEIGHT`] (the
+    /// classic look), so this is safe to use uniformly in bounds/layout math.
     pub fn card_height(&self) -> f32 {
-        if self.fields.is_empty() {
+        let rows = self.fields.len() + self.branches.len();
+        if rows == 0 {
             NODE_HEIGHT
         } else {
-            FIELD_HEADER_HEIGHT + self.fields.len() as f32 * FIELD_ROW_HEIGHT
+            FIELD_HEADER_HEIGHT + rows as f32 * FIELD_ROW_HEIGHT
         }
     }
 }
@@ -192,11 +317,36 @@ const INPUT_Y_OFFSET: f32 = 30.0;
 /// instead of a top-anchored ragged stack.
 const COLUMN_CENTER_Y: f32 = 260.0;
 
+/// A node-level connection between two stages, optionally leaving a specific
+/// Route branch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Connection {
+    pub from: usize,
+    pub to: usize,
+    /// When the edge leaves a Route node via a `route.branch` reference, the
+    /// index of that branch in the source stage's [`StageView::branches`]. `None`
+    /// for ordinary edges; lets the canvas anchor the cable at the branch port
+    /// rather than the shared node-level port.
+    pub from_branch: Option<usize>,
+}
+
+impl Connection {
+    /// An ordinary (non-branch) connection between two stage indices.
+    fn plain(from: usize, to: usize) -> Self {
+        Self {
+            from,
+            to,
+            from_branch: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PipelineView {
     pub stages: Vec<StageView>,
-    /// Explicit connections between stages: `(from_idx, to_idx)`.
-    pub connections: Vec<(usize, usize)>,
+    /// Explicit connections between stages. A connection that leaves a Route
+    /// node records the source branch it originates from (`from_branch`).
+    pub connections: Vec<Connection>,
     /// Field-level lineage edges between stage rows. Populated by both the
     /// composition pass (#66) and the pipeline pass (#68); empty for views
     /// without resolvable field schemas (e.g. partial/degraded views), where an
@@ -441,27 +591,43 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
         cols.push(col);
     }
 
+    // Per-node Route output branches (condition branches + default), empty for
+    // every non-Route node. Computed before connections so an edge that consumes
+    // `route.branch` can resolve its source-branch index, and before layout so
+    // the branch ports' height is reserved alongside the field rows.
+    let node_branches: Vec<Vec<RouteBranch>> =
+        nodes.iter().map(|s| route_branches(&s.value)).collect();
+
     // Connections: resolve each consumer's input header reference. These also
-    // form the predecessor relation the barycenter layout pass consumes.
-    let mut connections: Vec<(usize, usize)> = Vec::new();
+    // form the predecessor relation the barycenter layout pass consumes. An edge
+    // that leaves a Route via `route.branch` records that branch (`from_branch`).
+    let mut connections: Vec<Connection> = Vec::new();
     let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (idx, spanned) in nodes.iter().enumerate() {
         match &spanned.value {
             PipelineNode::Source { .. } => {}
             PipelineNode::Merge { header, .. } => {
                 for ni in &header.inputs {
-                    if let Some(&from) = name_to_idx.get(node_input_name(&ni.value)) {
-                        connections.push((from, idx));
-                        predecessors[idx].push(from);
-                    }
+                    push_input_edge(
+                        &ni.value,
+                        idx,
+                        &name_to_idx,
+                        &node_branches,
+                        &mut connections,
+                        &mut predecessors,
+                    );
                 }
             }
             PipelineNode::Combine { header, .. } => {
                 for ni in header.input.values() {
-                    if let Some(&from) = name_to_idx.get(node_input_name(&ni.value)) {
-                        connections.push((from, idx));
-                        predecessors[idx].push(from);
-                    }
+                    push_input_edge(
+                        &ni.value,
+                        idx,
+                        &name_to_idx,
+                        &node_branches,
+                        &mut connections,
+                        &mut predecessors,
+                    );
                 }
             }
             PipelineNode::Transform { header, .. }
@@ -469,10 +635,14 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
             | PipelineNode::Route { header, .. }
             | PipelineNode::Output { header, .. }
             | PipelineNode::Composition { header, .. } => {
-                if let Some(&from) = name_to_idx.get(node_input_name(&header.input.value)) {
-                    connections.push((from, idx));
-                    predecessors[idx].push(from);
-                }
+                push_input_edge(
+                    &header.input.value,
+                    idx,
+                    &name_to_idx,
+                    &node_branches,
+                    &mut connections,
+                    &mut predecessors,
+                );
             }
         }
     }
@@ -492,13 +662,8 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
     // as fixed-height stacking did before this change.
     let heights: Vec<f32> = out_fields
         .iter()
-        .map(|rows| {
-            if rows.is_empty() {
-                NODE_HEIGHT
-            } else {
-                FIELD_HEADER_HEIGHT + rows.len() as f32 * FIELD_ROW_HEIGHT
-            }
-        })
+        .zip(&node_branches)
+        .map(|(rows, branches)| row_stack_height(rows.len() + branches.len()))
         .collect();
     let positions = layout_positions(&cols, &predecessors, &heights);
     let stages: Vec<StageView> = nodes
@@ -508,6 +673,7 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
         .map(|(i, (spanned, (x, y)))| {
             let mut stage = build_stage_view(&spanned.value, x, y);
             stage.fields = out_fields[i].clone();
+            stage.branches = node_branches[i].clone();
             stage
         })
         .collect();
@@ -565,28 +731,49 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
     // body nodes, [n_in+n_body, total) output ports. `cols`/`predecessors` are
     // sized once over that space; ports default to column 0 / no predecessors.
     let mut cols: Vec<usize> = vec![0; total];
-    let mut connections: Vec<(usize, usize)> = Vec::new();
+    let mut connections: Vec<Connection> = Vec::new();
     let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); total];
+
+    // Route output branches per UNIFIED index: body slots carry their route's
+    // branches (condition branches + default); input/output ports carry none.
+    // Sized over the whole index space so a `route.branch` edge can resolve its
+    // source-branch index, and so layout reserves the branch ports' height.
+    let mut node_branches: Vec<Vec<RouteBranch>> = vec![Vec::new(); total];
+    for (bi, spanned) in body.iter().enumerate() {
+        node_branches[n_in + bi] = route_branches(&spanned.value);
+    }
+
+    // Resolve a body input reference to `(unified_index, source_branch_index)`;
+    // the branch index is set only when the reference is `producer.branch` and
+    // the producer is a Route.
+    let resolve_edge =
+        |ni: &NodeInput, body_idx: &HashMap<&str, usize>| -> Option<(usize, Option<usize>)> {
+            let p = resolve(node_input_name(ni), body_idx)?;
+            let branch = node_input_port(ni)
+                .and_then(|port| node_branches[p].iter().position(|b| b.name == port));
+            Some((p, branch))
+        };
 
     for (bi, spanned) in body.iter().enumerate() {
         let idx = n_in + bi;
         let node = &spanned.value;
 
-        // Resolved predecessors: input ports + upstream body nodes.
-        let mut preds: Vec<usize> = Vec::new();
+        // Resolved predecessors with the source branch (if any): input ports +
+        // upstream body nodes.
+        let mut preds: Vec<(usize, Option<usize>)> = Vec::new();
         match node {
             PipelineNode::Source { .. } => {}
             PipelineNode::Merge { header, .. } => {
                 for ni in &header.inputs {
-                    if let Some(p) = resolve(node_input_name(&ni.value), &body_idx) {
-                        preds.push(p);
+                    if let Some(e) = resolve_edge(&ni.value, &body_idx) {
+                        preds.push(e);
                     }
                 }
             }
             PipelineNode::Combine { header, .. } => {
                 for ni in header.input.values() {
-                    if let Some(p) = resolve(node_input_name(&ni.value), &body_idx) {
-                        preds.push(p);
+                    if let Some(e) = resolve_edge(&ni.value, &body_idx) {
+                        preds.push(e);
                     }
                 }
             }
@@ -595,8 +782,8 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
             | PipelineNode::Route { header, .. }
             | PipelineNode::Output { header, .. }
             | PipelineNode::Composition { header, .. } => {
-                if let Some(p) = resolve(node_input_name(&header.input.value), &body_idx) {
-                    preds.push(p);
+                if let Some(e) = resolve_edge(&header.input.value, &body_idx) {
+                    preds.push(e);
                 }
             }
         }
@@ -607,10 +794,14 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
         cols[idx] = if matches!(node, PipelineNode::Source { .. }) {
             0
         } else {
-            preds.iter().map(|&p| cols[p] + 1).max().unwrap_or(1)
+            preds.iter().map(|&(p, _)| cols[p] + 1).max().unwrap_or(1)
         };
-        for &p in &preds {
-            connections.push((p, idx));
+        for &(p, from_branch) in &preds {
+            connections.push(Connection {
+                from: p,
+                to: idx,
+                from_branch,
+            });
             predecessors[idx].push(p);
         }
 
@@ -628,7 +819,10 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
         cols[out_idx] = out_col;
         let producer = alias.internal_ref.value.split('.').next().unwrap_or("");
         if let Some(&from) = body_idx.get(producer) {
-            connections.push((from, out_idx));
+            // The producer→output-port edge surfaces a body node's records; it
+            // is not a Route branch selection (the `internal_ref` channel
+            // semantics differ), so it carries no `from_branch`.
+            connections.push(Connection::plain(from, out_idx));
             predecessors[out_idx].push(from);
         }
     }
@@ -648,13 +842,8 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
     // [`StageView::card_height`]); a row-less node is the classic [`NODE_HEIGHT`].
     let heights: Vec<f32> = out_fields
         .iter()
-        .map(|rows| {
-            if rows.is_empty() {
-                NODE_HEIGHT
-            } else {
-                FIELD_HEADER_HEIGHT + rows.len() as f32 * FIELD_ROW_HEIGHT
-            }
-        })
+        .zip(&node_branches)
+        .map(|(rows, branches)| row_stack_height(rows.len() + branches.len()))
         .collect();
     let positions = layout_positions(&cols, &predecessors, &heights);
 
@@ -669,6 +858,7 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
         let (x, y) = positions[n_in + bi];
         let mut stage = build_stage_view(&spanned.value, x, y);
         stage.fields = out_fields[n_in + bi].clone();
+        stage.branches = node_branches[n_in + bi].clone();
         stages.push(stage);
     }
     for (oi, (port, alias)) in sig.outputs.iter().enumerate() {
@@ -1021,6 +1211,7 @@ fn input_port_stage(name: &str, decl: &PortDecl, x: f32, y: f32) -> StageView {
         description: decl.description.clone(),
         error_message: None,
         fields: Vec::new(),
+        branches: Vec::new(),
     }
 }
 
@@ -1038,6 +1229,7 @@ fn output_port_stage(name: &str, alias: &OutputAlias, x: f32, y: f32) -> StageVi
         description: alias.description.clone(),
         error_message: None,
         fields: Vec::new(),
+        branches: Vec::new(),
     }
 }
 
@@ -1060,6 +1252,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             description: header.description.clone(),
             error_message: None,
             fields: Vec::new(),
+            branches: Vec::new(),
         },
         PipelineNode::Transform {
             header,
@@ -1077,6 +1270,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 description: header.description.clone(),
                 error_message: None,
                 fields: Vec::new(),
+                branches: Vec::new(),
             }
         }
         PipelineNode::Aggregate {
@@ -1100,6 +1294,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 description: header.description.clone(),
                 error_message: None,
                 fields: Vec::new(),
+                branches: Vec::new(),
             }
         }
         PipelineNode::Route {
@@ -1129,6 +1324,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 description: header.description.clone(),
                 error_message: None,
                 fields: Vec::new(),
+                branches: Vec::new(),
             }
         }
         PipelineNode::Merge { header, .. } => StageView {
@@ -1142,6 +1338,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             description: header.description.clone(),
             error_message: None,
             fields: Vec::new(),
+            branches: Vec::new(),
         },
         PipelineNode::Combine {
             header,
@@ -1159,6 +1356,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 description: header.description.clone(),
                 error_message: None,
                 fields: Vec::new(),
+                branches: Vec::new(),
             }
         }
         PipelineNode::Output {
@@ -1175,6 +1373,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             description: header.description.clone(),
             error_message: None,
             fields: Vec::new(),
+            branches: Vec::new(),
         },
         PipelineNode::Composition { header, r#use, .. } => StageView {
             id: header.name.clone(),
@@ -1187,6 +1386,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             description: header.description.clone(),
             error_message: None,
             fields: Vec::new(),
+            branches: Vec::new(),
         },
     }
 }
@@ -1207,28 +1407,28 @@ fn build_connections(
     input_targets: &[usize],
     transform_count: usize,
     output_count: usize,
-) -> Vec<(usize, usize)> {
+) -> Vec<Connection> {
     let mut conns = Vec::new();
     let t_base = input_count;
 
     if transform_count > 0 {
         for (i, &target) in input_targets.iter().enumerate() {
             let target_stage = t_base + target.min(transform_count - 1);
-            conns.push((i, target_stage));
+            conns.push(Connection::plain(i, target_stage));
         }
         for i in 0..transform_count - 1 {
-            conns.push((t_base + i, t_base + i + 1));
+            conns.push(Connection::plain(t_base + i, t_base + i + 1));
         }
         let last_t = t_base + transform_count - 1;
         let o_base = t_base + transform_count;
         for j in 0..output_count {
-            conns.push((last_t, o_base + j));
+            conns.push(Connection::plain(last_t, o_base + j));
         }
     } else {
         let o_base = input_count;
         for i in 0..input_count {
             for j in 0..output_count {
-                conns.push((i, o_base + j));
+                conns.push(Connection::plain(i, o_base + j));
             }
         }
     }
@@ -1271,6 +1471,7 @@ pub fn derive_partial_pipeline_view(
                     description: t.description.clone(),
                     error_message: None,
                     fields: Vec::new(),
+                    branches: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -1285,6 +1486,7 @@ pub fn derive_partial_pipeline_view(
                     description: None,
                     error_message: Some(message.clone()),
                     fields: Vec::new(),
+                    branches: Vec::new(),
                 });
             }
         }
@@ -1323,6 +1525,7 @@ pub fn derive_partial_pipeline_view(
                     description: None,
                     error_message: None,
                     fields: Vec::new(),
+                    branches: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -1337,6 +1540,7 @@ pub fn derive_partial_pipeline_view(
                     description: None,
                     error_message: Some(message.clone()),
                     fields: Vec::new(),
+                    branches: Vec::new(),
                 });
             }
         }
@@ -1365,6 +1569,7 @@ pub fn derive_partial_pipeline_view(
                     description: None,
                     error_message: None,
                     fields: Vec::new(),
+                    branches: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -1379,6 +1584,7 @@ pub fn derive_partial_pipeline_view(
                     description: None,
                     error_message: Some(message.clone()),
                     fields: Vec::new(),
+                    branches: Vec::new(),
                 });
             }
         }
@@ -1498,6 +1704,7 @@ pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) 
             description: None,
             error_message: None,
             fields: Vec::new(),
+            branches: Vec::new(),
         });
     }
 
@@ -1505,14 +1712,17 @@ pub fn derive_body_view(body: &clinker_core::plan::composition_body::BoundBody) 
     // were pushed in topo order, so every edge's source and target are already
     // in `idx_to_slot`. The same pairs feed both the connector overlay and the
     // layout pass's predecessor relation.
-    let mut connections: Vec<(usize, usize)> = Vec::new();
+    let mut connections: Vec<Connection> = Vec::new();
     let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); stages.len()];
     for e in body.graph.edge_references() {
         if let (Some(from), Some(to)) = (
             idx_to_slot.get(&e.source()).copied(),
             idx_to_slot.get(&e.target()).copied(),
         ) {
-            connections.push((from, to));
+            // The drilled-in body view is built from the compiled plan's graph,
+            // which does not carry per-branch port identity here; route branch
+            // tagging in this view is deferred (#77 follow-up).
+            connections.push(Connection::plain(from, to));
             predecessors[to].push(from);
         }
     }
@@ -1631,13 +1841,27 @@ nodes:
         // No synthetic `_route` field leaks onto the card (Route has no cxl).
         assert!(route.fields.iter().all(|f| f.name != "_route"));
 
-        // Both `output` nodes consume the route node's branches.
-        let from_route = view
+        // Two branch ports: the `priority_report` condition (carries a predicate)
+        // then the `fulfilled_orders` default (no predicate, flagged default).
+        assert_eq!(route.branches.len(), 2);
+        assert_eq!(route.branches[0].name, "priority_report");
+        assert!(!route.branches[0].is_default);
+        assert!(route.branches[0].predicate.is_some());
+        assert_eq!(route.branches[1].name, "fulfilled_orders");
+        assert!(route.branches[1].is_default);
+        assert!(route.branches[1].predicate.is_none());
+
+        // Both `output` nodes consume the route node, each bound to its specific
+        // branch (so the cable anchors at that branch's port, not the node port).
+        let branch_targets: std::collections::HashMap<&str, Option<usize>> = view
             .connections
             .iter()
-            .filter(|(from, _)| *from == route_idx)
-            .count();
-        assert_eq!(from_route, 2, "both outputs connect to the route node");
+            .filter(|c| c.from == route_idx)
+            .map(|c| (view.stages[c.to].id.as_str(), c.from_branch))
+            .collect();
+        assert_eq!(branch_targets.len(), 2, "both outputs connect to the route");
+        assert_eq!(branch_targets["priority_report"], Some(0));
+        assert_eq!(branch_targets["fulfilled_orders"], Some(1));
     }
 
     /// A legacy-shape fixture lifted into the unified `nodes:` topology
@@ -1826,9 +2050,14 @@ nodes:
         // Edges: input->a, a->b, b->output all present (by stage index).
         let idx = |label: &str| view.stages.iter().position(|s| s.label == label).unwrap();
         let (i_in, i_a, i_b, i_out) = (idx("orders"), idx("a"), idx("b"), idx("result"));
-        assert!(view.connections.contains(&(i_in, i_a)));
-        assert!(view.connections.contains(&(i_a, i_b)));
-        assert!(view.connections.contains(&(i_b, i_out)));
+        let has_conn = |from: usize, to: usize| {
+            view.connections
+                .iter()
+                .any(|c| c.from == from && c.to == to)
+        };
+        assert!(has_conn(i_in, i_a));
+        assert!(has_conn(i_a, i_b));
+        assert!(has_conn(i_b, i_out));
     }
 
     #[test]
@@ -1880,7 +2109,11 @@ nodes:
             .position(|s| s.id == "port:in:dup")
             .unwrap();
         let body_dup = view.stages.iter().position(|s| s.id == "dup").unwrap();
-        assert!(view.connections.contains(&(port, body_dup)));
+        assert!(
+            view.connections
+                .iter()
+                .any(|c| c.from == port && c.to == body_dup)
+        );
     }
 
     #[test]
@@ -1914,7 +2147,7 @@ nodes:
             .position(|s| s.kind == StageKind::OutputPort)
             .expect("output port drawn");
         assert!(
-            !view.connections.iter().any(|&(_, to)| to == out_pos),
+            !view.connections.iter().any(|c| c.to == out_pos),
             "output whose ref names no body node is drawn but unconnected"
         );
     }
@@ -2610,6 +2843,7 @@ nodes:
             description: None,
             error_message: None,
             fields: Vec::new(),
+            branches: Vec::new(),
         }
     }
 

@@ -253,6 +253,14 @@
 [data-theme="enamel"] .klinx-node-field[data-field-kind="emitted"] .klinx-node-field-name {
   color: #1F7A74;
 }
+/* Route branch ports on the light plate: accent for predicate branches, muted
+   for the default — mirroring the dark-theme treatment. */
+[data-theme="enamel"] .klinx-node-branch {
+  color: #1F7A74;
+}
+[data-theme="enamel"] .klinx-node-branch[data-default="true"] .klinx-node-branch-label {
+  color: #5A6B78;
+}
 
 /* Enamel inspector — light plate fields inside dark panel shell */
 [data-theme="enamel"] .klinx-inspector-field,
@@ -4278,6 +4286,59 @@ input:-webkit-autofill:focus {
 }
 .klinx-node-field-anchor--out {
   right: -4px;
+}
+
+/* ── Route branch ports ─────────────────────────────────────────────────────
+   A Route node's output branches render as rows BELOW the column rows, at the
+   SAME 22px pitch so each branch's right anchor lands on `branch_anchor_out(i)`
+   in world space. Keep these heights in lockstep with FIELD_ROW_HEIGHT. The
+   inset box-shadow draws a divider above the section WITHOUT adding height (a
+   real border would push every branch row down 1px and de-sync the anchors). */
+.klinx-node-branches {
+  margin: 0;
+  box-shadow: inset 0 1px 0 var(--klinx-border-medium);
+}
+.klinx-node-branch {
+  position: relative;
+  box-sizing: border-box;
+  height: 22px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 12px;
+  font-family: var(--klinx-font-code);
+  font-size: 11px;
+  /* A routing output reads as an accent, distinct from the column rows. */
+  color: var(--klinx-verdigris);
+}
+.klinx-node-branch-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The default/fallback branch is the catch-all — muted + italic to set it apart
+   from the predicate branches. */
+.klinx-node-branch[data-default="true"] .klinx-node-branch-label {
+  color: var(--klinx-text-floor);
+  font-style: italic;
+}
+/* Branch OUTPUT anchor — same row-centered geometry as a field `--out` anchor
+   (center on `canvas_x + NODE_WIDTH`, on the row mid-line), but drawn as a
+   rotated square ("diamond") so a routing port reads differently from a column
+   dot. */
+.klinx-node-branch-anchor {
+  position: absolute;
+  top: 50%;
+  right: -4px;
+  width: 7px;
+  height: 7px;
+  background: var(--klinx-verdigris);
+  border: 1px solid var(--klinx-border-medium);
+  transform: translateY(-50%) rotate(45deg);
+}
+.klinx-node-branch[data-default="true"] .klinx-node-branch-anchor {
+  background: var(--klinx-text-floor);
 }
 
 /* Dimmed node — outside the hovered field's lineage closure. */
