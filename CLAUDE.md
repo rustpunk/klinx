@@ -64,7 +64,48 @@ dx serve --package klinx         # desktop target (default per Dioxus.toml)
 ```
 
 Klinx is desktop-only: there is no `wasm32`/web build and no Playwright web test
-target. UI verification runs against the `wry` desktop app.
+target. UI verification runs against the `wry` desktop app — headlessly when
+there is no display (CI, an agent session), per below.
+
+### Headless UI verification (no display)
+
+The `wry`/WebKitGTK UI renders inside a virtual framebuffer, so a change can be
+screenshotted and eyeballed without a physical display — the same render-and-look
+approach the sibling `shelvd` project uses (the capture is at the X-server level,
+so it is renderer-agnostic). `scripts/shot.sh` wraps the recipe:
+
+```bash
+cargo build --package klinx
+scripts/shot.sh shot.png ./examples/pipelines   # → shot.png of the canvas
+```
+
+Under the hood it is `xvfb-run` + ImageMagick `import -window root` with WebKitGTK
+forced onto software rendering:
+
+```bash
+xvfb-run -n 88 -s "-screen 0 1400x900x24" bash -c '
+  export WAYLAND_DISPLAY= GDK_BACKEND=x11 \
+         WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+         LIBGL_ALWAYS_SOFTWARE=1 NO_AT_BRIDGE=1
+  ./target/debug/klinx --workspace ./examples/pipelines & app=$!
+  sleep 10; import -window root shot.png; kill $app'
+```
+
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` is load-bearing — webkit2gtk-4.1 will not paint
+under Xvfb without it (`main.rs` already sets it when unset, so the binary is
+headless-safe on its own; the script sets it too to stay self-contained).
+Prerequisites: `xvfb-run` (xvfb), ImageMagick (`import`), mesa software GL
+(llvmpipe). This is render-and-eyeball, **not** golden-image diffing.
+
+For a hover/click-triggered state (e.g. field-lineage reveal), drive input with
+`xdotool` against the same `$DISPLAY` before the capture:
+
+```bash
+xdotool mousemove <x> <y>      # hover a field row to reveal its lineage, then import
+```
+
+Pin the opened file with `--workspace <dir>` plus an `xdotool` click on the file
+tree, or a fixed-window crop: `convert shot.png -crop WxH+X+Y +repage out.png`.
 
 ## Dioxus
 
