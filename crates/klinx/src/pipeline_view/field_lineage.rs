@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cxl::ast::{Program, Statement};
+use cxl::ast::{Expr, Program, Statement};
 use cxl::parser::Parser;
 
 /// How a field on a node's output record came to exist.
@@ -32,6 +32,14 @@ pub enum FieldKind {
 pub struct FieldRow {
     pub name: String,
     pub kind: FieldKind,
+    /// Compact datatype label for inline display (e.g. `float`, `string`,
+    /// `int?` for a nullable int). `Some` for [`FieldKind::Declared`] columns
+    /// (from a source/port schema) and for [`FieldKind::PassThrough`] columns
+    /// that carry a typed producer column through unchanged. `None` for
+    /// [`FieldKind::Emitted`] columns — typing an `emit` expression needs the
+    /// engine typechecker (Phase 2b / #68) — and when the producer column has no
+    /// known type.
+    pub ty: Option<String>,
 }
 
 /// A field-level lineage edge: `to_node.to_field` is (partly) derived from
@@ -165,22 +173,67 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
     let emitted = emitted_field_names(program);
     let emitted_set: HashSet<&str> = emitted.iter().map(|s| s.as_str()).collect();
 
+    // An emit that just re-emits a column unchanged (`emit c = c` or
+    // `emit c = src.c`) is a passthrough, NOT a created/altered field — so it is
+    // classified `PassThrough`, not `Emitted`. This matters for nodes like a join
+    // that re-`emit` every input column: those columns are carried, so they read
+    // as passthroughs and keep their datatypes, instead of all looking computed.
+    let copies = emit_copy_targets(program, input_cols);
+
+    // Datatypes are filled in by the caller (`compute_field_lineage`): a
+    // PassThrough row inherits its producer column's type; an Emitted row's type
+    // would need the engine typechecker (Phase 2b), so it stays `None` here.
     let mut rows: Vec<FieldRow> = Vec::new();
     for col in input_cols {
         if !emitted_set.contains(col.as_str()) {
             rows.push(FieldRow {
                 name: col.clone(),
                 kind: FieldKind::PassThrough,
+                ty: None,
             });
         }
     }
     for name in emitted {
+        let kind = if copies.contains(&name) {
+            FieldKind::PassThrough
+        } else {
+            FieldKind::Emitted
+        };
         rows.push(FieldRow {
             name,
-            kind: FieldKind::Emitted,
+            kind,
+            ty: None,
         });
     }
     rows
+}
+
+/// Emit targets that are pure identity copies of an **input column** — i.e.
+/// `emit c = c` or `emit c = src.c` (a qualified reference whose final field is
+/// `c`), where `c` is one of `input_cols`. Such an emit re-emits a column
+/// unchanged, so it is a passthrough rather than a created/altered (computed)
+/// field. Restricting to `input_cols` excludes a same-named `let` binding and a
+/// rename (`emit y = x`, which produces a genuinely new column).
+pub fn emit_copy_targets(program: &Program, input_cols: &[String]) -> HashSet<String> {
+    let inputs: HashSet<&str> = input_cols.iter().map(|s| s.as_str()).collect();
+    let mut copies = HashSet::new();
+    cxl::ast::for_each_field_emit(&program.statements, &mut |name, expr| {
+        if bare_field_ref(expr) == Some(name) && inputs.contains(name) {
+            copies.insert(name.to_string());
+        }
+    });
+    copies
+}
+
+/// The field name an expression references when it is *exactly* a column
+/// reference (`c` or `src.c` — the final dotted part); `None` for any computed
+/// expression (a binary op, method call, literal, conditional, …).
+fn bare_field_ref(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::FieldRef { name, .. } => Some(name),
+        Expr::QualifiedFieldRef { parts, .. } => parts.last().map(|p| p.as_ref()),
+        _ => None,
+    }
 }
 
 /// Output field rows for a node with no parseable CXL (or a non-emitting
@@ -190,11 +243,14 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
 /// skipped) and for Phase-1 best-effort handling of types without precise
 /// emit rules.
 pub fn passthrough_output_fields(input_cols: &[String]) -> Vec<FieldRow> {
+    // Types are filled in by the caller from each column's producer (see
+    // `transform_output_fields`).
     input_cols
         .iter()
         .map(|col| FieldRow {
             name: col.clone(),
             kind: FieldKind::PassThrough,
+            ty: None,
         })
         .collect()
 }
@@ -318,17 +374,76 @@ mod tests {
             vec![
                 FieldRow {
                     name: "x".to_string(),
-                    kind: FieldKind::PassThrough
+                    kind: FieldKind::PassThrough,
+                    ty: None,
                 },
                 FieldRow {
                     name: "b".to_string(),
-                    kind: FieldKind::Emitted
+                    kind: FieldKind::Emitted,
+                    ty: None,
                 },
                 FieldRow {
                     name: "a".to_string(),
-                    kind: FieldKind::Emitted
+                    kind: FieldKind::Emitted,
+                    ty: None,
                 },
             ]
+        );
+    }
+
+    /// An emit that re-emits an input column unchanged (`emit a = a`, or a
+    /// qualified `emit a = src.a`) is a passthrough copy — classified
+    /// `PassThrough`, not `Emitted` — while a computed emit stays `Emitted`. A
+    /// same-named `let` is NOT an input column, so it does not count as a copy.
+    #[test]
+    fn emit_identity_copy_is_passthrough_not_emitted() {
+        // `a` re-emitted unchanged, `b` re-emitted via a qualified ref, `c`
+        // computed. Inputs: a, b, x.
+        let prog = program("emit a = a\nemit b = src.b\nemit c = a + 1.0\n");
+        let copies = emit_copy_targets(&prog, &cols(&["a", "b", "x"]));
+        assert_eq!(
+            copies,
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            "identity copies are detected; the computed `c` is not"
+        );
+
+        let fields = transform_output_fields(&cols(&["a", "b", "x"]), &prog);
+        assert_eq!(
+            fields,
+            vec![
+                // `x` rides through (unshadowed input).
+                FieldRow {
+                    name: "x".to_string(),
+                    kind: FieldKind::PassThrough,
+                    ty: None,
+                },
+                // `a`, `b` are identity copies → PassThrough (carried), not Emitted.
+                FieldRow {
+                    name: "a".to_string(),
+                    kind: FieldKind::PassThrough,
+                    ty: None,
+                },
+                FieldRow {
+                    name: "b".to_string(),
+                    kind: FieldKind::PassThrough,
+                    ty: None,
+                },
+                // `c` is computed → Emitted (created/altered here).
+                FieldRow {
+                    name: "c".to_string(),
+                    kind: FieldKind::Emitted,
+                    ty: None,
+                },
+            ]
+        );
+
+        // A rename (`emit y = x`, single ref but different name) and a same-named
+        // `let` are NOT copies — they produce genuinely new columns.
+        let renamed = program("let a = x + 1.0\nemit y = x\nemit a = a\n");
+        let copies = emit_copy_targets(&renamed, &cols(&["x"]));
+        assert!(
+            copies.is_empty(),
+            "a rename and a let-shadowed name are not input-column copies"
         );
     }
 

@@ -270,6 +270,10 @@
 [data-theme="enamel"] .klinx-node-branch[data-default="true"] .klinx-node-branch-label {
   color: #5A6B78;
 }
+/* Datatype suffix stays a muted secondary tone on the light plate. */
+[data-theme="enamel"] .klinx-node-field-type {
+  color: #5A6B78;
+}
 
 /* Enamel inspector — light plate fields inside dark panel shell */
 [data-theme="enamel"] .klinx-inspector-field,
@@ -4259,6 +4263,20 @@ input:-webkit-autofill:focus {
 
 .klinx-node-field-name {
   flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Inline datatype suffix on a field row — secondary to the name: muted and a bit
+   smaller, doesn't shrink (the NAME truncates first via its `flex: 1 1 auto`),
+   sits just before the out-anchor. */
+.klinx-node-field-type {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  max-width: 45%;
+  color: var(--klinx-text-floor);
+  font-size: 10px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

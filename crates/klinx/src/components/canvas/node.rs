@@ -190,6 +190,7 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
                             row_index: i,
                             name: field.name.clone(),
                             kind: field.kind,
+                            ty: field.ty.clone(),
                         }
                     }
                 }
@@ -258,7 +259,13 @@ pub fn CanvasNode(stage: StageView, index: usize, dimmed: bool) -> Element {
 /// `onmouseleave` on the parent `.klinx-node-fields` container, not per row:
 /// sweeping row→row stays `Some(A)→Some(B)` with no transient `None` flash.
 #[component]
-fn FieldRowView(node_index: usize, row_index: usize, name: String, kind: FieldKind) -> Element {
+fn FieldRowView(
+    node_index: usize,
+    row_index: usize,
+    name: String,
+    kind: FieldKind,
+    ty: Option<String>,
+) -> Element {
     let mut hovered = use_context::<HoveredField>();
 
     let kind_attr = match kind {
@@ -275,16 +282,29 @@ fn FieldRowView(node_index: usize, row_index: usize, name: String, kind: FieldKi
     // as the row's stable identity for keying and future per-row styling.
     let _ = row_index;
 
+    // Full `name : type` for the native tooltip — the name and the type each clip
+    // with an ellipsis at the card width, so hovering reveals the untruncated text.
+    let tip = match ty.as_ref() {
+        Some(t) => format!("{name} : {t}"),
+        None => name.clone(),
+    };
+
     rsx! {
         div {
             class: "klinx-node-field",
             "data-field-kind": kind_attr,
+            title: "{tip}",
             onmouseenter: {
                 let name = name.clone();
                 move |_| hovered.0.set(Some((node_index, name.clone())))
             },
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
             span { class: "klinx-node-field-name", "{name}" }
+            // Compact datatype suffix (e.g. `: float`) when known. Declared and
+            // carried columns have a type; emitted columns don't yet (Phase 2b).
+            if let Some(t) = ty.as_ref() {
+                span { class: "klinx-node-field-type", "{t}" }
+            }
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }
         }
     }
