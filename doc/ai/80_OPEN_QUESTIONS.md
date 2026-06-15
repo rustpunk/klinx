@@ -1,0 +1,12 @@
+# Open Questions
+
+| Question | Why it matters | Files/modules involved | Suggested resolution | Priority |
+| --- | --- | --- | --- | --- |
+| Should README be updated to match current Clinker split crates and rev `997ea7d`? | Existing onboarding prose conflicts with manifests and can mislead dependency work. | `README.md`, `Cargo.toml`, `CLAUDE.md` | Decide whether to update README in a separate docs task. | High |
+| How should git status auto-refresh be completed? | Watcher comments suggest changes are detected but Dioxus signal updates may not be wired. | `hooks/git_state.rs`, `fs_watcher.rs`, `components/version_mode/**` | Trace current event flow and define a safe Dioxus update path. | Medium |
+| Is `tokio` still needed in `klinx-git` if implementation uses `std::process::Command`? | Unused dependency surface can confuse future backend work. | `crates/klinx-git/Cargo.toml`, `gix_backend.rs` | Check compiler warnings and future async backend plans before changing. | Low |
+| Which UI pages are intentionally placeholders versus incomplete workflows? | Agents could overstate feature completeness or wire behavior incorrectly. | `components/placeholder_page.rs`, channels/docs/runs/search/extract composition areas | Audit UI entry points and create feature-specific issues. | Medium |
+| Should `compute_yaml_ranges` handle duplicate names more robustly? | Best-effort string matching may misidentify repeated `name:` entries. | `sync.rs`, YAML editor navigation | Add fixtures with duplicate names if this becomes user-visible. | Medium |
+| What is the intended future of `gix_backend.rs` naming? | The filename implies gitoxide, but current implementation is CLI-backed. | `klinx-git/src/gix_backend.rs`, `lib.rs` | Keep docs explicit, or rename in a future code task if desired. | Low |
+| Are route visualization research notes fully implemented? | Planning docs may not match source; agents should not treat them as verified behavior. | `docs/research/*route-node*`, `pipeline_view.rs`, `components/canvas/**` | Compare source behavior with notes before route UI changes. | Medium |
+| What is the desired automated UI validation story? | Desktop-only wry app lacks Playwright-style automation. | `README.md`, `scripts/shot.sh`, CI | Decide whether screenshot smoke tests are worth formalizing. | Medium |
