@@ -3186,6 +3186,83 @@ nodes:
         );
     }
 
+    /// #96: top-level pipeline field lineage is not only populated from Source
+    /// schemas; it also feeds the same hover and click-to-pin reveal helpers the
+    /// canvas uses. Hover stays local to the adjacent field edge, while a pinned
+    /// field follows the full directed lineage across the pipeline.
+    #[test]
+    fn pipeline_lineage_supports_hover_and_pin_reveal_sets() {
+        let yaml = r#"
+pipeline:
+  name: pipeline_hover_pin_lineage
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: a, type: int }
+  - type: transform
+    name: first
+    input: src
+    config:
+      cxl: |
+        emit b = a + 1
+  - type: transform
+    name: second
+    input: first
+    config:
+      cxl: |
+        emit c = b + 1
+"#;
+        let config = parse_config(yaml).expect("pipeline lineage fixture parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_src = stage_idx(&view, "src");
+        let i_first = stage_idx(&view, "first");
+        let i_second = stage_idx(&view, "second");
+
+        assert_eq!(field_by_name(&view, i_src, "a").kind, FieldKind::Declared);
+        assert_eq!(field_by_name(&view, i_first, "b").kind, FieldKind::Emitted);
+        assert_eq!(field_by_name(&view, i_second, "c").kind, FieldKind::Emitted);
+
+        let a_to_b = FieldEdge {
+            from_node: i_src,
+            from_field: "a".to_string(),
+            to_node: i_first,
+            to_field: "b".to_string(),
+            kind: FieldEdgeKind::Derive,
+        };
+        let b_to_c = FieldEdge {
+            from_node: i_first,
+            from_field: "b".to_string(),
+            to_node: i_second,
+            to_field: "c".to_string(),
+            kind: FieldEdgeKind::Derive,
+        };
+        let edge_idx = |edge: &FieldEdge| {
+            view.field_edges
+                .iter()
+                .position(|candidate| candidate == edge)
+                .unwrap_or_else(|| panic!("expected edge {edge:?}, got {:?}", view.field_edges))
+        };
+        let a_to_b_idx = edge_idx(&a_to_b);
+        let b_to_c_idx = edge_idx(&b_to_c);
+
+        assert_eq!(
+            lineage_closure(&view.field_edges, i_second, "c"),
+            std::collections::HashSet::from([b_to_c_idx]),
+            "hovering second.c should reveal only the adjacent producer edge"
+        );
+        assert_eq!(
+            field_lineage_full(&view.field_edges, i_second, "c"),
+            std::collections::HashSet::from([a_to_b_idx, b_to_c_idx]),
+            "pinning second.c should reveal the full directed pipeline lineage"
+        );
+    }
+
     /// Combine multi-input provenance (#67): a join key present in BOTH joined
     /// inputs carries from EACH of them, so hovering it lights up every source
     /// rather than only the first-seen input. A column unique to one input — and
