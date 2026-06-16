@@ -6,8 +6,9 @@ use dioxus::prelude::*;
 
 use crate::pipeline_view::{
     FieldEdge, FieldEdgeKind, NODE_WIDTH, StageView, derive_body_view,
-    derive_partial_pipeline_view, derive_pipeline_view, field_lineage_full, fit_transform,
-    group_endpoints_by_node, layout_bounds, lineage_closure, node_carry_edges,
+    derive_partial_pipeline_view, derive_pipeline_view, derive_resolved_pipeline_view,
+    field_lineage_full, fit_transform, group_endpoints_by_node, layout_bounds, lineage_closure,
+    node_carry_edges,
 };
 use crate::state::{ChannelViewMode, use_app_state};
 
@@ -115,7 +116,7 @@ pub fn CanvasPanel() -> Element {
             ChannelViewMode::Resolved => {
                 let compiled_guard = state.compiled_plan.read();
                 match compiled_guard.as_ref() {
-                    Some(plan) => derive_pipeline_view(plan.config()),
+                    Some(plan) => derive_resolved_pipeline_view(plan),
                     None => match &*(state.pipeline).read() {
                         Some(config) => derive_pipeline_view(config),
                         None => crate::pipeline_view::PipelineView::default(),
