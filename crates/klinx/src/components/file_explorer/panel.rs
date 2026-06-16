@@ -219,13 +219,8 @@ fn ExplorerRow(
     }
     if let Some(status) = git_status {
         classes.push(' ');
-        classes.push_str(match status {
-            StatusKind::Modified => "klinx-file-explorer__row--modified",
-            StatusKind::Added => "klinx-file-explorer__row--added",
-            StatusKind::Deleted => "klinx-file-explorer__row--deleted",
-            StatusKind::Renamed => "klinx-file-explorer__row--renamed",
-            StatusKind::Untracked => "klinx-file-explorer__row--untracked",
-        });
+        classes.push_str("klinx-file-explorer__row--");
+        classes.push_str(status.css_modifier());
     }
     if is_open {
         classes.push_str(" klinx-file-explorer__row--open");
