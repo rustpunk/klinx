@@ -19,7 +19,7 @@
 | App shell/state | Own Dioxus signals, tabs, navigation, layouts, overlays | `main.rs`, `app.rs`, `state.rs`, `tab.rs` | components, hooks, workspace, sync | app behavior mostly covered indirectly | High |
 | Workspace/session | Workspace manifests, state persistence, restore, channel discovery | `workspace.rs` | `dirs`, `toml`, `serde_json`, tab/state types | examples workspace, session paths | High |
 | Sync/parsing | YAML parse routing, composition detection, partial views, ranges | `sync.rs`, `parse_diagnostics.rs` | Clinker plan/yaml, pipeline view | composition and parse diagnostic tests | High |
-| Pipeline view | Canvas model, layout, route ports, composition views, field lineage integration | `pipeline_view.rs`, `pipeline_view/field_lineage.rs` | Clinker plan/exec/schema, CXL, petgraph | extensive in-file tests | High |
+| Pipeline view | Canvas model, current layout, future port-aware layout model, route ports, composition views, field lineage integration | `pipeline_view.rs`, `pipeline_view/field_lineage.rs`, `pipeline_view/layout_model.rs` | Clinker plan/exec/schema, CXL, petgraph | extensive in-file tests | High |
 | YAML patching | Preserve document structure when inspector edits parsed model | `yaml_patch.rs` | Clinker YAML serializer/parser | preservation and fallback tests | High |
 | Components | Dioxus rendering for all UI surfaces | `components/**`, `assets/klinx.css` | app/state contexts, pipeline models, git, schema/search/template helpers | component-adjacent helper tests | High |
 | Hooks | Side effects for channels, git, pipeline sync, schema index, session persistence | `hooks/**` | state/workspace/git/schema/sync | mostly behavior comments and indirect coverage | Medium |
