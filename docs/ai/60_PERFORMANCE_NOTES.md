@@ -16,8 +16,8 @@ Do not optimize from this document alone. Use `docs/perf.md`, targeted profiling
 
 - **Area/module:** `pipeline_view.rs`, `pipeline_view/field_lineage.rs`, `components/canvas/**`.
 - **Why sensitive:** Large pipelines and wide schemas stress graph derivation, field edge computation, hover/pin filtering, and SVG connector rendering.
-- **Existing choices:** Progressive field-lineage disclosure rather than drawing all field edges; hover is one-hop, click is transitive; canvas drag uses non-reactive state.
-- **Avoid:** Globally rendering all field edges, doing graph derivation inside components, adding pointer-move signal churn.
+- **Existing choices:** Progressive field-lineage disclosure rather than drawing all field edges; hover is one-hop, click is transitive; canvas drag uses non-reactive state; wide-schema nodes project their field rows through a panel-owned cap/filter state before connector anchor resolution, so card height, visible rows, and field anchors stay derived from the same displayed row set.
+- **Avoid:** Globally rendering all field edges, doing graph derivation inside components, adding pointer-move signal churn, or slicing field rows only in `CanvasNode` after the panel has already resolved anchors.
 - **Hooks:** `cargo test -p klinx pipeline_view`, `cargo test -p klinx field_lineage`, manual canvas review.
 - **Confidence:** High.
 - **Evidence:** `pipeline_view` tests, field lineage docs/research, component report.

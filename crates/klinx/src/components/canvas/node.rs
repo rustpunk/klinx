@@ -5,6 +5,15 @@ use crate::state::{CompositionDrillFrame, use_app_state};
 
 use super::{CanvasHover, HoverTarget, PinnedField};
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(super) struct FieldDisplayInfo {
+    pub total_count: usize,
+    pub hidden_count: usize,
+    pub query: String,
+    pub searchable: bool,
+    pub can_reduce: bool,
+}
+
 /// A single pipeline stage rendered as a rustpunk node card on the canvas.
 ///
 /// `index` is the stage's position in the current [`crate::pipeline_view::PipelineView`]
@@ -25,6 +34,9 @@ use super::{CanvasHover, HoverTarget, PinnedField};
 pub fn CanvasNode(
     stage: StageView,
     index: usize,
+    field_display: FieldDisplayInfo,
+    on_field_query: EventHandler<String>,
+    on_field_toggle: EventHandler<()>,
     dimmed: bool,
     highlighted_fields: Vec<String>,
 ) -> Element {
@@ -48,7 +60,7 @@ pub fn CanvasNode(
     // pure view concern with no model meaning. Cards without fields never show
     // the toggle, so this signal is inert for them.
     let mut collapsed = use_signal(|| false);
-    let has_fields = !stage.fields.is_empty();
+    let has_fields = field_display.total_count > 0;
     // Route and Cull nodes carry extra output ports (rendered as branch ports
     // below the columns): a Route's condition/default branches, or a Cull's
     // `removed_to` side-output.
@@ -56,8 +68,19 @@ pub fn CanvasNode(
     // A Route's outputs ARE its branch ports, so it has no node-level output
     // port; a Cull keeps its node-level main output ALONGSIDE the side-output.
     let keeps_node_out = stage.keeps_node_output_port();
-    let show_rows = has_fields && !*collapsed.read();
+    let show_rows = !stage.fields.is_empty() && !*collapsed.read();
     let show_branches = has_branches && !*collapsed.read();
+    let toggle_display = field_display.hidden_count > 0 || field_display.can_reduce;
+    let toggle_label = if field_display.hidden_count > 0 {
+        format!("+{} more", field_display.hidden_count)
+    } else {
+        "less".to_string()
+    };
+    let toggle_title = if field_display.hidden_count > 0 {
+        "Show all matching fields"
+    } else {
+        "Return to capped field list"
+    };
 
     // Lineage-endpoint lookup (#87): build the set ONCE per card, so testing each
     // field row is O(1) rather than scanning `highlighted_fields` per row. Empty
@@ -177,6 +200,29 @@ pub fn CanvasNode(
                     class: "klinx-node-badge",
                     style: "color: var(--klinx-stage-accent);",
                     span { class: "klinx-node-type-badge", "{badge}" }
+                    if field_display.searchable {
+                        input {
+                            class: "klinx-node-field-search",
+                            r#type: "search",
+                            value: "{field_display.query}",
+                            placeholder: "filter",
+                            title: "Filter fields",
+                            onmousedown: move |e: MouseEvent| e.stop_propagation(),
+                            onclick: move |e: MouseEvent| e.stop_propagation(),
+                            oninput: move |e: FormEvent| on_field_query.call(e.value()),
+                        }
+                    }
+                    if toggle_display {
+                        button {
+                            class: "klinx-node-more-btn",
+                            title: "{toggle_title}",
+                            onclick: move |e: MouseEvent| {
+                                e.stop_propagation();
+                                on_field_toggle.call(());
+                            },
+                            "{toggle_label}"
+                        }
+                    }
                     // Collapse/expand toggle — on any card that carries field rows
                     // or Route branch ports.
                     if has_fields || has_branches {
