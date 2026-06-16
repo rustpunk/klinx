@@ -48,3 +48,12 @@ When architecture changes, append a dated entry with:
 - Added `docs/ai/github-workflow/ORCHESTRATION.md` as the durable runbook for coordinator ownership, state model, claim protocol, dispatch prompt shape, stop conditions, and milestone exit gate.
 - Added `.github/ISSUE_TEMPLATE/milestone-orchestration.yml` so a milestone coordinator issue can persist active slots, queue, blockers, and closeout state.
 - Root guidance now points agents to the orchestration skill/runbook and keeps the maintainer merge gate explicit.
+
+## 2026-06-16: Port-Aware Layout Model Scaffold
+
+- Added `pipeline_view/layout_model.rs` as a pure Rust graph model for future port-aware layered canvas layout.
+- The model represents stage nodes, node-level ports, field-row ports, route/cull branch ports, directed edges, ranks/layers, ordered ports, and placeholder orthogonal connector paths.
+- The visible canvas still uses the existing `layout_positions` barycenter geometry; `layout_model` is a migration boundary, not a renderer switch.
+- Prior-art summary: existing research notes point toward a Rust Sugiyama-style layered pass with port-aware crossing minimization and orthogonal routing, avoiding a JS/elkjs dependency.
+- Open question added for when and how to migrate the visible canvas to this model.
+- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-100-target cargo test -p klinx layout_model`.

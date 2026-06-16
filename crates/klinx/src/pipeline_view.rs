@@ -11,6 +11,7 @@ use clinker_plan::config::{PipelineConfig, PipelineNode};
 use clinker_plan::yaml::Spanned;
 
 mod field_lineage;
+pub mod layout_model;
 
 pub use field_lineage::{
     FieldEdge, FieldEdgeKind, FieldKind, FieldRow, field_lineage_full, group_endpoints_by_node,
