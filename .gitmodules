@@ -1,0 +1,3 @@
+[submodule "docs/ai/github-workflow"]
+	path = docs/ai/github-workflow
+	url = https://github.com/rustpunk/agent-workflow-docs.git
