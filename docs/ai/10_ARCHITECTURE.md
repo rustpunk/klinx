@@ -1,6 +1,6 @@
 # Architecture
 
-## What This Project Appears To Be
+## Project Overview
 
 **Verified.** Klinx is a Rust 2024 workspace containing a native Dioxus 0.7 desktop IDE for authoring Clinker YAML pipeline configurations. It runs as a `wry` webview desktop app and consumes Clinker engine crates through git-pinned workspace dependencies at rev `997ea7d`.
 
@@ -70,9 +70,6 @@ No plugin system was found. The clearest extension boundaries are:
 - Template YAML files and example workspaces.
 - Component modules that consume shared contexts.
 
-## Areas Of Uncertainty
+## Open Question Routing
 
-- README dependency prose is stale relative to root `Cargo.toml`.
-- Some UI surfaces are placeholders or partially wired.
-- Git status watcher refresh appears not fully connected from background events.
-- The intended future of the `gix_backend.rs` module name versus current CLI implementation is not fully documented beyond comments.
+Current unresolved architecture questions are tracked in `docs/ai/80_OPEN_QUESTIONS.md`. Check that registry before changing README dependency prose, placeholder UI surfaces, git status watcher refresh, or the future of the `gix_backend.rs` module.

@@ -44,7 +44,7 @@ Components should consume app contexts and existing model helpers. Do not parse 
 - Changing CSS line height without updating code constants.
 - Adding recursive file explorer rendering that rewalks disk on expand/collapse.
 - Inline-styling field connector strokes instead of using CSS classes.
-- Assuming placeholder pages or partially wired actions are complete workflows.
+- Treating placeholder pages or partially wired actions as complete workflows.
 
 ## Local Commands
 
@@ -59,7 +59,7 @@ Components should consume app contexts and existing model helpers. Do not parse 
 
 Update `docs/ai/30_DESIGN_RULES.md`, `40_COMMON_PATTERNS.md`, and `60_PERFORMANCE_NOTES.md` when component or CSS contracts change.
 
-## Unclear / Ask Human
+## Approval Gates
 
 Ask before large visual redesigns, changing canvas geometry semantics, formalizing placeholder features, or introducing a new UI testing strategy.
 

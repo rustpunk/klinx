@@ -17,7 +17,7 @@
 - **Verified:** Use `GitOps` as the git operation boundary.
 - **Verified:** Use `pipeline_view` APIs to derive canvas-ready data.
 - **Strong inference:** Keep public app APIs small; most app internals are crate-local modules in the binary crate.
-- **Hypothesis:** Future git read operations may move behind a gitoxide backend while keeping the trait surface stable.
+- Future git backend direction is tracked in `docs/ai/80_OPEN_QUESTIONS.md`; keep the current `GitOps` trait surface stable unless that decision changes.
 
 ## Error Handling Rules
 

@@ -42,7 +42,7 @@ Keep UI-independent git behavior here. Do not add ad hoc git shellouts in `crate
 
 - Treating status paths as workspace-relative UI paths.
 - Bypassing `GitOps` from UI code.
-- Assuming staged versus unstaged status is fully modeled everywhere in the UI.
+- Treating staged versus unstaged status as fully modeled everywhere in the UI.
 - Removing CLI behavior without checking credential-helper and platform implications.
 
 ## Local Commands
@@ -55,7 +55,7 @@ Keep UI-independent git behavior here. Do not add ad hoc git shellouts in `crate
 
 Update `docs/ai/20_PROJECT_MAP.md`, `30_DESIGN_RULES.md`, `60_PERFORMANCE_NOTES.md`, and `AI_CHANGELOG.md` if this crate's public surface or backend strategy changes.
 
-## Unclear / Ask Human
+## Approval Gates
 
 Ask before replacing the CLI backend, adding non-GitHub PR behavior, changing path semantics, or changing runtime tool assumptions.
 

@@ -17,7 +17,7 @@
 | `crates/klinx/src/hooks/AGENTS.md` | Medium | Effects and side effects have Dioxus constraints. | Add if hooks become a frequent edit area. |
 | `crates/klinx/src/pipeline_view/AGENTS.md` | Medium | Field lineage helper is important, but `pipeline_view.rs` is a sibling file, so this local guide would not cover the main module. | Add only if the subdirectory grows. |
 
-## Probably Unnecessary
+## Not Recommended Now
 
 - `target/`: generated build artifacts.
 - `.github/`: CI is small and already documented in root and `50_TESTING_AND_COMMANDS.md`.

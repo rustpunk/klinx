@@ -12,7 +12,7 @@ Created on 2026-06-15 from repository inspection, Cargo metadata, CI config, exi
 
 - **Verified**: Directly observed in source, tests, config, examples, or command output.
 - **Strong inference**: Supported by several files or comments, but not explicitly stated as a design decision.
-- **Hypothesis**: Plausible but weakly supported. Treat as a prompt to inspect code before acting.
+- **Needs grounding**: Plausible but weakly supported. Move it to open questions or validate it against code before acting.
 - **Open question**: Known uncertainty that should be resolved before broad or risky changes.
 
 ## Reading Order By Task
@@ -44,7 +44,7 @@ Root `AGENTS.md` is the compact, always-loaded guide. `docs/ai/*.md` is durable 
 - Preserve Dioxus hook ordering and signal ownership rules.
 - Preserve YAML text as the authoritative editor content.
 - Prefer focused tests for the touched subsystem, then workspace CI commands when practical.
-- Mark uncertainty as Hypothesis or Open question instead of making confident claims.
+- Record uncertainty in `docs/ai/80_OPEN_QUESTIONS.md` instead of making confident claims.
 
 ## Definition Of Done
 
@@ -67,6 +67,8 @@ Root `AGENTS.md` is the compact, always-loaded guide. `docs/ai/*.md` is durable 
 - `80_OPEN_QUESTIONS.md`: central uncertainty list.
 - `90_LOCAL_AGENT_PLAN.md`: local `AGENTS.md` placement rationale.
 - `AI_CHANGELOG.md`: durable architecture/change memory.
+- `github-workflow/OPERATIONS.md`: GitHub agent helper and automation notes.
+- `github-workflow/ORCHESTRATION.md`: milestone coordination state, dispatch, and stop rules.
 
 ## When To Update Which Doc
 
@@ -74,6 +76,7 @@ Root `AGENTS.md` is the compact, always-loaded guide. `docs/ai/*.md` is durable 
 - New invariant or failure mode found: update `30_DESIGN_RULES.md` and the relevant local `AGENTS.md`.
 - Repeated implementation style emerges: update `40_COMMON_PATTERNS.md`.
 - Commands, CI, toolchain, or dependencies change: update `50_TESTING_AND_COMMANDS.md` and root `AGENTS.md`.
+- GitHub agent workflow, milestone coordination, helper behavior, or Project-state rules change: update `github-workflow/OPERATIONS.md`, `github-workflow/ORCHESTRATION.md`, root `AGENTS.md`, and `AI_CHANGELOG.md`.
 - Performance behavior changes: update `60_PERFORMANCE_NOTES.md` and `docs/perf.md` if user-facing measurement guidance changes.
 - Term or domain meaning changes: update `70_GLOSSARY.md`.
 - An uncertainty is resolved or discovered: update `80_OPEN_QUESTIONS.md`.
@@ -81,7 +84,7 @@ Root `AGENTS.md` is the compact, always-loaded guide. `docs/ai/*.md` is durable 
 ## Known Limitations
 
 - No automated UI integration target was found for the desktop webview; UI validation remains cargo checks plus manual or headless screenshot review.
-- Existing prose in `README.md` appears stale about older Clinker crate names/rev; current manifests pin the split Clinker crates to `997ea7d`.
+- Existing prose in `README.md` conflicts with current manifests about older Clinker crate names/rev; current manifests pin the split Clinker crates to `997ea7d`.
 - Some UI pages and actions are partially implemented or placeholder-like. Inspect source before claiming a workflow is complete.
 
 ## First Prompt For A New Codex Session

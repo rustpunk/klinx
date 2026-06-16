@@ -49,7 +49,7 @@ Use root workspace dependencies and current Clinker pins from `Cargo.toml`. Do n
 - Moving hooks into conditionals or event handlers.
 - Updating `yaml_text` without considering `EditSource`.
 - Treating README dependency prose as more current than `Cargo.toml`.
-- Assuming desktop UI has browser automation coverage.
+- Treating desktop UI as covered by browser automation.
 
 ## Local Commands
 
@@ -64,7 +64,7 @@ Use root workspace dependencies and current Clinker pins from `Cargo.toml`. Do n
 
 Update `docs/ai/10_ARCHITECTURE.md`, `20_PROJECT_MAP.md`, `30_DESIGN_RULES.md`, and `AI_CHANGELOG.md` when this crate's architecture or invariants change.
 
-## Unclear / Ask Human
+## Approval Gates
 
 Ask before changing Clinker/Dioxus pins, YAML preservation semantics, workspace state format, or desktop runtime behavior.
 

@@ -18,3 +18,5 @@ test-results/
 # Klinx ships binaries (the IDE application), so Cargo.lock is committed for
 # reproducible builds and to pin the transitive graph behind the git deps.
 # It is intentionally NOT ignored here.
+
+notes/

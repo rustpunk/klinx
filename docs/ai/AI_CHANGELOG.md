@@ -17,14 +17,9 @@ This file is lightweight architecture/change memory for future agents. It should
 - The CI gauntlet uses fmt, two clippy passes, workspace tests, cargo deny, and Dioxus desktop build.
 - There is no documented automated browser UI test target for the desktop webview.
 
-### Major Unresolved Questions
+### Open Question Routing
 
-- README dependency prose appears stale versus current `Cargo.toml`.
-- Git status watcher refresh may not be fully wired into Dioxus state.
-- Some UI pages/actions appear placeholder-like or partially wired.
-- The future of the `gix_backend.rs` naming/backend plan is not fully resolved.
-- Automated UI validation beyond manual/headless screenshot capture is undecided.
-
+Current unresolved questions are tracked in `docs/ai/80_OPEN_QUESTIONS.md`. Keep this changelog focused on dated evidence, resolved uncertainty, and factual documentation maintenance history.
 ### Update Instructions
 
 When architecture changes, append a dated entry with:
@@ -46,3 +41,10 @@ When architecture changes, append a dated entry with:
 - Bulk updates preflight all Project fields/options before applying anything and support ProjectV2 single-select, text, date, and number fields.
 - Readiness findings scan fetched comment text; compact mode still truncates emitted comment bodies unless `--full-comments` is passed.
 - Verification: shell syntax check and helper dry-run commands were run during implementation.
+
+## 2026-06-16: Milestone Orchestration Workflow
+
+- Added repo-local skill source `.agents/skills/gh-milestone-orchestration` for coordinating a GitHub milestone through planning, queue curation, one-issue implementation agents, review, closeout, and final milestone verification.
+- Added `docs/ai/github-workflow/ORCHESTRATION.md` as the durable runbook for coordinator ownership, state model, claim protocol, dispatch prompt shape, stop conditions, and milestone exit gate.
+- Added `.github/ISSUE_TEMPLATE/milestone-orchestration.yml` so a milestone coordinator issue can persist active slots, queue, blockers, and closeout state.
+- Root guidance now points agents to the orchestration skill/runbook and keeps the maintainer merge gate explicit.
