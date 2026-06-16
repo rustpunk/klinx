@@ -22,7 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clinker_schema::SchemaIndex;
-use klinx_git::{FileStatus, StatusKind};
+use klinx_git::{FileStatus, StatusKind, git_status_for_path};
 
 use crate::state::ChannelState;
 use crate::workspace::Workspace;
@@ -392,9 +392,8 @@ pub fn expand_sections(tree: &ExplorerTree) -> HashSet<NodeId> {
 ///
 /// Returns `None` for non-file rows (sections, groups/directories).
 ///
-/// Known limitations (all shared with the tab bar, and all rooted in the git
-/// layer rather than here — precise matching is deferred to a follow-up that
-/// would unify both call sites):
+/// Known limitations (shared with other UI surfaces via
+/// [`git_status_for_path`]):
 /// - A *short* repo-relative path (e.g. a single component when the workspace
 ///   **is** the repo root) can suffix-match a same-named file in a deeper
 ///   directory, tinting it spuriously. An exact match would need the repo root
@@ -412,10 +411,7 @@ pub fn row_git_status(row: &FlatNode, git_files: &[FileStatus]) -> Option<Status
         return None;
     }
     let path = row.path.as_deref()?;
-    git_files
-        .iter()
-        .find(|f| path.ends_with(&f.path))
-        .map(|f| f.status)
+    git_status_for_path(path, git_files)
 }
 
 // ── Glob matcher ─────────────────────────────────────────────────────────

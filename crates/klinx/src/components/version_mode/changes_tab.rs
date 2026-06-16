@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use klinx_git::{GitOps, StatusKind};
+use klinx_git::GitOps;
 
 use crate::components::toast::{ToastState, toast_error, toast_success};
 use crate::state::TabManagerState;
@@ -43,17 +43,11 @@ pub fn ChangesTab() -> Element {
                             {
                                 let path_str = file.path.display().to_string();
                                 let letter = file.status.letter();
-                                let status_class = match file.status {
-                                    StatusKind::Modified => "klinx-changes-file--modified",
-                                    StatusKind::Added => "klinx-changes-file--added",
-                                    StatusKind::Deleted => "klinx-changes-file--deleted",
-                                    StatusKind::Renamed => "klinx-changes-file--renamed",
-                                    StatusKind::Untracked => "klinx-changes-file--untracked",
-                                };
+                                let status_modifier = file.status.css_modifier();
 
                                 rsx! {
                                     div {
-                                        class: "klinx-changes-file {status_class}",
+                                        class: "klinx-changes-file klinx-changes-file--{status_modifier}",
                                         span { class: "klinx-changes-file__status", "{letter}" }
                                         span { class: "klinx-changes-file__path", "{path_str}" }
                                     }
