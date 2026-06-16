@@ -39,9 +39,14 @@ pub fn refine(yaml: &str, errors: Vec<String>) -> Vec<String> {
 type Detector = fn(&str, &str) -> Option<String>;
 
 /// The recognized shapes, each translating one opaque engine message into a
-/// hint that names the true fault. They key on disjoint message substrings, so
-/// at most one fires; this is a list purely so adding a shape is a one-line edit.
-const DETECTORS: &[Detector] = &[missing_colon_hint, tab_hint, indentation_hint];
+/// hint that names the true fault. Some parser messages can describe more than
+/// one shape, so keep more specific structural detectors before fallbacks.
+const DETECTORS: &[Detector] = &[
+    missing_colon_hint,
+    tab_hint,
+    indentation_hint,
+    unquoted_colon_value_hint,
+];
 
 /// Refine a single error string, or return it unchanged.
 fn refine_one(yaml: &str, raw: String) -> String {
@@ -230,12 +235,100 @@ fn indentation_hint(yaml: &str, raw: &str) -> Option<String> {
     ))
 }
 
+/// A plain scalar value that contains another `:` where YAML expects a mapping
+/// boundary. saphyr reports this with the same "mapping values" message used
+/// for over-indentation, so this detector intentionally runs after
+/// [`indentation_hint`] has had a chance to claim real indentation mistakes.
+fn unquoted_colon_value_hint(yaml: &str, raw: &str) -> Option<String> {
+    if !raw.contains("mapping values are not allowed in this context") {
+        return None;
+    }
+
+    let flagged_line = engine_line_number(raw)?;
+    let lines: Vec<&str> = yaml.lines().collect();
+    let flagged = lines.get(flagged_line.checked_sub(1)?)?;
+    let (key, value) = key_and_plain_value_with_unquoted_colon(flagged)?;
+    let quoted = value.replace('\\', "\\\\").replace('"', "\\\"");
+
+    Some(format!(
+        "hint: line {flagged_line}: `{key}` has an unquoted colon in its value \
+         (`{value}`) — quote the whole value, for example `{key}: \"{quoted}\"`. \
+         YAML reports this as \"mapping values are not allowed in this context\"."
+    ))
+}
+
 /// Whether a line opens a nested block — its content ends with `:` (a mapping
 /// key with no inline value), so deeper-indented lines below it are valid
 /// children. Inline comments are stripped first.
 fn opens_block(line: &str) -> bool {
     let content = line.split('#').next().unwrap_or(line).trim_end();
     content.ends_with(':')
+}
+
+/// Return `key` and `value` when a line is a mapping entry whose unquoted plain
+/// scalar value contains a YAML mapping colon, e.g. `where: a: b`.
+fn key_and_plain_value_with_unquoted_colon(line: &str) -> Option<(String, String)> {
+    let body = line.trim().strip_prefix("- ").unwrap_or(line.trim()).trim();
+    let key_colon = find_unquoted_colon(body)?;
+    let key = body[..key_colon].trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    let value = body[key_colon + 1..].trim();
+    let value = plain_value_before_comment(value);
+    if value.is_empty() || matches!(value.chars().next(), Some('"' | '\'' | '|' | '>')) {
+        return None;
+    }
+    if !plain_value_has_mapping_colon(value) {
+        return None;
+    }
+
+    Some((key.to_string(), value.to_string()))
+}
+
+/// Find the first colon that is outside a quoted key and before any inline
+/// comment.
+fn find_unquoted_colon(s: &str) -> Option<usize> {
+    let mut quote = None;
+    for (idx, ch) in s.char_indices() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '#') => break,
+            (None, ':') => return Some(idx),
+            (None, _) => {}
+        }
+    }
+    None
+}
+
+/// Strip a YAML inline comment from a plain scalar value.
+fn plain_value_before_comment(value: &str) -> &str {
+    for (idx, ch) in value.char_indices() {
+        if ch == '#'
+            && value[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+        {
+            return value[..idx].trim_end();
+        }
+    }
+    value.trim_end()
+}
+
+/// In a plain scalar, a colon followed by whitespace/end is parsed as a mapping
+/// separator unless the value is quoted.
+fn plain_value_has_mapping_colon(value: &str) -> bool {
+    value.char_indices().any(|(idx, ch)| {
+        ch == ':'
+            && value[idx + ch.len_utf8()..]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace)
+    })
 }
 
 #[cfg(test)]
@@ -255,6 +348,9 @@ mod tests {
     const UNDER_INDENT_YAML: &str = "pipeline:\n  name: t\nnodes:\n  - type: source\n    name: orders\n    config:\n      name: orders\n     type: csv\n";
     /// `type: csv` over-indented to 8 spaces on line 8 (siblings are at 6).
     const OVER_INDENT_YAML: &str = "pipeline:\n  name: t\nnodes:\n  - type: source\n    name: orders\n    config:\n      name: orders\n        type: csv\n";
+    /// `where: a: b` has an unquoted colon inside the value on line 6.
+    const EMBEDDED_COLON_VALUE_YAML: &str =
+        "pipeline:\n  name: t\nnodes:\n  - type: combine\n    config:\n      where: a: b\n";
 
     #[test]
     fn tab_indentation_is_pointed_at_directly() {
@@ -305,15 +401,28 @@ mod tests {
     }
 
     #[test]
-    fn embedded_colon_under_a_block_opener_draws_no_over_indent_hint() {
+    fn embedded_colon_under_a_block_opener_suggests_quoting_value() {
         // `where: a: b` is correctly nested under `config:` (which opens a
         // block); the "mapping values" error is the unquoted colon in the value,
-        // NOT over-indentation. The detector must defer rather than mislabel it.
-        let yaml =
-            "pipeline:\n  name: t\nnodes:\n  - type: combine\n    config:\n      where: a: b\n";
+        // NOT over-indentation. The over-indent detector must defer to the
+        // later unquoted-value detector rather than mislabel it.
         let raw = "YAML syntax error: error: line 6 column 15: mapping values are not allowed in this context";
-        let out = refine(yaml, vec![raw.to_string()]);
-        assert_eq!(out[0], raw, "must not mislabel an embedded-colon value");
+        let out = refine(EMBEDDED_COLON_VALUE_YAML, vec![raw.to_string()]);
+        assert!(
+            out[0].starts_with("hint: line 6: `where` has an unquoted colon in its value (`a: b`)"),
+            "{}",
+            out[0]
+        );
+        assert!(
+            out[0].contains("for example `where: \"a: b\"`"),
+            "{}",
+            out[0]
+        );
+        assert!(
+            !out[0].contains("it looks over-indented"),
+            "must not mislabel an embedded-colon value: {}",
+            out[0]
+        );
     }
 
     /// A `config:` key whose colon (and tail) was deleted, leaving the bare
@@ -395,6 +504,29 @@ mod tests {
         assert!(
             joined.contains("hint: line 6: `conf` has no colon"),
             "refinement did not fire on live engine output: {joined}"
+        );
+    }
+
+    /// Drift guard for the embedded-colon shape: parse through the real engine
+    /// and confirm both the keyed parser message and the quote-the-value hint.
+    #[test]
+    fn live_engine_embedded_colon_value_suggests_quoting() {
+        let result = crate::sync::try_parse_yaml(EMBEDDED_COLON_VALUE_YAML, None);
+        let crate::sync::ParseResult::Failed(errors) = result else {
+            panic!("expected a hard syntax failure for an unquoted colon in a value");
+        };
+        let joined = errors.join("\n");
+        assert!(
+            joined.contains("mapping values are not allowed in this context"),
+            "engine message changed — re-pin the heuristic: {joined}"
+        );
+        assert!(
+            joined.contains("hint: line 6: `where` has an unquoted colon in its value (`a: b`)"),
+            "refinement did not fire on live engine output: {joined}"
+        );
+        assert!(
+            joined.contains("for example `where: \"a: b\"`"),
+            "hint does not point to quoting the value: {joined}"
         );
     }
 
