@@ -3,6 +3,7 @@
 /// Each tab carries active/inactive styling, a dirty dot, and a close
 /// button; a trailing [+] opens a new tab.
 use dioxus::prelude::*;
+use klinx_git::git_status_for_path;
 
 use crate::keyboard;
 use crate::state::TabManagerState;
@@ -30,9 +31,9 @@ pub fn TabBar() -> Element {
 
                     // Git status badge per tab.
                     let git_status = (tab_mgr.git_state)().as_ref().and_then(|gs| {
-                        tab.file_path.as_ref().and_then(|fp| {
-                            gs.files.iter().find(|f| fp.ends_with(&f.path)).map(|f| f.status)
-                        })
+                        tab.file_path
+                            .as_deref()
+                            .and_then(|fp| git_status_for_path(fp, &gs.files))
                     });
                     let class = if is_active {
                         "klinx-tab klinx-tab--active"
@@ -57,15 +58,9 @@ pub fn TabBar() -> Element {
                             if let Some(status) = git_status {
                                 {
                                     let letter = status.letter();
-                                    let css_class = match status {
-                                        klinx_git::StatusKind::Modified => "klinx-tab-git klinx-tab-git--modified",
-                                        klinx_git::StatusKind::Added => "klinx-tab-git klinx-tab-git--added",
-                                        klinx_git::StatusKind::Deleted => "klinx-tab-git klinx-tab-git--deleted",
-                                        klinx_git::StatusKind::Renamed => "klinx-tab-git klinx-tab-git--renamed",
-                                        klinx_git::StatusKind::Untracked => "klinx-tab-git klinx-tab-git--untracked",
-                                    };
+                                    let css_modifier = status.css_modifier();
                                     rsx! {
-                                        span { class: "{css_class}", "{letter}" }
+                                        span { class: "klinx-tab-git klinx-tab-git--{css_modifier}", "{letter}" }
                                     }
                                 }
                             }
