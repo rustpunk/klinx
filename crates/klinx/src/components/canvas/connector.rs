@@ -142,13 +142,7 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
         ""
     };
 
-    // Cubic S-curve: control points at 1/3 of horizontal distance from each end.
-    let cp_offset = (tx - sx).abs() / 3.0;
-    let path = format!(
-        "M {sx:.1},{sy:.1} C {:.1},{sy:.1} {:.1},{ty:.1} {tx:.1},{ty:.1}",
-        sx + cp_offset,
-        tx - cp_offset,
-    );
+    let path = rounded_orthogonal_path(sx, sy, tx, ty);
 
     // Open chevron arrowhead pointing right, positioned at target anchor.
     let arrow = format!(
@@ -199,5 +193,72 @@ fn ConnectorPath(props: ConnectorPathProps) -> Element {
                 style: "{stroke_style}",
             }
         }
+    }
+}
+
+fn rounded_orthogonal_path(sx: f32, sy: f32, tx: f32, ty: f32) -> String {
+    let dx = tx - sx;
+    let dy = ty - sy;
+    if dy.abs() < 0.5 {
+        return format!("M {sx:.1},{sy:.1} L {tx:.1},{ty:.1}");
+    }
+
+    let mid_x = sx + dx / 2.0;
+    let dir_x = if dx >= 0.0 { 1.0 } else { -1.0 };
+    let dir_y = if dy >= 0.0 { 1.0 } else { -1.0 };
+    let radius = 12.0_f32
+        .min((mid_x - sx).abs())
+        .min((tx - mid_x).abs())
+        .min(dy.abs() / 2.0);
+
+    if radius < 0.5 {
+        return format!(
+            "M {sx:.1},{sy:.1} L {mid_x:.1},{sy:.1} L {mid_x:.1},{ty:.1} L {tx:.1},{ty:.1}",
+        );
+    }
+
+    format!(
+        "M {sx:.1},{sy:.1} \
+         L {:.1},{sy:.1} \
+         Q {mid_x:.1},{sy:.1} {mid_x:.1},{:.1} \
+         L {mid_x:.1},{:.1} \
+         Q {mid_x:.1},{ty:.1} {:.1},{ty:.1} \
+         L {tx:.1},{ty:.1}",
+        mid_x - dir_x * radius,
+        sy + dir_y * radius,
+        ty - dir_y * radius,
+        mid_x + dir_x * radius,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rounded_orthogonal_path_rounds_both_elbows() {
+        let path = rounded_orthogonal_path(100.0, 40.0, 300.0, 120.0);
+
+        assert_eq!(
+            path,
+            "M 100.0,40.0 L 188.0,40.0 Q 200.0,40.0 200.0,52.0 L 200.0,108.0 Q 200.0,120.0 212.0,120.0 L 300.0,120.0"
+        );
+    }
+
+    #[test]
+    fn rounded_orthogonal_path_clamps_radius_for_tight_vertical_gap() {
+        let path = rounded_orthogonal_path(100.0, 40.0, 300.0, 50.0);
+
+        assert_eq!(
+            path,
+            "M 100.0,40.0 L 195.0,40.0 Q 200.0,40.0 200.0,45.0 L 200.0,45.0 Q 200.0,50.0 205.0,50.0 L 300.0,50.0"
+        );
+    }
+
+    #[test]
+    fn rounded_orthogonal_path_uses_straight_line_for_aligned_ports() {
+        let path = rounded_orthogonal_path(100.0, 40.0, 300.0, 40.2);
+
+        assert_eq!(path, "M 100.0,40.0 L 300.0,40.2");
     }
 }
