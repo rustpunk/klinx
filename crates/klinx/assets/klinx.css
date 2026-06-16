@@ -4216,6 +4216,10 @@ input:-webkit-autofill:focus {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   /* Colour is driven by inline `color:` from accent. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Primary node label */
@@ -4275,7 +4279,6 @@ input:-webkit-autofill:focus {
 /* Collapse/expand toggle for field-bearing cards. Lives in the badge row so it
    never overlaps the port squares or the drill button. */
 .klinx-node-collapse-btn {
-  margin-left: auto;
   background: none;
   border: none;
   padding: 0 2px;
@@ -4285,6 +4288,51 @@ input:-webkit-autofill:focus {
   line-height: 1;
 }
 .klinx-node-collapse-btn:hover {
+  color: var(--klinx-bone);
+}
+
+.klinx-node-field-search {
+  flex: 1 1 42px;
+  min-width: 34px;
+  max-width: 58px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid var(--klinx-border-medium);
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--klinx-bone);
+  font-family: var(--klinx-font-code);
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 4px;
+}
+.klinx-node-field-search:focus {
+  outline: none;
+  border-color: var(--klinx-verdigris);
+}
+.klinx-node-field-search::placeholder {
+  color: var(--klinx-text-floor);
+}
+
+.klinx-node-more-btn {
+  flex: 0 0 auto;
+  max-width: 64px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: 1px solid var(--klinx-border-medium);
+  border-radius: 2px;
+  padding: 0 4px;
+  cursor: pointer;
+  color: var(--klinx-iron);
+  font-family: var(--klinx-font-code);
+  font-size: 10px;
+  line-height: 14px;
+}
+.klinx-node-more-btn:hover {
+  border-color: var(--klinx-verdigris);
   color: var(--klinx-bone);
 }
 

@@ -72,3 +72,10 @@ When architecture changes, append a dated entry with:
 - Raw mode still uses `derive_pipeline_view` and the existing klinx-side field-lineage approximation.
 - `components/canvas/panel.rs` now dispatches to the resolved derivation path when `ChannelViewMode::Resolved` has a compiled plan.
 - Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-99-target cargo test -p klinx resolved_pipeline_fields_use_compiled_output_row_types`.
+
+## 2026-06-16: Wide-Schema Canvas Field Projection
+
+- Canvas nodes now cap wide field lists by default and expose compact per-node filtering/expand controls.
+- The cap/filter projection is owned by `components/canvas/panel.rs` and applied before connector anchor resolution; `CanvasNode` renders the projected `StageView` it receives, so card height, branch placement, and visible field anchors stay aligned.
+- Changing a node's field filter or cap state clears stale hover/pin lineage state for that node.
+- Verification: `cargo test -p klinx wide_schema_projection`, `cargo test -p klinx pipeline_view`, `cargo fmt --all --check`, `cargo clippy -p klinx -- -D warnings`, `cargo clippy -p klinx --all-targets -- -D warnings`, `cargo build --package klinx`, and headless canvas screenshot capture.
