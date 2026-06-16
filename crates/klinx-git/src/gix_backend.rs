@@ -78,7 +78,7 @@ impl GitOps for GitCliOps {
         let (ahead, behind) = self.ahead_behind()?;
 
         // Get file statuses
-        let porcelain = self.git(&["status", "--porcelain=v1"])?;
+        let porcelain = self.git(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
         let files = parse_porcelain_status(&porcelain);
 
         Ok(RepoStatus::from_files(branch, ahead, behind, files))
@@ -252,6 +252,10 @@ impl GitCliOps {
 
 /// Parse `git status --porcelain=v1` output.
 fn parse_porcelain_status(output: &str) -> Vec<FileStatus> {
+    if output.contains('\0') {
+        return parse_porcelain_status_z(output);
+    }
+
     let mut files = Vec::new();
 
     for line in output.lines() {
@@ -261,15 +265,16 @@ fn parse_porcelain_status(output: &str) -> Vec<FileStatus> {
 
         let index_status = line.as_bytes()[0];
         let worktree_status = line.as_bytes()[1];
-        let path = &line[3..];
+        let raw_path = &line[3..];
 
-        let status = match (index_status, worktree_status) {
-            (b'?', b'?') => StatusKind::Untracked,
-            (b'A', _) | (_, b'A') => StatusKind::Added,
-            (b'D', _) | (_, b'D') => StatusKind::Deleted,
-            (b'R', _) | (_, b'R') => StatusKind::Renamed,
-            (b'M', _) | (_, b'M') => StatusKind::Modified,
-            _ => StatusKind::Modified,
+        let status = status_kind(index_status, worktree_status);
+
+        let path = if status == StatusKind::Renamed {
+            raw_path
+                .split_once(" -> ")
+                .map_or(raw_path, |(_, destination)| destination)
+        } else {
+            raw_path
         };
 
         files.push(FileStatus {
@@ -279,6 +284,48 @@ fn parse_porcelain_status(output: &str) -> Vec<FileStatus> {
     }
 
     files
+}
+
+/// Parse `git status --porcelain=v1 -z` output.
+///
+/// In `-z` mode Git does not quote paths, and rename entries are emitted as
+/// `XY new-path\0old-path\0`, so keeping the first path records the destination.
+fn parse_porcelain_status_z(output: &str) -> Vec<FileStatus> {
+    let mut files = Vec::new();
+    let mut records = output.split_terminator('\0');
+
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
+            continue;
+        }
+
+        let index_status = record.as_bytes()[0];
+        let worktree_status = record.as_bytes()[1];
+        let path = &record[3..];
+
+        let status = status_kind(index_status, worktree_status);
+        if status == StatusKind::Renamed {
+            let _source_path = records.next();
+        }
+
+        files.push(FileStatus {
+            path: PathBuf::from(path),
+            status,
+        });
+    }
+
+    files
+}
+
+fn status_kind(index_status: u8, worktree_status: u8) -> StatusKind {
+    match (index_status, worktree_status) {
+        (b'?', b'?') => StatusKind::Untracked,
+        (b'A', _) | (_, b'A') => StatusKind::Added,
+        (b'D', _) | (_, b'D') => StatusKind::Deleted,
+        (b'R', _) | (_, b'R') => StatusKind::Renamed,
+        (b'M', _) | (_, b'M') => StatusKind::Modified,
+        _ => StatusKind::Modified,
+    }
 }
 
 /// Parse `git blame --porcelain` output into BlameLine entries.
@@ -344,6 +391,51 @@ mod tests {
         assert_eq!(files[1].status, StatusKind::Untracked);
         assert_eq!(files[2].status, StatusKind::Added);
         assert_eq!(files[3].status, StatusKind::Deleted);
+    }
+
+    #[test]
+    fn test_parse_porcelain_rename_uses_destination_path() {
+        let output = "R  old/pipeline.yml -> new/pipeline.yml\n";
+        let files = parse_porcelain_status(output);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, StatusKind::Renamed);
+        assert_eq!(files[0].path, PathBuf::from("new/pipeline.yml"));
+    }
+
+    #[test]
+    fn test_parse_porcelain_z_rename_uses_destination_path() {
+        let output = "R  new/pipeline.yml\0old/pipeline.yml\0";
+        let files = parse_porcelain_status(output);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, StatusKind::Renamed);
+        assert_eq!(files[0].path, PathBuf::from("new/pipeline.yml"));
+    }
+
+    #[test]
+    fn test_parse_porcelain_z_rename_keeps_unquoted_destination_path() {
+        let output = "R  new -> name/pipeline file.yml\0old -> name/pipeline file.yml\0";
+        let files = parse_porcelain_status(output);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, StatusKind::Renamed);
+        assert_eq!(
+            files[0].path,
+            PathBuf::from("new -> name/pipeline file.yml")
+        );
+    }
+
+    #[test]
+    fn test_parse_porcelain_nested_untracked_files() {
+        let output = "?? new-dir/pipeline.yml\n?? new-dir/nested/step.yml\n";
+        let files = parse_porcelain_status(output);
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].status, StatusKind::Untracked);
+        assert_eq!(files[0].path, PathBuf::from("new-dir/pipeline.yml"));
+        assert_eq!(files[1].status, StatusKind::Untracked);
+        assert_eq!(files[1].path, PathBuf::from("new-dir/nested/step.yml"));
     }
 
     #[test]
