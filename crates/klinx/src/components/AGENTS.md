@@ -57,7 +57,7 @@ Components should consume app contexts and existing model helpers. Do not parse 
 
 ## Documentation Updates
 
-Update `doc/ai/30_DESIGN_RULES.md`, `40_COMMON_PATTERNS.md`, and `60_PERFORMANCE_NOTES.md` when component or CSS contracts change.
+Update `docs/ai/30_DESIGN_RULES.md`, `40_COMMON_PATTERNS.md`, and `60_PERFORMANCE_NOTES.md` when component or CSS contracts change.
 
 ## Unclear / Ask Human
 
@@ -65,4 +65,4 @@ Ask before large visual redesigns, changing canvas geometry semantics, formalizi
 
 ## Evidence
 
-`components/mod.rs`, `app.rs`, `state.rs`, `components/canvas/**`, `components/yaml_sidebar/**`, `components/file_explorer/model.rs`, `components/inspector/panel.rs`, `assets/klinx.css`, and `doc/ai`.
+`components/mod.rs`, `app.rs`, `state.rs`, `components/canvas/**`, `components/yaml_sidebar/**`, `components/file_explorer/model.rs`, `components/inspector/panel.rs`, `assets/klinx.css`, and `docs/ai`.

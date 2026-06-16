@@ -53,7 +53,7 @@ Keep UI-independent git behavior here. Do not add ad hoc git shellouts in `crate
 
 ## Documentation Updates
 
-Update `doc/ai/20_PROJECT_MAP.md`, `30_DESIGN_RULES.md`, `60_PERFORMANCE_NOTES.md`, and `AI_CHANGELOG.md` if this crate's public surface or backend strategy changes.
+Update `docs/ai/20_PROJECT_MAP.md`, `30_DESIGN_RULES.md`, `60_PERFORMANCE_NOTES.md`, and `AI_CHANGELOG.md` if this crate's public surface or backend strategy changes.
 
 ## Unclear / Ask Human
 
@@ -61,4 +61,4 @@ Ask before replacing the CLI backend, adding non-GitHub PR behavior, changing pa
 
 ## Evidence
 
-`src/lib.rs`, `src/ops.rs`, `src/gix_backend.rs`, `src/provider.rs`, `src/types.rs`, unit tests in this crate, and `doc/ai`.
+`src/lib.rs`, `src/ops.rs`, `src/gix_backend.rs`, `src/provider.rs`, `src/types.rs`, unit tests in this crate, and `docs/ai`.

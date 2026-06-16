@@ -62,7 +62,7 @@ Use root workspace dependencies and current Clinker pins from `Cargo.toml`. Do n
 
 ## Documentation Updates
 
-Update `doc/ai/10_ARCHITECTURE.md`, `20_PROJECT_MAP.md`, `30_DESIGN_RULES.md`, and `AI_CHANGELOG.md` when this crate's architecture or invariants change.
+Update `docs/ai/10_ARCHITECTURE.md`, `20_PROJECT_MAP.md`, `30_DESIGN_RULES.md`, and `AI_CHANGELOG.md` when this crate's architecture or invariants change.
 
 ## Unclear / Ask Human
 
@@ -70,4 +70,4 @@ Ask before changing Clinker/Dioxus pins, YAML preservation semantics, workspace 
 
 ## Evidence
 
-`main.rs`, `app.rs`, `state.rs`, `workspace.rs`, `sync.rs`, `pipeline_view.rs`, `yaml_patch.rs`, `docs/perf.md`, `.github/workflows/ci.yml`, and `doc/ai`.
+`main.rs`, `app.rs`, `state.rs`, `workspace.rs`, `sync.rs`, `pipeline_view.rs`, `yaml_patch.rs`, `docs/perf.md`, `.github/workflows/ci.yml`, and `docs/ai`.

@@ -33,7 +33,7 @@ Created on 2026-06-15 from repository inspection, Cargo metadata, CI config, exi
 
 ## Repository Memory Model
 
-Root `AGENTS.md` is the compact, always-loaded guide. `doc/ai/*.md` is durable detailed memory. Local `AGENTS.md` files specialize guidance for high-risk directories. Existing `CLAUDE.md`, `README.md`, `docs/perf.md`, and `examples/README.md` remain useful, but current `Cargo.toml` is the source of truth for dependency pins.
+Root `AGENTS.md` is the compact, always-loaded guide. `docs/ai/*.md` is durable detailed memory. Local `AGENTS.md` files specialize guidance for high-risk directories. Existing `CLAUDE.md`, `README.md`, `docs/perf.md`, and `examples/README.md` remain useful, but current `Cargo.toml` is the source of truth for dependency pins.
 
 ## Rules For Future AI Agents
 
@@ -86,4 +86,4 @@ Root `AGENTS.md` is the compact, always-loaded guide. `doc/ai/*.md` is durable d
 
 ## First Prompt For A New Codex Session
 
-Read `AGENTS.md`, `doc/ai/00_READ_THIS_FIRST.md`, and the local `AGENTS.md` for the area I ask you to change. Treat `Cargo.toml` and source/tests as authoritative, preserve YAML text semantics and Dioxus hook order, and update `doc/ai` if your change alters architecture, commands, invariants, or open questions.
+Read `AGENTS.md`, `docs/ai/00_READ_THIS_FIRST.md`, and the local `AGENTS.md` for the area I ask you to change. Treat `Cargo.toml` and source/tests as authoritative, preserve YAML text semantics and Dioxus hook order, and update `docs/ai` if your change alters architecture, commands, invariants, or open questions.

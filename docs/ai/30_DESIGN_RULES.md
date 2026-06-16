@@ -67,8 +67,8 @@
 
 ## Documentation Rules
 
-- **Verified:** Update `doc/ai` when architecture, commands, invariants, or open questions change.
-- **Strong inference:** Keep root and local `AGENTS.md` concise; move detailed reasoning to `doc/ai`.
+- **Verified:** Update `docs/ai` when architecture, commands, invariants, or open questions change.
+- **Strong inference:** Keep root and local `AGENTS.md` concise; move detailed reasoning to `docs/ai`.
 - **Verified:** Do not invent past decisions. Mark weak claims as Hypothesis or Open question.
 
 ## Never Do This Unless Explicitly Approved
