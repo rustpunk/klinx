@@ -2273,7 +2273,11 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
             cxl_source: None,
             description: None,
             error_message: None,
-            fields: Vec::new(),
+            fields: body
+                .body_rows
+                .get(plan_node.name())
+                .map(body_row_fields)
+                .unwrap_or_default(),
             branches: Vec::new(),
         });
     }
@@ -2297,8 +2301,14 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
         }
     }
 
-    // Drilled-in body nodes carry no field rows, so every card is [`NODE_HEIGHT`].
-    let heights = vec![NODE_HEIGHT; stages.len()];
+    let field_edges = body_field_edges(body, &stages, &predecessors);
+
+    // Body rows come from the engine's body-scoped output rows. Missing row data
+    // keeps the classic [`NODE_HEIGHT`] and contributes no field edges.
+    let heights: Vec<f32> = stages
+        .iter()
+        .map(|stage| row_stack_height(stage.fields.len()))
+        .collect();
     let positions = layout_positions(&slot_cols, &predecessors, &heights);
     for (stage, (x, y)) in stages.iter_mut().zip(positions) {
         stage.canvas_x = x;
@@ -2308,14 +2318,83 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
     PipelineView {
         stages,
         connections,
-        field_edges: Vec::new(),
+        field_edges,
     }
+}
+
+fn body_row_fields(row: &cxl::typecheck::Row) -> Vec<FieldRow> {
+    row.fields()
+        .map(|(field, ty)| FieldRow {
+            name: field.to_string(),
+            kind: FieldKind::Declared,
+            ty: Some(compact_type(ty)),
+            is_correlation_key: false,
+        })
+        .collect()
+}
+
+fn body_field_edges(
+    body: &clinker_plan::plan::composition_body::BoundBody,
+    stages: &[StageView],
+    graph_predecessors: &[Vec<usize>],
+) -> Vec<FieldEdge> {
+    let name_to_slot: std::collections::HashMap<&str, usize> = stages
+        .iter()
+        .enumerate()
+        .map(|(idx, stage)| (stage.id.as_str(), idx))
+        .collect();
+
+    let mut edges = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (to, stage) in stages.iter().enumerate() {
+        let ordered_predecessors: Vec<usize> = body
+            .node_input_refs
+            .get(&stage.id)
+            .map(|refs| {
+                refs.iter()
+                    .filter_map(|raw| {
+                        let producer = raw.split_once('.').map_or(raw.as_str(), |(node, _)| node);
+                        name_to_slot.get(producer).copied()
+                    })
+                    .collect()
+            })
+            .filter(|preds: &Vec<usize>| !preds.is_empty())
+            .unwrap_or_else(|| graph_predecessors.get(to).cloned().unwrap_or_default());
+
+        for from in ordered_predecessors {
+            let Some(source) = stages.get(from) else {
+                continue;
+            };
+            if source.fields.is_empty() || stage.fields.is_empty() {
+                continue;
+            }
+            let source_fields: std::collections::HashSet<&str> = source
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect();
+            for field in &stage.fields {
+                if source_fields.contains(field.name.as_str())
+                    && seen.insert((from, field.name.clone(), to))
+                {
+                    edges.push(FieldEdge {
+                        from_node: from,
+                        from_field: field.name.clone(),
+                        to_node: to,
+                        to_field: field.name.clone(),
+                        kind: FieldEdgeKind::Passthrough,
+                    });
+                }
+            }
+        }
+    }
+    edges
 }
 
 #[cfg(test)]
 mod migrated_fixture_tests {
     use super::*;
-    use clinker_plan::config::parse_config;
+    use clinker_plan::config::{CompileContext, parse_config};
 
     /// Variant dispatch is guarded at compile time: [`stage_kind_for_node`]
     /// has no `_` arm, so adding a `PipelineNode` variant without mapping it is
@@ -2655,6 +2734,176 @@ nodes:
             assert_eq!(kind.kind_attr(), attr);
             assert_eq!(kind.badge_label(), badge);
         }
+    }
+
+    fn compiled_body_fixture() -> clinker_plan::plan::composition_body::BoundBody {
+        let unique = format!(
+            "klinx-body-view-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temporary composition workspace");
+        std::fs::write(
+            root.join("body_lineage.comp.yaml"),
+            r#"_compose:
+  name: body_lineage
+  inputs:
+    src:
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+  outputs:
+    result: second
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: first
+    input: src
+    config:
+      cxl: |
+        emit c = a + 1
+  - type: transform
+    name: second
+    input: first
+    config:
+      cxl: |
+        emit d = c + 1
+"#,
+        )
+        .expect("write composition fixture");
+
+        let pipeline = r#"
+pipeline:
+  name: body_drill
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+  - type: composition
+    name: comp
+    input: src
+    use: ./body_lineage.comp.yaml
+    inputs:
+      src: src
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("pipeline fixture parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("pipeline fixture compiles");
+        let body_id = plan
+            .dag()
+            .graph
+            .node_weights()
+            .find_map(|node| match node {
+                clinker_plan::plan::execution::PlanNode::Composition { name, body, .. }
+                    if name == "comp" =>
+                {
+                    Some(*body)
+                }
+                _ => None,
+            })
+            .expect("compiled composition body id");
+        let body = plan.body_of(body_id).expect("compiled body exists").clone();
+        let _ = std::fs::remove_dir_all(root);
+        body
+    }
+
+    #[test]
+    fn body_view_uses_body_scoped_rows_for_fields_and_edges() {
+        let body = compiled_body_fixture();
+        let view = derive_body_view(&body);
+
+        let first_idx = stage_idx(&view, "first");
+        let second_idx = stage_idx(&view, "second");
+        let first = &view.stages[first_idx];
+
+        for (stage, field, ty) in [
+            (first_idx, "a", "int"),
+            (first_idx, "b", "string"),
+            (first_idx, "c", "int"),
+            (second_idx, "a", "int"),
+            (second_idx, "b", "string"),
+            (second_idx, "c", "int"),
+            (second_idx, "d", "int"),
+        ] {
+            let row = field_by_name(&view, stage, field);
+            assert_eq!(row.kind, FieldKind::Declared);
+            assert_eq!(row.ty.as_deref(), Some(ty));
+        }
+        assert!(
+            first
+                .fields
+                .iter()
+                .any(|field| field.name == "$source.name"),
+            "body view should render the full engine row, including engine/system fields"
+        );
+
+        for field in ["a", "b", "c"] {
+            assert!(
+                view.field_edges.contains(&FieldEdge {
+                    from_node: first_idx,
+                    from_field: field.to_string(),
+                    to_node: second_idx,
+                    to_field: field.to_string(),
+                    kind: FieldEdgeKind::Passthrough,
+                }),
+                "expected body carry edge for {field}, got {:?}",
+                view.field_edges
+            );
+        }
+        assert!(
+            !view
+                .field_edges
+                .iter()
+                .any(|edge| edge.to_node == second_idx && edge.to_field == "d"),
+            "body view must not invent derive edges without engine support data: {:?}",
+            view.field_edges
+        );
+    }
+
+    #[test]
+    fn body_view_missing_row_data_keeps_node_level_fallback() {
+        let mut body = compiled_body_fixture();
+        body.body_rows.remove("first");
+        let view = derive_body_view(&body);
+
+        let first_idx = stage_idx(&view, "first");
+        let second_idx = stage_idx(&view, "second");
+        assert!(
+            view.connections
+                .iter()
+                .any(|edge| edge.from == first_idx && edge.to == second_idx),
+            "node-level body connector should remain when row data is missing"
+        );
+        assert!(
+            view.stages[first_idx].fields.is_empty(),
+            "missing body row data degrades this node to node-level only"
+        );
+        assert!(
+            view.field_edges
+                .iter()
+                .all(|edge| edge.from_node != first_idx && edge.to_node != first_idx),
+            "missing row data should suppress field edges for that node: {:?}",
+            view.field_edges
+        );
     }
 
     /// The shipped `order_fulfillment.yaml` example parses and models routing

@@ -18,7 +18,7 @@
 3. Workspace restore loads `kiln.toml`, `.kiln-state.json`, last-workspace state, or CLI workspace state through `workspace.rs`.
 4. YAML edits update `yaml_text` with an `EditSource`. `hooks/pipeline_sync.rs` debounces parsing and syncs parsed models back into active tab state.
 5. `sync.rs` routes YAML through pipeline or composition parsing, resolves imports when a workspace root is available, and can produce partial views for invalid YAML.
-6. `pipeline_view.rs` and `pipeline_view/field_lineage.rs` derive canvas-ready models, layout, connections, branch ports, and field lineage. `pipeline_view/layout_model.rs` is a pure Rust scaffold for future port-aware layered layout; the visible canvas still uses `layout_positions`.
+6. `pipeline_view.rs` and `pipeline_view/field_lineage.rs` derive canvas-ready models, layout, connections, branch ports, and field lineage. Compiled composition drill-in uses `derive_body_view` over `BoundBody`; body field rows come from `BoundBody::body_rows` and missing rows degrade to node-level body connectors. `pipeline_view/layout_model.rs` is a pure Rust scaffold for future port-aware layered layout; the visible canvas still uses `layout_positions`.
 7. Components consume `AppState` and `TabManagerState` contexts to render canvas, YAML editor, inspector, schemas, search, git, and overlays.
 8. `klinx-git` shells out to `git` and `gh` for version-control operations used by version-mode UI and git status hooks.
 
@@ -35,7 +35,7 @@
 
 - App: `app::AppShell`, `main::cli_workspace`, `state::{AppState, TabManagerState}`.
 - Workspace/session: `workspace::{load_workspace, restore_session, save_full_session, build_state_snapshot}`.
-- Parsing/view: `sync::{parse_yaml, try_parse_yaml, parse_composition}`, `pipeline_view::{derive_pipeline_view, derive_composition_view, derive_partial_pipeline_view, layout_model}`.
+- Parsing/view: `sync::{parse_yaml, try_parse_yaml, parse_composition}`, `pipeline_view::{derive_pipeline_view, derive_composition_view, derive_body_view, derive_partial_pipeline_view, layout_model}`.
 - YAML patching: `yaml_patch::{patch_yaml_preserving_nodes, serialize_yaml_full}`.
 - Git: `klinx_git::{GitOps, GitCliOps, RepoStatus, create_pr, detect_provider}`.
 - Commands: `dx serve --package klinx --platform desktop`, `cargo test --workspace`, CI commands in `.github/workflows/ci.yml`.

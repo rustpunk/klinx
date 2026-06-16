@@ -49,6 +49,13 @@ When architecture changes, append a dated entry with:
 - Added `.github/ISSUE_TEMPLATE/milestone-orchestration.yml` so a milestone coordinator issue can persist active slots, queue, blockers, and closeout state.
 - Root guidance now points agents to the orchestration skill/runbook and keeps the maintainer merge gate explicit.
 
+## 2026-06-16: Compiled Body Drill-In Field Rows
+
+- `pipeline_view::derive_body_view` now attaches field rows to compiled composition-body drill-in nodes from `BoundBody::body_rows`, keyed by compiled body node name.
+- Body field edges are conservative same-name passthrough carries between rendered body predecessors when both endpoint rows are available; missing row data leaves the body node at node-level connectors only.
+- `StageView.id` continues to use the compiled `PlanNode` body node name, while `NodeIndex` remains internal to the compiled body graph.
+- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-95-target cargo test -p klinx pipeline_view`.
+
 ## 2026-06-16: Port-Aware Layout Model Scaffold
 
 - Added `pipeline_view/layout_model.rs` as a pure Rust graph model for future port-aware layered canvas layout.
