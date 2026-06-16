@@ -20,3 +20,5 @@ jobs:
     uses: rustpunk/github-workflows/.github/workflows/pr-auto-update-branches.yml@main
     with:
       base: main
+    secrets:
+      PR_BRANCH_UPDATE_TOKEN: ${{ secrets.PR_BRANCH_UPDATE_TOKEN }}
