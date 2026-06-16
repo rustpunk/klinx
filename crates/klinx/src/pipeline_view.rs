@@ -609,6 +609,16 @@ pub fn derive_pipeline_view(config: &PipelineConfig) -> PipelineView {
     derive_view_from_nodes(&config.nodes)
 }
 
+/// Derive a top-level canvas view from a compiled plan.
+///
+/// Resolved mode uses the engine's typed output rows as the authoritative field
+/// row/type source while keeping the same node/connection geometry as the raw
+/// pipeline view. Missing typed rows degrade to empty field rows for that node
+/// instead of falling back to confident approximation.
+pub fn derive_resolved_pipeline_view(plan: &clinker_plan::plan::CompiledPlan) -> PipelineView {
+    derive_view_from_nodes_inner(&plan.config().nodes, Some(plan))
+}
+
 /// Derive a canvas view from a flat node list.
 ///
 /// Shared by pipelines and compositions: both store the same
@@ -621,6 +631,13 @@ pub fn derive_pipeline_view(config: &PipelineConfig) -> PipelineView {
 /// shared [`compute_field_lineage`] core (the same core the composition path
 /// uses; only the origin-field source differs).
 pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
+    derive_view_from_nodes_inner(nodes, None)
+}
+
+fn derive_view_from_nodes_inner(
+    nodes: &[Spanned<PipelineNode>],
+    resolved_plan: Option<&clinker_plan::plan::CompiledPlan>,
+) -> PipelineView {
     use std::collections::HashMap;
 
     // Column = 1 + max column of inputs; sources sit in column 0.
@@ -743,7 +760,10 @@ pub fn derive_view_from_nodes(nodes: &[Spanned<PipelineNode>]) -> PipelineView {
     // topological for the column DAG built above (a node references only
     // earlier-declared nodes), so the shared core reads final producer rows in
     // one sweep. `out_fields[i]` is parallel to `nodes`.
-    let (out_fields, field_edges) = pipeline_field_lineage(nodes, &predecessors);
+    let (out_fields, field_edges) = match resolved_plan {
+        Some(plan) => resolved_pipeline_field_lineage(nodes, plan, &predecessors),
+        None => pipeline_field_lineage(nodes, &predecessors),
+    };
 
     // Per-node card heights drive the column stacking so a tall field-bearing
     // card never overlaps the next one. A node with field rows is `header +
@@ -1660,6 +1680,218 @@ fn pipeline_field_lineage(
         .collect();
 
     compute_field_lineage(&slots, predecessors, &input_aliases)
+}
+
+/// Engine-resolved top-level field rows plus conservative lineage edges.
+///
+/// The compiled plan's [`cxl::typecheck::Row`] is the source of truth for the
+/// rows and compact datatype labels shown in Resolved mode. The existing CXL
+/// support analysis still supplies edge intent, but every edge is gated on the
+/// resolved endpoint fields so a stale approximation cannot draw cables to rows
+/// the engine did not produce.
+fn resolved_pipeline_field_lineage(
+    nodes: &[Spanned<PipelineNode>],
+    plan: &clinker_plan::plan::CompiledPlan,
+    predecessors: &[Vec<usize>],
+) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+    let total = nodes.len();
+    let name_to_idx: std::collections::HashMap<String, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, spanned)| (spanned.value.name().to_string(), i))
+        .collect();
+    let input_aliases: Vec<std::collections::HashMap<String, usize>> = nodes
+        .iter()
+        .map(|spanned| node_input_aliases(&spanned.value, &name_to_idx))
+        .collect();
+
+    let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
+    let mut field_edges: Vec<FieldEdge> = Vec::new();
+
+    for (idx, spanned) in nodes.iter().enumerate() {
+        let node = &spanned.value;
+
+        let mut input_cols: Vec<String> = Vec::new();
+        let mut producers_of: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut col_meta: std::collections::HashMap<String, ColMeta> =
+            std::collections::HashMap::new();
+        for &p in &predecessors[idx] {
+            for row in &out_fields[p] {
+                let producers = producers_of.entry(row.name.clone()).or_default();
+                let meta = col_meta.entry(row.name.clone()).or_default();
+                if producers.is_empty() {
+                    meta.ty = row.ty.clone();
+                    input_cols.push(row.name.clone());
+                }
+                meta.is_ck |= row.is_correlation_key;
+                if !producers.contains(&p) {
+                    producers.push(p);
+                }
+            }
+        }
+
+        let parsed = node_cxl(node).and_then(field_lineage::parse_clean);
+        let supports = parsed
+            .as_ref()
+            .map(field_lineage::emit_supports)
+            .unwrap_or_default();
+        let emitted: std::collections::HashSet<String> =
+            supports.iter().map(|(name, _)| name.clone()).collect();
+        let copies = parsed
+            .as_ref()
+            .map(|program| field_lineage::emit_copy_targets(program, &input_cols))
+            .unwrap_or_default();
+        let used_cols: std::collections::HashSet<String> = supports
+            .iter()
+            .filter(|(target, _)| !copies.contains(target.as_str()))
+            .flat_map(|(_, support)| support.iter().map(|m| bare_column(m).to_string()))
+            .collect();
+        let carry_kind = |col: &str| {
+            if used_cols.contains(col) {
+                FieldEdgeKind::Access
+            } else {
+                FieldEdgeKind::Passthrough
+            }
+        };
+
+        let Some(row) = plan.typed_output_row(node.name()) else {
+            continue;
+        };
+        out_fields[idx] =
+            resolved_row_fields(row, node, &producers_of, &col_meta, &emitted, &copies);
+        let output_names: std::collections::HashSet<String> =
+            out_fields[idx].iter().map(|row| row.name.clone()).collect();
+
+        if let Some(_program) = parsed {
+            let aliases = &input_aliases[idx];
+            let mut emitted_so_far: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            for (target, support) in &supports {
+                if !output_names.contains(target) {
+                    emitted_so_far.insert(target.as_str());
+                    continue;
+                }
+                let carried = copies.contains(target.as_str());
+                for member in support {
+                    let col = bare_column(member);
+                    let kind = if carried {
+                        carry_kind(col)
+                    } else {
+                        FieldEdgeKind::Derive
+                    };
+                    let anchors = resolve_support_anchors(member, &producers_of, aliases);
+                    if !anchors.is_empty() {
+                        for (p, from_field) in anchors {
+                            field_edges.push(FieldEdge {
+                                from_node: p,
+                                from_field,
+                                to_node: idx,
+                                to_field: target.clone(),
+                                kind,
+                            });
+                        }
+                    } else if emitted_so_far.contains(col) && output_names.contains(col) {
+                        field_edges.push(FieldEdge {
+                            from_node: idx,
+                            from_field: col.to_string(),
+                            to_node: idx,
+                            to_field: target.clone(),
+                            kind,
+                        });
+                    }
+                }
+                emitted_so_far.insert(target.as_str());
+            }
+
+            for col in &input_cols {
+                if output_names.contains(col)
+                    && !emitted.contains(col)
+                    && let Some(producers) = producers_of.get(col)
+                {
+                    let kind = carry_kind(col);
+                    for &p in producers {
+                        field_edges.push(FieldEdge {
+                            from_node: p,
+                            from_field: col.clone(),
+                            to_node: idx,
+                            to_field: col.clone(),
+                            kind,
+                        });
+                    }
+                }
+            }
+        } else if node_cxl(node).is_none() && node_preserves_input_schema(node) {
+            for col in &input_cols {
+                if output_names.contains(col)
+                    && let Some(producers) = producers_of.get(col)
+                {
+                    for &p in producers {
+                        field_edges.push(FieldEdge {
+                            from_node: p,
+                            from_field: col.clone(),
+                            to_node: idx,
+                            to_field: col.clone(),
+                            kind: FieldEdgeKind::Passthrough,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    (out_fields, field_edges)
+}
+
+fn resolved_row_fields(
+    row: &cxl::typecheck::Row,
+    node: &PipelineNode,
+    producers_of: &std::collections::HashMap<String, Vec<usize>>,
+    col_meta: &std::collections::HashMap<String, ColMeta>,
+    emitted: &std::collections::HashSet<String>,
+    copies: &std::collections::HashSet<String>,
+) -> Vec<FieldRow> {
+    let ck_fields: std::collections::HashSet<&str> = match node {
+        PipelineNode::Source { config: body, .. } => body
+            .correlation_key
+            .as_ref()
+            .map(|ck| ck.fields().into_iter().collect())
+            .unwrap_or_default(),
+        _ => std::collections::HashSet::new(),
+    };
+
+    row.fields()
+        .filter_map(|(field, ty)| {
+            let name = field.name.as_ref();
+            if is_internal_field_name(name) {
+                return None;
+            }
+            let kind = if matches!(node, PipelineNode::Source { .. }) {
+                FieldKind::Declared
+            } else if copies.contains(name)
+                || (!emitted.contains(name) && producers_of.contains_key(name))
+            {
+                FieldKind::PassThrough
+            } else {
+                FieldKind::Emitted
+            };
+            let is_correlation_key = match kind {
+                FieldKind::Declared => ck_fields.contains(name),
+                FieldKind::PassThrough => col_meta.get(name).is_some_and(|meta| meta.is_ck),
+                FieldKind::Emitted => false,
+            };
+            Some(FieldRow {
+                name: name.to_string(),
+                kind,
+                ty: Some(compact_type(ty)),
+                is_correlation_key,
+            })
+        })
+        .collect()
+}
+
+fn is_internal_field_name(name: &str) -> bool {
+    name.starts_with("$ck.")
 }
 
 /// Synthetic boundary node for a composition input port.
@@ -3433,6 +3665,74 @@ nodes:
             closure,
             std::collections::HashSet::from([derive_idx]),
             "c's closure is exactly the a→c derive edge, no carries"
+        );
+    }
+
+    /// Resolved mode reads the engine's typed output rows, so emitted fields can
+    /// carry compact type labels that the Raw approximation deliberately leaves
+    /// unknown. The edge still resolves to the same field-row anchors.
+    #[test]
+    fn resolved_pipeline_fields_use_compiled_output_row_types() {
+        let yaml = r#"
+pipeline:
+  name: resolved_types
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+  - type: transform
+    name: t
+    input: src
+    config:
+      cxl: |
+        emit c = a + 1
+  - type: output
+    name: out
+    input: t
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(yaml).expect("resolved fixture parses");
+        let raw = derive_pipeline_view(&config);
+        let plan = config
+            .compile(&CompileContext::default())
+            .expect("resolved fixture compiles");
+        let resolved = derive_resolved_pipeline_view(&plan);
+
+        let raw_t = stage_idx(&raw, "t");
+        let raw_c = field_by_name(&raw, raw_t, "c");
+        assert_eq!(raw_c.kind, FieldKind::Emitted);
+        assert_eq!(raw_c.ty, None, "Raw mode keeps emitted field types unknown");
+
+        let resolved_t = stage_idx(&resolved, "t");
+        let resolved_c = field_by_name(&resolved, resolved_t, "c");
+        assert_eq!(resolved_c.kind, FieldKind::Emitted);
+        assert_eq!(
+            resolved_c.ty.as_deref(),
+            Some("int"),
+            "Resolved mode uses the engine's typed output row"
+        );
+
+        let resolved_src = stage_idx(&resolved, "src");
+        let derive_a_c = FieldEdge {
+            from_node: resolved_src,
+            from_field: "a".to_string(),
+            to_node: resolved_t,
+            to_field: "c".to_string(),
+            kind: FieldEdgeKind::Derive,
+        };
+        assert!(
+            resolved.field_edges.contains(&derive_a_c),
+            "resolved lineage edge should still target the typed row: {:?}",
+            resolved.field_edges
         );
     }
 

@@ -64,3 +64,11 @@ When architecture changes, append a dated entry with:
 - Prior-art summary: existing research notes point toward a Rust Sugiyama-style layered pass with port-aware crossing minimization and orthogonal routing, avoiding a JS/elkjs dependency.
 - Open question added for when and how to migrate the visible canvas to this model.
 - Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-100-target cargo test -p klinx layout_model`.
+
+## 2026-06-16: Resolved Top-Level Pipeline Field Rows
+
+- Added `pipeline_view::derive_resolved_pipeline_view` for top-level canvas Resolved mode.
+- Resolved mode now uses `CompiledPlan::typed_output_row` as the field row/type source, filters engine-internal `$ck.*` rows, and only draws lineage edges whose endpoints exist in the resolved row set.
+- Raw mode still uses `derive_pipeline_view` and the existing klinx-side field-lineage approximation.
+- `components/canvas/panel.rs` now dispatches to the resolved derivation path when `ChannelViewMode::Resolved` has a compiled plan.
+- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-99-target cargo test -p klinx resolved_pipeline_fields_use_compiled_output_row_types`.
