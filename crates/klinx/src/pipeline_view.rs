@@ -15,7 +15,7 @@ pub mod layout_model;
 
 pub use field_lineage::{
     FieldEdge, FieldEdgeKind, FieldKind, FieldRow, field_lineage_full, group_endpoints_by_node,
-    lineage_closure, node_carry_edges,
+    lineage_closure,
 };
 
 pub const NODE_HEIGHT: f32 = 92.0;

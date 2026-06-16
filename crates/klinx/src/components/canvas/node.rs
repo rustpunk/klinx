@@ -3,12 +3,15 @@ use dioxus::prelude::*;
 use crate::pipeline_view::{FieldKind, HEADER_PORT_Y, NODE_WIDTH, StageKind, StageView};
 use crate::state::{CompositionDrillFrame, use_app_state};
 
-use super::{CanvasHover, HoverTarget, PinnedField};
+use super::{CanvasHover, PinnedField};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct FieldDisplayInfo {
     pub total_count: usize,
+    pub matching_count: usize,
     pub hidden_count: usize,
+    pub next_count: usize,
+    pub temporary_fields: Vec<String>,
     pub query: String,
     pub searchable: bool,
     pub can_reduce: bool,
@@ -18,10 +21,11 @@ pub(super) struct FieldDisplayInfo {
 ///
 /// `index` is the stage's position in the current [`crate::pipeline_view::PipelineView`]
 /// — the identity a [`crate::pipeline_view::FieldEdge`] uses for its endpoints, so
-/// a card hover reports `HoverTarget::Node(index)` and a field-row hover reports
-/// `HoverTarget::Field(index, name)` to the canvas's [`super::CanvasHover`]
-/// context. `dimmed` fades the card when a field's lineage is being revealed and
-/// this node is outside that closure.
+/// a field-row hover reports `HoverTarget::Field(index, name)` to the canvas's
+/// [`super::CanvasHover`] context after a cold-entry dwell, then instantly while
+/// warm. Plain card hover does not reveal field connectors. `dimmed` fades the
+/// card when a field's lineage is being revealed and this node is outside that
+/// closure.
 ///
 /// `highlighted_fields` names THIS card's own field rows that are lineage
 /// endpoints of the active hover reveal (#87) — the rows to tint so a reader of
@@ -70,16 +74,40 @@ pub fn CanvasNode(
     let keeps_node_out = stage.keeps_node_output_port();
     let show_rows = !stage.fields.is_empty() && !*collapsed.read();
     let show_branches = has_branches && !*collapsed.read();
+    let field_tools_visible = field_display.searchable;
     let toggle_display = field_display.hidden_count > 0 || field_display.can_reduce;
     let toggle_label = if field_display.hidden_count > 0 {
-        format!("+{} more", field_display.hidden_count)
+        format!("Show {} more", field_display.next_count)
     } else {
-        "less".to_string()
+        "Show fewer".to_string()
     };
     let toggle_title = if field_display.hidden_count > 0 {
-        "Show all matching fields"
+        "Show more matching fields"
     } else {
         "Return to capped field list"
+    };
+    let visible_field_count = field_display
+        .matching_count
+        .saturating_sub(field_display.hidden_count);
+    let count_label = if field_display.query.trim().is_empty()
+        || field_display.matching_count == field_display.total_count
+    {
+        format!("{visible_field_count}/{}", field_display.total_count)
+    } else {
+        format!("{visible_field_count}/{}", field_display.matching_count)
+    };
+    let count_title = if field_display.query.trim().is_empty()
+        || field_display.matching_count == field_display.total_count
+    {
+        format!(
+            "{visible_field_count} of {} fields shown",
+            field_display.total_count
+        )
+    } else {
+        format!(
+            "{visible_field_count} of {} matching fields shown",
+            field_display.matching_count
+        )
     };
 
     // Lineage-endpoint lookup (#87): build the set ONCE per card, so testing each
@@ -87,6 +115,11 @@ pub fn CanvasNode(
     // (allocation-free) when nothing is hovered or this card has no endpoints.
     let highlighted: std::collections::HashSet<&str> =
         highlighted_fields.iter().map(String::as_str).collect();
+    let temporary: std::collections::HashSet<&str> = field_display
+        .temporary_fields
+        .iter()
+        .map(String::as_str)
+        .collect();
 
     let base_class = match (is_selected, is_error, is_composition) {
         (_, _, true) => {
@@ -132,35 +165,12 @@ pub fn CanvasNode(
             "data-stage-kind": kind_attr,
             style: "{border_style}",
             onmousedown: move |e: MouseEvent| e.stop_propagation(),
-            // Node-scope lineage reveal (#72): entering the card (off any row)
-            // reveals this node's identity carries — but only when the card shows
-            // field rows (a collapsed/field-less card has no rendered anchors, so
-            // its carries would draw to phantom positions → reveal nothing).
-            //
-            // The `node() != Some(index)` guard is load-bearing: when the pointer
-            // arrives directly on a field row, BOTH this card's `onmouseenter`
-            // (Node) and the row's `onmouseenter` (Field) fire, and their relative
-            // order is NOT guaranteed under WebKitGTK (it fires the card enter even
-            // on a move that lands on a child). Without the guard a card-enter that
-            // runs after the row-enter clobbers the row's `Field` reveal back to the
-            // whole-node overview. The guard makes card-enter claim node-scope only
-            // when the hover is not already anchored on this card, so a row's
-            // `Field` always wins regardless of event order.
-            onmouseenter: move |_| {
-                if !show_rows {
-                    hovered.0.set(HoverTarget::None);
-                } else if hovered.0.peek().node() != Some(index) {
-                    hovered.0.set(HoverTarget::Node(index));
-                }
-            },
             // Leaving the card clears only THIS node's hover. The node-index
             // guard keeps the reset order-independent: if the pointer jumped onto
             // another card whose enter already set the new target, this stale
             // leave does not clobber it. `peek` reads without subscribing.
             onmouseleave: move |_| {
-                if hovered.0.peek().node() == Some(index) {
-                    hovered.0.set(HoverTarget::None);
-                }
+                hovered.close_if_node(index);
             },
             onclick: {
                 let stage_id = stage_id.clone();
@@ -195,34 +205,11 @@ pub fn CanvasNode(
             // region below it begins at that offset from the card top and the
             // SVG world-space anchors line up with the rendered dots. `overflow`
             // is clipped in CSS so a long subtitle never grows the header.
-            div { class: "klinx-node-header",
+            div { class: if field_tools_visible { "klinx-node-header klinx-node-header--with-field-tools" } else { "klinx-node-header" },
                 div {
                     class: "klinx-node-badge",
                     style: "color: var(--klinx-stage-accent);",
                     span { class: "klinx-node-type-badge", "{badge}" }
-                    if field_display.searchable {
-                        input {
-                            class: "klinx-node-field-search",
-                            r#type: "search",
-                            value: "{field_display.query}",
-                            placeholder: "filter",
-                            title: "Filter fields",
-                            onmousedown: move |e: MouseEvent| e.stop_propagation(),
-                            onclick: move |e: MouseEvent| e.stop_propagation(),
-                            oninput: move |e: FormEvent| on_field_query.call(e.value()),
-                        }
-                    }
-                    if toggle_display {
-                        button {
-                            class: "klinx-node-more-btn",
-                            title: "{toggle_title}",
-                            onclick: move |e: MouseEvent| {
-                                e.stop_propagation();
-                                on_field_toggle.call(());
-                            },
-                            "{toggle_label}"
-                        }
-                    }
                     // Collapse/expand toggle — on any card that carries field rows
                     // or Route branch ports.
                     if has_fields || has_branches {
@@ -237,14 +224,11 @@ pub fn CanvasNode(
                                 collapsed.set(!now);
                                 // Collapsing unmounts the field rows, so their
                                 // container `onmouseleave` can never fire to clear a
-                                // hover that targets this node — and a Node-scope or
-                                // pinned reveal would now point at phantom row
-                                // anchors. Clear both here to avoid a stuck lineage
-                                // reveal; a later pointer move / click re-establishes.
+                                // delayed/active hover that targets this node. Clear
+                                // both hover and pin to avoid phantom row anchors; a
+                                // later pointer move / click re-establishes.
                                 if !now {
-                                    if hovered.0.peek().node() == Some(index) {
-                                        hovered.0.set(HoverTarget::None);
-                                    }
+                                    hovered.force_clear_if_node(index);
                                     if matches!(&*pinned.0.peek(), Some((n, _)) if *n == index) {
                                         pinned.0.set(None);
                                     }
@@ -266,31 +250,43 @@ pub fn CanvasNode(
                     title: "{stage.subtitle}",
                     "{stage.subtitle}"
                 }
+
+                if field_tools_visible {
+                    div {
+                        class: "klinx-node-field-tools",
+                        input {
+                            class: "klinx-node-field-search",
+                            r#type: "search",
+                            value: "{field_display.query}",
+                            placeholder: "filter fields",
+                            title: "Filter fields",
+                            onmousedown: move |e: MouseEvent| e.stop_propagation(),
+                            onclick: move |e: MouseEvent| e.stop_propagation(),
+                            oninput: move |e: FormEvent| on_field_query.call(e.value()),
+                        }
+                    }
+                }
             }
 
             // ── Field-row list (variable height) ─────────────────────────────
             if show_rows {
                 div {
                     class: "klinx-node-fields",
-                    // Downgrade Field→Node on ONE container-level leave, not per
-                    // row. Sweeping row→row would otherwise fire a row's leave
-                    // before the next row's enter, flashing a transient empty
-                    // closure between every row. Rows abut at the fixed
-                    // FIELD_ROW_HEIGHT pitch, so moving within the list never
-                    // crosses this boundary; the field hover stays Field(A)→Field(B).
+                    // Clear/cancel on ONE container-level leave, not per row.
+                    // Sweeping row→row would otherwise fire a row's leave before
+                    // the next row's enter, flashing a transient empty closure
+                    // between every row. Rows abut at the fixed FIELD_ROW_HEIGHT
+                    // pitch, so moving within the list never crosses this
+                    // boundary; an active/warm field hover can move row-to-row
+                    // instantly until the pointer leaves the field area.
                     //
-                    // Leaving the list means the pointer is either still inside
-                    // this card (moved off the rows onto the header/padding) →
-                    // downgrade to the node-scope carry reveal; or it left the
-                    // card entirely → the card's own `onmouseleave` fires too and
-                    // clears to None. Guarding on `Field(index, _)` makes this
-                    // order-independent against the card-leave and against a jump
-                    // straight onto another card's row (which already set the new
-                    // target). `peek()` reads without subscribing.
+                    // Leaving the list means the pointer is on node chrome or has
+                    // left the card; neither should reveal field connectors.
+                    // `close_if_node` checks both active and pending hover targets,
+                    // so stale leave events cannot cancel a newer row hover on a
+                    // different card.
                     onmouseleave: move |_| {
-                        if matches!(&*hovered.0.peek(), HoverTarget::Field(n, _) if *n == index) {
-                            hovered.0.set(HoverTarget::Node(index));
-                        }
+                        hovered.close_if_node(index);
                     },
                     for (i, field) in stage.fields.iter().enumerate() {
                         FieldRowView {
@@ -304,6 +300,7 @@ pub fn CanvasNode(
                             // active hover (#87). O(1) lookup in this card's
                             // pre-built endpoint set.
                             highlighted: highlighted.contains(field.name.as_str()),
+                            temporary: temporary.contains(field.name.as_str()),
                             is_correlation_key: field.is_correlation_key,
                         }
                     }
@@ -326,6 +323,26 @@ pub fn CanvasNode(
                             predicate: branch.predicate.clone(),
                             is_default: branch.is_default,
                         }
+                    }
+                }
+            }
+
+            if show_rows && toggle_display {
+                div {
+                    class: "klinx-node-field-footer",
+                    button {
+                        class: "klinx-node-more-btn",
+                        title: "{toggle_title}",
+                        onclick: move |e: MouseEvent| {
+                            e.stop_propagation();
+                            on_field_toggle.call(());
+                        },
+                        "{toggle_label}"
+                    }
+                    span {
+                        class: "klinx-node-field-footer-count",
+                        title: "{count_title}",
+                        "{count_label}"
                     }
                 }
             }
@@ -370,20 +387,19 @@ pub fn CanvasNode(
 /// Carries LEFT and RIGHT anchor dots (the visual endpoints field-edge cables
 /// connect to) and `data-field-kind` for CSS. Hovering the row publishes
 /// `HoverTarget::Field(node_index, name)` to the [`super::CanvasHover`] context
-/// (upgrading the card's `Node` hover) so the canvas can reveal that field's
-/// lineage closure. On leaving the row list a single `onmouseleave` on the parent
-/// `.klinx-node-fields` container downgrades back to `Node`, not per row: sweeping
-/// row→row stays `Field(A)→Field(B)` with no transient flash.
+/// after a cold-entry dwell so the canvas can reveal that field's lineage closure.
+/// On leaving the row list a single `onmouseleave` on the parent
+/// `.klinx-node-fields` container clears the hover, not per row: sweeping row→row
+/// stays instant once the field hover is warm, with no transient flash.
 ///
 /// `highlighted` tints THIS cell (`klinx-node-field--lineage`) when the row is a
 /// lineage endpoint of the active hover reveal (#87) — a calm, static background
 /// tint, no motion and no layout shift, so it coexists with the whole-node dim
 /// and the inline datatype label.
 ///
-/// `is_correlation_key` (#88) draws a calm, always-on key glyph in a reserved
-/// LEADING slot before the field name when the field drives a Source's
-/// correlation key. The slot is always present (fixed width) so marked and
-/// unmarked rows align identically — no layout jitter when the flag flips.
+/// `is_correlation_key` (#88) highlights the row's field ports only on marked
+/// rows. Unmarked rows reserve no gutter, keeping wide-schema field names close
+/// to the left port while preserving source schema order.
 #[component]
 fn FieldRowView(
     node_index: usize,
@@ -392,6 +408,7 @@ fn FieldRowView(
     kind: FieldKind,
     ty: Option<String>,
     highlighted: bool,
+    temporary: bool,
     is_correlation_key: bool,
 ) -> Element {
     let mut hovered = use_context::<CanvasHover>();
@@ -418,21 +435,33 @@ fn FieldRowView(
 
     // Full `name : type` for the native tooltip — the name and the type each clip
     // with an ellipsis at the card width, so hovering reveals the untruncated text.
-    let tip = match ty.as_ref() {
+    let mut tip = match ty.as_ref() {
         Some(t) => format!("{name} : {t}"),
         None => name.clone(),
     };
+    if is_correlation_key {
+        tip.push_str(" · correlation key");
+    }
+    if temporary {
+        tip.push_str(" · temporarily revealed");
+    }
 
     // Append modifiers only when active; an inert row keeps exactly its classic
     // class string. `--lineage` tints a hover/pin endpoint cell (#87); `--pinned`
     // marks the clicked-to-select anchor (#75) so the user can see WHICH column
     // the persistent full-lineage reveal is anchored on.
     let mut row_class = String::from("klinx-node-field");
+    if temporary {
+        row_class.push_str(" klinx-node-field--temporary");
+    }
     if highlighted {
         row_class.push_str(" klinx-node-field--lineage");
     }
     if is_pinned {
         row_class.push_str(" klinx-node-field--pinned");
+    }
+    if is_correlation_key {
+        row_class.push_str(" klinx-node-field--correlation-key");
     }
 
     rsx! {
@@ -441,11 +470,11 @@ fn FieldRowView(
             "data-field-kind": kind_attr,
             title: "{tip}",
             onmouseenter: {
-                // Row-scope reveal (#72): upgrade the card's Node hover to this
-                // field's 1-hop closure. `mouseenter` does not bubble, so the
-                // card's enter does not re-fire and clobber this.
+                // Row-scope reveal (#72): request this field's 1-hop closure.
+                // Cold entry uses a short dwell; once warm, row-to-row movement
+                // applies immediately.
                 let name = name.clone();
-                move |_| hovered.0.set(HoverTarget::Field(node_index, name.clone()))
+                move |_| hovered.request_field(node_index, name.clone())
             },
             onclick: {
                 // Click-to-select (#75): pin this column to reveal its FULL
@@ -467,55 +496,6 @@ fn FieldRowView(
                 }
             },
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
-            // Correlation-key marker (#88): a reserved LEADING slot whose width
-            // is fixed in CSS so every row aligns whether or not it carries a
-            // key. The shape (a monochrome key glyph in `currentColor`), not
-            // color alone, carries the meaning (WCAG 1.4.1); color only
-            // reinforces. The glyph (and its `title`/`aria-label`) render only
-            // for a CK row; the empty slot still reserves its width so unmarked
-            // rows do not shift.
-            span {
-                class: "klinx-node-field-ck",
-                // `role="img"` makes the slot an accessible image so its
-                // `aria-label` is reliably exposed (a roleless span does not
-                // reliably surface its accessible name); set only on a CK row,
-                // alongside the label, so the empty slot stays roleless.
-                role: if is_correlation_key { Some("img") } else { None },
-                title: if is_correlation_key { Some("Correlation key") } else { None },
-                "aria-label": if is_correlation_key { Some("Correlation key") } else { None },
-                if is_correlation_key {
-                    // Inline SVG (not a 🔑 emoji) for consistent cross-platform,
-                    // single-hue rendering. `currentColor` defers the hue to the
-                    // CSS class so the marker stays a calm, desaturated tone.
-                    svg {
-                        class: "klinx-node-field-ck-glyph",
-                        view_box: "0 0 16 16",
-                        width: "11",
-                        height: "11",
-                        // Decorative: the meaning is conveyed by the parent
-                        // span's `aria-label`, so assistive tech skips the glyph.
-                        "aria-hidden": "true",
-                        // A key: round bow (ring) on the left, shaft to the right
-                        // with two bit teeth. Stroked in `currentColor`.
-                        circle {
-                            cx: "5",
-                            cy: "8",
-                            r: "3",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.5",
-                        }
-                        path {
-                            d: "M8 8 H14 M12 8 V10.5 M14 8 V11",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "1.5",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                        }
-                    }
-                }
-            }
             span { class: "klinx-node-field-name", "{name}" }
             // Compact datatype suffix (e.g. `: float`) when known. Declared and
             // carried columns have a type; emitted columns don't yet (Phase 2b).
