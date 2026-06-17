@@ -5,8 +5,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use super::{
-    COLUMN_CENTER_Y, Connection, FIELD_HEADER_HEIGHT, FIELD_ROW_HEIGHT, FieldEdge, HEADER_PORT_Y,
-    LEFT_MARGIN, NODE_GAP, NODE_WIDTH, PipelineView, STACK_GAP, StageKind, StageView,
+    COLUMN_CENTER_Y, CanvasConnectorPath, CanvasPoint, Connection, FIELD_HEADER_HEIGHT,
+    FIELD_ROW_HEIGHT, FieldEdge, HEADER_PORT_Y, LEFT_MARGIN, NODE_GAP, NODE_WIDTH, PipelineView,
+    STACK_GAP, StageKind, StageView,
 };
 
 /// Canvas layout path requested by callers during the renderer migration.
@@ -98,6 +99,7 @@ fn apply_port_aware_layout(
 
     let mut migrated = view;
     apply_graph_positions(&mut migrated, &graph);
+    apply_graph_paths(&mut migrated, &graph);
     CanvasLayoutResult {
         view: migrated,
         requested,
@@ -966,6 +968,76 @@ fn apply_graph_positions(view: &mut PipelineView, graph: &LayoutGraph) {
     }
 }
 
+fn apply_graph_paths(view: &mut PipelineView, graph: &LayoutGraph) {
+    let connection_count = view.connections.len();
+    let rank_offsets = rank_center_offsets(graph);
+    view.connection_paths = graph
+        .edges
+        .iter()
+        .take(connection_count)
+        .map(|edge| canvas_path_for_edge(edge, graph, &rank_offsets).unwrap_or_default())
+        .collect();
+    view.field_edge_paths = graph
+        .edges
+        .iter()
+        .skip(connection_count)
+        .take(view.field_edges.len())
+        .map(|edge| canvas_path_for_edge(edge, graph, &rank_offsets).unwrap_or_default())
+        .collect();
+    debug_assert_eq!(view.connection_paths.len(), view.connections.len());
+    debug_assert_eq!(view.field_edge_paths.len(), view.field_edges.len());
+}
+
+fn canvas_path_for_edge(
+    edge: &LayoutEdge,
+    graph: &LayoutGraph,
+    rank_offsets: &HashMap<usize, f32>,
+) -> Option<CanvasConnectorPath> {
+    let from = graph.nodes.get(edge.from_node)?;
+    let to = graph.nodes.get(edge.to_node)?;
+    let from_offset = rank_offsets
+        .get(&from.rank)
+        .copied()
+        .unwrap_or(COLUMN_CENTER_Y);
+    let to_offset = rank_offsets
+        .get(&to.rank)
+        .copied()
+        .unwrap_or(COLUMN_CENTER_Y);
+    let start = edge.path.points.first()?;
+    let end = edge.path.points.last()?;
+    let lane_x = edge
+        .path
+        .points
+        .get(1)
+        .map(|point| point.x)
+        .unwrap_or((start.x + end.x) / 2.0);
+
+    let start = CanvasPoint {
+        x: LEFT_MARGIN + start.x,
+        y: from_offset + start.y,
+    };
+    let end = CanvasPoint {
+        x: LEFT_MARGIN + end.x,
+        y: to_offset + end.y,
+    };
+    let lane_x = LEFT_MARGIN + lane_x;
+
+    Some(CanvasConnectorPath {
+        points: compact_canvas_path_points([
+            start,
+            CanvasPoint {
+                x: lane_x,
+                y: start.y,
+            },
+            CanvasPoint {
+                x: lane_x,
+                y: end.y,
+            },
+            end,
+        ]),
+    })
+}
+
 fn rank_center_offsets(graph: &LayoutGraph) -> HashMap<usize, f32> {
     let mut extents: HashMap<usize, (f32, f32)> = HashMap::new();
     for node in &graph.nodes {
@@ -982,6 +1054,19 @@ fn rank_center_offsets(graph: &LayoutGraph) -> HashMap<usize, f32> {
         .into_iter()
         .map(|(rank, (min_y, max_y))| (rank, COLUMN_CENTER_Y - (min_y + max_y) / 2.0))
         .collect()
+}
+
+fn compact_canvas_path_points<const N: usize>(points: [CanvasPoint; N]) -> Vec<CanvasPoint> {
+    let mut compacted = Vec::with_capacity(N);
+    for point in points {
+        if compacted
+            .last()
+            .is_none_or(|previous: &CanvasPoint| *previous != point)
+        {
+            compacted.push(point);
+        }
+    }
+    compacted
 }
 
 #[cfg(test)]
@@ -1034,7 +1119,9 @@ mod tests {
         let view = PipelineView {
             stages: vec![stage("a"), stage("b"), stage("c")],
             connections: vec![Connection::plain(0, 1), Connection::plain(1, 2)],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1067,7 +1154,9 @@ mod tests {
         let view = PipelineView {
             stages: vec![stage("source"), stage("left"), stage("right")],
             connections: vec![Connection::plain(0, 1), Connection::plain(0, 2)],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1080,7 +1169,9 @@ mod tests {
         let view = PipelineView {
             stages: vec![stage("left"), stage("right"), stage("join")],
             connections: vec![Connection::plain(0, 2), Connection::plain(1, 2)],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1129,7 +1220,9 @@ mod tests {
                     from_branch: Some(1),
                 },
             ],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1163,6 +1256,7 @@ mod tests {
         let view = PipelineView {
             stages: vec![wide, sink],
             connections: Vec::new(),
+            connection_paths: Vec::new(),
             field_edges: vec![FieldEdge {
                 from_node: 0,
                 from_field: "field_119".to_string(),
@@ -1170,6 +1264,7 @@ mod tests {
                 to_field: "field_119".to_string(),
                 kind: FieldEdgeKind::Passthrough,
             }],
+            field_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1251,7 +1346,9 @@ mod tests {
                     from_branch: Some(2),
                 },
             ],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
 
         let graph = LayoutGraph::from_pipeline_view(&view);
@@ -1297,6 +1394,7 @@ mod tests {
         let view = PipelineView {
             stages: vec![source, sink],
             connections: Vec::new(),
+            connection_paths: Vec::new(),
             field_edges: vec![
                 FieldEdge {
                     from_node: 0,
@@ -1313,6 +1411,7 @@ mod tests {
                     kind: FieldEdgeKind::Passthrough,
                 },
             ],
+            field_edge_paths: Vec::new(),
         };
 
         let graph = LayoutGraph::from_pipeline_view(&view);
@@ -1379,6 +1478,7 @@ mod tests {
                     from_branch: Some(1),
                 },
             ],
+            connection_paths: Vec::new(),
             field_edges: vec![
                 FieldEdge {
                     from_node: 0,
@@ -1395,6 +1495,7 @@ mod tests {
                     kind: FieldEdgeKind::Passthrough,
                 },
             ],
+            field_edge_paths: Vec::new(),
         };
 
         let graph = LayoutGraph::from_pipeline_view(&view);
@@ -1438,7 +1539,9 @@ mod tests {
                     from_branch: Some(0),
                 },
             ],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
 
         let graph = LayoutGraph::from_pipeline_view(&view);
@@ -1462,7 +1565,9 @@ mod tests {
         let view = PipelineView {
             stages: vec![stage("a"), stage("b")],
             connections: vec![Connection::plain(0, 1)],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
 
         let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::CurrentBarycenter);
@@ -1478,7 +1583,9 @@ mod tests {
         let view = PipelineView {
             stages: vec![stage("a"), stage("b"), stage("c")],
             connections: vec![Connection::plain(0, 1), Connection::plain(1, 2)],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
         let current_positions = view
             .stages
@@ -1493,6 +1600,8 @@ mod tests {
         assert_eq!(result.fallback, None);
         assert_eq!(result.view.connections, view.connections);
         assert_eq!(result.view.field_edges, view.field_edges);
+        assert_eq!(result.view.connection_paths.len(), view.connections.len());
+        assert!(result.view.field_edge_paths.is_empty());
         assert_eq!(
             result
                 .view
@@ -1515,6 +1624,145 @@ mod tests {
             result.view.stages[0].canvas_x < result.view.stages[1].canvas_x
                 && result.view.stages[1].canvas_x < result.view.stages[2].canvas_x
         );
+        assert_eq!(
+            result.view.connection_paths[0].points.first(),
+            Some(&CanvasPoint {
+                x: result.view.stages[0].port_out().0,
+                y: result.view.stages[0].port_out().1,
+            })
+        );
+        assert_eq!(
+            result.view.connection_paths[0].points.last(),
+            Some(&CanvasPoint {
+                x: result.view.stages[1].port_in().0,
+                y: result.view.stages[1].port_in().1,
+            })
+        );
+    }
+
+    #[test]
+    fn port_aware_layout_preserves_distinct_branch_connector_paths() {
+        let mut route = stage("route");
+        route.kind = StageKind::Route;
+        route.branches = vec![
+            RouteBranch {
+                name: "gold".to_string(),
+                predicate: Some("tier == 'gold'".to_string()),
+                is_default: false,
+            },
+            RouteBranch {
+                name: "silver".to_string(),
+                predicate: Some("tier == 'silver'".to_string()),
+                is_default: false,
+            },
+            RouteBranch {
+                name: "standard".to_string(),
+                predicate: None,
+                is_default: true,
+            },
+        ];
+        let view = PipelineView {
+            stages: vec![
+                route,
+                stage("gold_out"),
+                stage("silver_out"),
+                stage("standard_out"),
+            ],
+            connections: vec![
+                Connection {
+                    from: 0,
+                    to: 1,
+                    from_branch: Some(0),
+                },
+                Connection {
+                    from: 0,
+                    to: 2,
+                    from_branch: Some(1),
+                },
+                Connection {
+                    from: 0,
+                    to: 3,
+                    from_branch: Some(2),
+                },
+            ],
+            connection_paths: Vec::new(),
+            field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
+        };
+
+        let result = apply_canvas_layout(view, CanvasLayoutEngine::PortAwareSugiyama);
+
+        assert_eq!(result.applied, CanvasLayoutEngine::PortAwareSugiyama);
+        assert_eq!(result.view.connection_paths.len(), 3);
+        let lane_xs = result
+            .view
+            .connection_paths
+            .iter()
+            .map(|path| path.points.get(1).map(|point| point.x))
+            .collect::<Vec<_>>();
+        assert_eq!(lane_xs.len(), 3);
+        assert_ne!(lane_xs[0], lane_xs[1]);
+        assert_ne!(lane_xs[1], lane_xs[2]);
+        assert_eq!(
+            result.view.connection_paths[0].points.first(),
+            Some(&CanvasPoint {
+                x: result.view.stages[0].branch_anchor_out(0).0,
+                y: result.view.stages[0].branch_anchor_out(0).1,
+            })
+        );
+    }
+
+    #[test]
+    fn port_aware_layout_exports_field_edge_paths_parallel_to_field_edges() {
+        let mut source = stage("source");
+        source.fields = vec![field("id"), field("total")];
+        let mut sink = stage("sink");
+        sink.fields = vec![field("id"), field("total")];
+        let view = PipelineView {
+            stages: vec![source, sink],
+            connections: Vec::new(),
+            connection_paths: Vec::new(),
+            field_edges: vec![
+                FieldEdge {
+                    from_node: 0,
+                    from_field: "id".to_string(),
+                    to_node: 1,
+                    to_field: "id".to_string(),
+                    kind: FieldEdgeKind::Passthrough,
+                },
+                FieldEdge {
+                    from_node: 0,
+                    from_field: "total".to_string(),
+                    to_node: 1,
+                    to_field: "total".to_string(),
+                    kind: FieldEdgeKind::Derive,
+                },
+            ],
+            field_edge_paths: Vec::new(),
+        };
+
+        let result = apply_canvas_layout(view, CanvasLayoutEngine::PortAwareSugiyama);
+
+        assert_eq!(result.applied, CanvasLayoutEngine::PortAwareSugiyama);
+        assert!(result.view.connection_paths.is_empty());
+        assert_eq!(
+            result.view.field_edge_paths.len(),
+            result.view.field_edges.len()
+        );
+        assert_eq!(
+            result.view.field_edge_paths[1].points.first(),
+            Some(&CanvasPoint {
+                x: result.view.stages[0].field_anchor_out(1).0,
+                y: result.view.stages[0].field_anchor_out(1).1,
+            })
+        );
+        assert_eq!(
+            result.view.field_edge_paths[1].points.last(),
+            Some(&CanvasPoint {
+                x: result.view.stages[1].field_anchor_in(1).0,
+                y: result.view.stages[1].field_anchor_in(1).1,
+            })
+        );
     }
 
     #[test]
@@ -1528,7 +1776,9 @@ mod tests {
                 to: 1,
                 from_branch: Some(0),
             }],
+            connection_paths: Vec::new(),
             field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
         };
 
         let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::PortAwareSugiyama);
@@ -1552,6 +1802,7 @@ mod tests {
         let view = PipelineView {
             stages: vec![stage("source"), sink],
             connections: Vec::new(),
+            connection_paths: Vec::new(),
             field_edges: vec![FieldEdge {
                 from_node: 0,
                 from_field: "missing".to_string(),
@@ -1559,6 +1810,7 @@ mod tests {
                 to_field: "present".to_string(),
                 kind: FieldEdgeKind::Passthrough,
             }],
+            field_edge_paths: Vec::new(),
         };
 
         let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::PortAwareSugiyama);

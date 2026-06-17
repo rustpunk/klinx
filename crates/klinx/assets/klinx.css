@@ -4182,13 +4182,27 @@ input:-webkit-autofill:focus {
   will-change: transform;
 }
 
-/* SVG connector overlay — sits below nodes */
+/* SVG connector overlays. Both layers are passive and sit below node cards:
+   card bodies mask strokes that would otherwise cross field interiors, while
+   lanes remain visible in the inter-node channel. */
 .klinx-canvas-svg {
   position: absolute;
   inset: 0;
-  z-index: 1;
   overflow: visible;
   pointer-events: none;
+}
+
+.klinx-canvas-svg,
+.klinx-canvas-svg * {
+  pointer-events: none;
+}
+
+.klinx-canvas-svg--base {
+  z-index: 2;
+}
+
+.klinx-canvas-svg--active {
+  z-index: 4;
 }
 
 /* ── 8. Node cards ─────────────────────────────────────────────────────────
@@ -4513,8 +4527,8 @@ input:-webkit-autofill:focus {
    or size change — so toggling the class never reflows the fixed-pitch rows. It
    sits after `:hover` so a hovered endpoint keeps the lineage tint (the more
    meaningful signal) rather than the generic hover wash. On a participating
-   (non-dimmed) card it reads at full strength; the dim treatment is parent
-   opacity, which simply scales it down on the rare dimmed-but-endpoint cell. */
+   (non-dimmed) card it reads at full strength; dimmed cards recede through a
+   filter treatment while staying opaque enough to mask connector strokes. */
 .klinx-node-field--lineage,
 .klinx-node-field--lineage:hover {
   background: rgba(67, 179, 174, 0.16);
@@ -4679,10 +4693,15 @@ input:-webkit-autofill:focus {
   background: var(--klinx-text-floor);
 }
 
-/* Dimmed node — outside the hovered field's lineage closure. */
+/* Dimmed node — outside the hovered field's lineage closure.
+   Keep the card opaque: connector SVGs sit below nodes, and whole-card opacity
+   would let those strokes show through field interiors during hover reveals. */
 .klinx-node--dimmed {
-  opacity: 0.3;
-  transition: opacity 150ms ease;
+  filter: saturate(0.55) brightness(0.72);
+  box-shadow: none;
+  transition:
+    filter 150ms ease,
+    box-shadow 150ms ease;
 }
 
 /* Node-level cable GROUP recedes while a field's lineage is revealed — only the
@@ -4715,6 +4734,27 @@ input:-webkit-autofill:focus {
 .klinx-field-edge--passthrough {
   stroke: var(--klinx-text-floor);
   opacity: 0.65;
+}
+
+.klinx-field-edge--spotlight {
+  opacity: 1;
+  filter: drop-shadow(0 0 5px currentColor);
+}
+
+.klinx-field-edge--spotlight path:nth-child(1) {
+  stroke-width: 9;
+  stroke-opacity: 0.26;
+}
+
+.klinx-field-edge--spotlight path:nth-child(2) {
+  stroke-width: 3.5;
+  stroke-opacity: 0.95;
+  stroke-dasharray: none;
+}
+
+.klinx-field-edge--spotlight path:nth-child(3) {
+  stroke-width: 1.4;
+  stroke-opacity: 1;
 }
 
 /* ── 8b. Composition nodes — dashed verdigris border ─────────────────────── */

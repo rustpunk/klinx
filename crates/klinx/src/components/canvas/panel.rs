@@ -5,14 +5,18 @@ use std::rc::Rc;
 use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 
+use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
 use crate::pipeline_view::{
-    FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow, NODE_WIDTH, StageView, derive_body_view,
-    derive_partial_pipeline_view, derive_pipeline_view, derive_resolved_pipeline_view,
-    field_lineage_full, fit_transform, group_endpoints_by_node, layout_bounds, lineage_closure,
+    CanvasConnectorPath, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow, NODE_WIDTH,
+    StageView, derive_body_view, derive_partial_pipeline_view, derive_pipeline_view,
+    derive_resolved_pipeline_view, field_lineage_full, fit_transform, group_endpoints_by_node,
+    layout_bounds, lineage_closure,
 };
 use crate::state::{ChannelViewMode, use_app_state};
 
-use super::connector::{Connector, FieldConnector};
+use super::connector::{
+    Connector, ConnectorEndpoints, ConnectorObstacle, FieldConnector, obstacle_aware_channel_paths,
+};
 use super::node::{CanvasNode, FieldDisplayInfo};
 use super::{CanvasHover, HoverTarget, PinnedField};
 
@@ -28,12 +32,17 @@ struct FieldEdgeAnchors {
     end: (f32, f32),
     kind_attr: String,
     kind: FieldEdgeKind,
+    path: Option<CanvasConnectorPath>,
 }
 
 /// Resolve a [`FieldEdge`] to drawable anchor geometry, or `None` if either
 /// endpoint field is absent from its stage's rows (defensive — a well-formed
 /// edge set always resolves, but the canvas renders pre-validation input).
-fn resolve_edge_anchors(stages: &[StageView], edge: &FieldEdge) -> Option<FieldEdgeAnchors> {
+fn resolve_edge_anchors(
+    stages: &[StageView],
+    edge: &FieldEdge,
+    path: Option<&CanvasConnectorPath>,
+) -> Option<FieldEdgeAnchors> {
     let from = stages.get(edge.from_node)?;
     let to = stages.get(edge.to_node)?;
     let fi = from.field_index(&edge.from_field)?;
@@ -43,6 +52,7 @@ fn resolve_edge_anchors(stages: &[StageView], edge: &FieldEdge) -> Option<FieldE
         end: to.field_anchor_in(ti),
         kind_attr: from.kind.kind_attr().to_string(),
         kind: edge.kind,
+        path: path.filter(|path| path.points.len() >= 2).cloned(),
     })
 }
 
@@ -63,7 +73,6 @@ const DEFAULT_VIEWPORT_H: f32 = 700.0;
 /// Default number of field rows rendered per node before the user loads more or
 /// filters. This bounds card height and per-row connector work for wide schemas.
 const FIELD_ROW_CAP: usize = 24;
-
 #[derive(Clone, Debug, Default, PartialEq)]
 struct FieldDisplayState {
     visible_limit: usize,
@@ -252,6 +261,17 @@ fn append_highlights(
     }
 }
 
+fn rendered_card_height(stage: &StageView, display: &FieldDisplayInfo) -> f32 {
+    let footer_height =
+        if !stage.fields.is_empty() && (display.hidden_count > 0 || display.can_reduce) {
+            FIELD_ROW_HEIGHT
+        } else {
+            0.0
+        };
+
+    stage.card_height() + footer_height
+}
+
 // ── Drag state — non-reactive, stored in Rc<RefCell<>> to avoid a signal write
 // (and therefore a re-render) on every pointer-move event. ───────────────────
 #[derive(Default)]
@@ -279,8 +299,9 @@ struct DragState {
 ///   1. Dot grid background (CSS radial-gradient, does NOT transform with content)
 ///   2. Noise + scanline overlays (CSS ::before / ::after, fixed to panel)
 ///   3. `klinx-canvas-viewport` div — receives CSS transform(translate + scale)
-///      a. SVG connector overlay (absolute, inset: 0, overflow: visible)
-///      b. Node cards (absolute, world-space coordinates)
+///      a. Default SVG connector overlay with centered visible channels
+///      b. Active field-lineage SVG overlay above default channels
+///      c. Node cards masking strokes that would otherwise cross card interiors
 #[component]
 pub fn CanvasPanel() -> Element {
     let state = use_app_state();
@@ -325,8 +346,13 @@ pub fn CanvasPanel() -> Element {
             },
         }
     };
+    let pipeline_view =
+        apply_canvas_layout(pipeline_view, CanvasLayoutEngine::PortAwareSugiyama).view;
     drop(drill_stack);
+    let connections_model = pipeline_view.connections;
+    let connection_paths = pipeline_view.connection_paths;
     let field_edges = pipeline_view.field_edges;
+    let field_edge_paths = pipeline_view.field_edge_paths;
     let raw_stages = pipeline_view.stages;
 
     // ── Field-level lineage hover state ──────────────────────────────────────
@@ -361,12 +387,25 @@ pub fn CanvasPanel() -> Element {
     //  - else empty (the node-level DAG only).
     // Computed before field projection so hidden lineage endpoints can be appended
     // as temporary rows and then resolve to real connector anchors below.
-    let closure: HashSet<usize> = match &*pinned_field.0.read() {
+    let pinned_selection = pinned_field.0.read().clone();
+    let hover_target = hovered_field.0.read().clone();
+    let closure: HashSet<usize> = match &pinned_selection {
         Some((node, field)) => field_lineage_full(&field_edges, *node, field),
-        None => match &*hovered_field.0.read() {
+        None => match &hover_target {
             HoverTarget::None => HashSet::new(),
             HoverTarget::Field(node, field) => lineage_closure(&field_edges, *node, field),
         },
+    };
+    let spotlight_edges: HashSet<usize> = if pinned_selection.is_some() {
+        match &hover_target {
+            HoverTarget::Field(node, field) => lineage_closure(&field_edges, *node, field)
+                .intersection(&closure)
+                .copied()
+                .collect(),
+            HoverTarget::None => HashSet::new(),
+        }
+    } else {
+        HashSet::new()
     };
     let lineage_fields_by_node = field_endpoint_names_by_node(&field_edges, &closure);
     let global_query = global_field_query.read().clone();
@@ -389,14 +428,59 @@ pub fn CanvasPanel() -> Element {
     let field_displays: Vec<FieldDisplayInfo> =
         projected.iter().map(|p| p.display.clone()).collect();
     let stages: Vec<StageView> = projected.into_iter().map(|p| p.stage).collect();
+    let connector_obstacles = stages
+        .iter()
+        .zip(field_displays.iter())
+        .map(|(stage, display)| ConnectorObstacle {
+            x: stage.canvas_x,
+            y: stage.canvas_y,
+            width: NODE_WIDTH,
+            height: rendered_card_height(stage, display),
+        })
+        .collect::<Vec<_>>();
 
     // Resolve each connection to its endpoint stages plus the source branch (if
     // it leaves a Route). The branch lets the connector anchor at the specific
     // branch port instead of the shared node-level port.
-    let connections: Vec<(StageView, StageView, Option<usize>)> = pipeline_view
-        .connections
+    let connection_endpoints: Vec<ConnectorEndpoints> = connections_model
         .iter()
-        .map(|c| (stages[c.from].clone(), stages[c.to].clone(), c.from_branch))
+        .map(|c| {
+            let from = &stages[c.from];
+            let to = &stages[c.to];
+            let (sx, sy) = match c.from_branch {
+                Some(i) => from.branch_anchor_out(i),
+                None => from.port_out(),
+            };
+            let (tx, ty) = to.port_in();
+            ConnectorEndpoints { sx, sy, tx, ty }
+        })
+        .collect();
+    let connection_channel_paths =
+        obstacle_aware_channel_paths(&connection_endpoints, &connector_obstacles);
+    let connections: Vec<(
+        StageView,
+        StageView,
+        Option<usize>,
+        Option<CanvasConnectorPath>,
+    )> = connections_model
+        .iter()
+        .enumerate()
+        .map(|(edge_index, c)| {
+            let dynamic_path = connection_channel_paths
+                .get(edge_index)
+                .filter(|path| path.points.len() >= 2)
+                .cloned();
+            let layout_path = connection_paths
+                .get(edge_index)
+                .filter(|path| path.points.len() >= 2)
+                .cloned();
+            (
+                stages[c.from].clone(),
+                stages[c.to].clone(),
+                c.from_branch,
+                dynamic_path.or(layout_path),
+            )
+        })
         .collect();
 
     // D1: clear a stale hover when the active view swaps. A hovered
@@ -458,13 +542,34 @@ pub fn CanvasPanel() -> Element {
     // derive from one set — a tinted cell can never land on a dimmed, cable-less
     // card.
     let mut resolved_edges: Vec<&FieldEdge> = Vec::with_capacity(closure.len());
-    for &ei in &closure {
+    let mut closure_indices: Vec<usize> = closure.iter().copied().collect();
+    closure_indices.sort_unstable();
+    for ei in closure_indices {
         let edge = &field_edges[ei];
-        if let Some(anchors) = resolve_edge_anchors(&stages, edge) {
+        if let Some(anchors) = resolve_edge_anchors(&stages, edge, field_edge_paths.get(ei)) {
             participating_nodes.insert(edge.from_node);
             participating_nodes.insert(edge.to_node);
             active_field_edges.push((ei, anchors));
             resolved_edges.push(edge);
+        }
+    }
+    let active_field_endpoints: Vec<ConnectorEndpoints> = active_field_edges
+        .iter()
+        .map(|(_, anchors)| ConnectorEndpoints {
+            sx: anchors.start.0,
+            sy: anchors.start.1,
+            tx: anchors.end.0,
+            ty: anchors.end.1,
+        })
+        .collect();
+    let active_field_channel_paths =
+        obstacle_aware_channel_paths(&active_field_endpoints, &connector_obstacles);
+    for ((_, anchors), path) in active_field_edges
+        .iter_mut()
+        .zip(active_field_channel_paths.into_iter())
+    {
+        if path.points.len() >= 2 {
+            anchors.path = Some(path);
         }
     }
     // Per-node lineage-endpoint field names (#87): node index → the field rows on
@@ -629,15 +734,7 @@ pub fn CanvasPanel() -> Element {
         let max_y = stages
             .iter()
             .zip(field_displays.iter())
-            .map(|(s, display)| {
-                let footer_height =
-                    if !s.fields.is_empty() && (display.hidden_count > 0 || display.can_reduce) {
-                        FIELD_ROW_HEIGHT
-                    } else {
-                        0.0
-                    };
-                s.canvas_y + s.card_height() + footer_height
-            })
+            .map(|(s, display)| s.canvas_y + rendered_card_height(s, display))
             .fold(0.0_f32, f32::max);
         let min_y = stages.iter().map(|s| s.canvas_y).fold(f32::MAX, f32::min);
         // Ensure SVG covers negative-Y nodes (secondary inputs above the chain).
@@ -801,40 +898,26 @@ pub fn CanvasPanel() -> Element {
                 class: "klinx-canvas-viewport",
                 style: "transform: translate({pan_x}px, {pan_y}px) scale({zoom});",
 
-                // SVG connector overlay — rendered first (lower z-index). The
-                // `<svg>` itself is NEVER dimmed: dimming the whole overlay
-                // crushed the field cables we want to highlight along with the
-                // node cables. Instead the node-level cables live in a `<g>` that
-                // recedes on hover, while the field cables render OUTSIDE that
-                // group at full opacity.
+                // Default SVG connector overlay. Its channels are populated
+                // from the currently visible node-level connections and drawn
+                // below cards so node bodies remain readable and clickable.
                 svg {
-                    class: "klinx-canvas-svg",
+                    class: "klinx-canvas-svg klinx-canvas-svg--base",
                     width: "{svg_w}",
                     height: "{svg_h}",
                     // Node-level connectors — the DEFAULT view. While a field's
                     // lineage is revealed, only THIS group recedes so the field
-                    // cables read clearly against it.
+                    // cables in the active overlay read clearly against it.
                     g {
                         class: if hover_active { "klinx-canvas-edges klinx-canvas-edges--recede" } else { "klinx-canvas-edges" },
-                        for (from, to, from_branch) in connections {
+                        for (from, to, from_branch, path) in connections {
                             Connector {
                                 key: "{from.id}-{to.id}-{from_branch:?}",
                                 from,
                                 to,
                                 from_branch,
+                                path,
                             }
-                        }
-                    }
-                    // Field-level cables — ONLY the hovered field's lineage
-                    // closure, never the whole field-edge set. Rendered outside
-                    // the receding group so they stay at full opacity on hover.
-                    for (ei, anchors) in active_field_edges {
-                        FieldConnector {
-                            key: "field-{ei}",
-                            start: anchors.start,
-                            end: anchors.end,
-                            kind_attr: anchors.kind_attr,
-                            kind: anchors.kind,
                         }
                     }
                 }
@@ -879,6 +962,29 @@ pub fn CanvasPanel() -> Element {
                         highlighted_fields: highlighted_by_node.remove(&index).unwrap_or_default(),
                     }
                 }
+
+                // Active field-level cables — ONLY the hovered/pinned field's
+                // lineage closure, never the whole field-edge set. The overlay
+                // is above default cables but below cards, so field rows mask
+                // any stroke through their interiors and keep pointer control.
+                if hover_active {
+                    svg {
+                        class: "klinx-canvas-svg klinx-canvas-svg--active",
+                        width: "{svg_w}",
+                        height: "{svg_h}",
+                        for (ei, anchors) in active_field_edges {
+                            FieldConnector {
+                                key: "field-{ei}",
+                                start: anchors.start,
+                                end: anchors.end,
+                                kind_attr: anchors.kind_attr,
+                                kind: anchors.kind,
+                                path: anchors.path,
+                                spotlight: spotlight_edges.contains(&ei),
+                            }
+                        }
+                    }
+                }
             }
         }
         }
@@ -889,11 +995,20 @@ pub fn CanvasPanel() -> Element {
 mod tests {
     use std::collections::HashSet;
 
-    use crate::pipeline_view::{FieldKind, FieldRow, RouteBranch, StageKind, StageView};
+    use clinker_plan::config::parse_config;
 
+    use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
+    use crate::pipeline_view::{
+        CanvasPoint, FieldKind, FieldRow, NODE_WIDTH, RouteBranch, StageKind, StageView,
+        derive_pipeline_view,
+    };
+
+    use super::super::connector::{
+        ConnectorEndpoints, ConnectorObstacle, obstacle_aware_channel_paths,
+    };
     use super::{
         FIELD_ROW_CAP, FieldDisplayState, field_matches_by_node, project_stage_fields,
-        text_matches_query,
+        rendered_card_height, text_matches_query,
     };
 
     fn wide_stage(count: usize) -> StageView {
@@ -1034,6 +1149,134 @@ mod tests {
         let stage = wide_stage(12);
         let matches = field_matches_by_node(&[stage], "field_00?");
         assert_eq!(matches.get(&0).map(HashSet::len), Some(10));
+    }
+
+    #[test]
+    fn dimmed_node_css_keeps_card_opaque() {
+        let css = include_str!("../../../assets/klinx.css");
+        let block = css_rule_block(css, ".klinx-node--dimmed").expect("dimmed node CSS rule");
+
+        assert!(
+            !block.contains("opacity:"),
+            "dimmed cards must remain opaque so below-card connector strokes cannot show through"
+        );
+        assert!(
+            block.contains("filter:"),
+            "dimmed cards should recede visually without changing alpha"
+        );
+    }
+
+    fn css_rule_block<'a>(css: &'a str, selector: &str) -> Option<&'a str> {
+        let start = css.find(selector)?;
+        let open = css[start..].find('{')? + start;
+        let close = css[open..].find('}')? + open;
+        Some(&css[open + 1..close])
+    }
+
+    #[test]
+    fn order_fulfillment_products_to_lookup_connector_avoids_transform_card() {
+        let yaml = include_str!("../../../../../examples/pipelines/order_fulfillment.yaml");
+        let config = parse_config(yaml).expect("order_fulfillment.yaml parses");
+        let view = apply_canvas_layout(
+            derive_pipeline_view(&config),
+            CanvasLayoutEngine::PortAwareSugiyama,
+        )
+        .view;
+
+        let projected = view
+            .stages
+            .iter()
+            .map(|stage| {
+                project_stage_fields(stage, &FieldDisplayState::default(), &HashSet::new())
+            })
+            .collect::<Vec<_>>();
+        let field_displays = projected
+            .iter()
+            .map(|projected| projected.display.clone())
+            .collect::<Vec<_>>();
+        let stages = projected
+            .into_iter()
+            .map(|projected| projected.stage)
+            .collect::<Vec<_>>();
+        let obstacles = stages
+            .iter()
+            .zip(field_displays.iter())
+            .map(|(stage, display)| ConnectorObstacle {
+                x: stage.canvas_x,
+                y: stage.canvas_y,
+                width: NODE_WIDTH,
+                height: rendered_card_height(stage, display),
+            })
+            .collect::<Vec<_>>();
+
+        let connection = view
+            .connections
+            .iter()
+            .find(|connection| {
+                stages[connection.from].id == "products"
+                    && stages[connection.to].id == "product_lookup"
+            })
+            .expect("products connects directly to product_lookup");
+        let from = &stages[connection.from];
+        let to = &stages[connection.to];
+        let (sx, sy) = match connection.from_branch {
+            Some(branch_index) => from.branch_anchor_out(branch_index),
+            None => from.port_out(),
+        };
+        let (tx, ty) = to.port_in();
+        let paths =
+            obstacle_aware_channel_paths(&[ConnectorEndpoints { sx, sy, tx, ty }], &obstacles);
+
+        let transform_index = stages
+            .iter()
+            .position(|stage| stage.id == "normalize_fields")
+            .expect("normalize_fields stage exists");
+        let transform = &obstacles[transform_index];
+
+        assert!(
+            !path_intersects_obstacle(&paths[0].points, transform),
+            "products -> product_lookup connector should avoid normalize_fields: {:?}",
+            paths[0]
+        );
+    }
+
+    fn path_intersects_obstacle(points: &[CanvasPoint], obstacle: &ConnectorObstacle) -> bool {
+        points
+            .windows(2)
+            .any(|segment| segment_intersects_obstacle(segment[0], segment[1], obstacle))
+    }
+
+    fn segment_intersects_obstacle(
+        from: CanvasPoint,
+        to: CanvasPoint,
+        obstacle: &ConnectorObstacle,
+    ) -> bool {
+        let seg_min_x = from.x.min(to.x);
+        let seg_max_x = from.x.max(to.x);
+        let seg_min_y = from.y.min(to.y);
+        let seg_max_y = from.y.max(to.y);
+        let left = obstacle.x;
+        let right = obstacle.x + obstacle.width;
+        let top = obstacle.y;
+        let bottom = obstacle.y + obstacle.height;
+
+        if (from.y - to.y).abs() < 0.5 {
+            return from.y > top
+                && from.y < bottom
+                && open_ranges_overlap(seg_min_x, seg_max_x, left, right);
+        }
+        if (from.x - to.x).abs() < 0.5 {
+            return from.x > left
+                && from.x < right
+                && open_ranges_overlap(seg_min_y, seg_max_y, top, bottom);
+        }
+
+        open_ranges_overlap(seg_min_x, seg_max_x, left, right)
+            && open_ranges_overlap(seg_min_y, seg_max_y, top, bottom)
+    }
+
+    fn open_ranges_overlap(a_start: f32, a_end: f32, b_start: f32, b_end: f32) -> bool {
+        a_start.max(b_start) < a_end.min(b_end)
     }
 
     trait StageViewTestExt {
