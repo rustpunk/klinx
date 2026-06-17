@@ -41,6 +41,7 @@
 - **Verified:** Composition YAML is detected by root `_compose:`.
 - **Verified:** `PipelineNode` variant matches should stay exhaustive; do not add broad wildcard arms around engine variants.
 - **Verified:** Field lineage should use clean CXL parses; parse errors render diagnostics/rows but should not drive inferred edges.
+- **Verified:** Raw Aggregate field-lineage rows are the grouped output shape: de-duplicated `group_by` keys first, then aggregate emit targets. With clean CXL, Aggregate group keys and emits derive from their source/support fields, while unrelated input fields do not pass through. Evidence: `pipeline_view` aggregate field-lineage tests and `docs/research/2026-06-17-aggregate-field-lineage-ui.md`.
 - **Verified:** Route nodes expose branch ports, including default branches, rather than generic edge labels.
 
 ## UI And CSS Rules

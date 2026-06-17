@@ -6,10 +6,11 @@
 //! layer renders the results; all of the lineage *logic* lives here so it can
 //! be unit-tested headlessly and reasoned about in isolation.
 //!
-//! Scope is Phase 1: compositions, transform-precise emit/passthrough rules,
-//! and CXL `let`-chain resolution. Per-node-type precision for
-//! aggregate/route/merge/combine is Phase 2 (#67) — those types are kept
-//! "correct-ish" (passthrough + best-effort emit) and never panic.
+//! Scope is Phase 1 plus the first Phase-2 operators: compositions,
+//! transform-precise emit/passthrough rules, Aggregate group-key/output rules,
+//! and CXL `let`-chain resolution. Remaining per-node-type precision for
+//! route/merge/combine is tracked under Phase 2 (#67); those types stay
+//! conservative and never panic.
 
 use std::collections::{HashMap, HashSet};
 
@@ -251,6 +252,50 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
             ty: None,
             ..Default::default()
         });
+    }
+    rows
+}
+
+/// Output rows for an Aggregate whose CXL did not parse cleanly.
+///
+/// The aggregate's `group_by` list is normal YAML config, not inferred from the
+/// CXL body, so it can still be shown safely when emit extraction is unavailable.
+/// Repeated keys keep their first slot.
+pub fn aggregate_group_key_output_fields(group_by: &[String]) -> Vec<FieldRow> {
+    let mut rows = Vec::with_capacity(group_by.len());
+    let mut seen = HashSet::new();
+    for key in group_by {
+        if seen.insert(key.as_str()) {
+            rows.push(FieldRow {
+                name: key.clone(),
+                kind: FieldKind::PassThrough,
+                ty: None,
+                ..Default::default()
+            });
+        }
+    }
+    rows
+}
+
+/// Output rows for an Aggregate with parseable CXL.
+///
+/// Aggregates produce a new grouped record. Its raw-mode row shape is therefore
+/// the configured group keys first, then aggregate `emit` targets. Unlike
+/// [`transform_output_fields`], an identity-looking `emit c = c` is still an
+/// aggregate emit target rather than a pass-through row, because the input row
+/// was reduced into a grouped output record.
+pub fn aggregate_output_fields(group_by: &[String], program: &Program) -> Vec<FieldRow> {
+    let mut rows = aggregate_group_key_output_fields(group_by);
+    let mut seen: HashSet<String> = rows.iter().map(|row| row.name.clone()).collect();
+    for name in emitted_field_names(program) {
+        if seen.insert(name.clone()) {
+            rows.push(FieldRow {
+                name,
+                kind: FieldKind::Emitted,
+                ty: None,
+                ..Default::default()
+            });
+        }
     }
     rows
 }
@@ -533,6 +578,39 @@ mod tests {
                     name: "a".to_string(),
                     kind: FieldKind::Emitted,
                     ty: None,
+                    ..Default::default()
+                },
+            ]
+        );
+    }
+
+    /// Aggregate rows are not transform rows: only group keys and aggregate
+    /// emit targets appear, and copy-looking emits remain emitted fields.
+    #[test]
+    fn aggregate_output_fields_are_group_keys_then_emits() {
+        let prog = program("emit total = sum(amount)\nemit copied_department = department\n");
+        let fields = aggregate_output_fields(&cols(&["department", "region", "department"]), &prog);
+        assert_eq!(
+            fields,
+            vec![
+                FieldRow {
+                    name: "department".to_string(),
+                    kind: FieldKind::PassThrough,
+                    ..Default::default()
+                },
+                FieldRow {
+                    name: "region".to_string(),
+                    kind: FieldKind::PassThrough,
+                    ..Default::default()
+                },
+                FieldRow {
+                    name: "total".to_string(),
+                    kind: FieldKind::Emitted,
+                    ..Default::default()
+                },
+                FieldRow {
+                    name: "copied_department".to_string(),
+                    kind: FieldKind::Emitted,
                     ..Default::default()
                 },
             ]

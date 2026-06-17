@@ -1242,6 +1242,32 @@ fn resolve_support_anchors(
         .unwrap_or_default()
 }
 
+/// Stamp carried metadata onto pass-through rows.
+///
+/// Normal pass-through rows use exact field names. Aggregate group keys may be
+/// authored as qualified refs (`source.field`) while the producer row is bare
+/// (`field`), so aggregate callers can also fall back to the final segment.
+fn stamp_passthrough_metadata(
+    rows: &mut [FieldRow],
+    col_meta: &std::collections::HashMap<String, ColMeta>,
+    allow_bare_fallback: bool,
+) {
+    for row in rows {
+        if !matches!(row.kind, FieldKind::PassThrough) {
+            continue;
+        }
+        let meta = col_meta.get(&row.name).or_else(|| {
+            allow_bare_fallback
+                .then(|| col_meta.get(bare_column(&row.name)))
+                .flatten()
+        });
+        if let Some(meta) = meta {
+            row.ty = meta.ty.clone();
+            row.is_correlation_key = meta.is_ck;
+        }
+    }
+}
+
 /// Compute per-index output field rows and the field-level lineage edges over a
 /// classified slot list. **The shared lineage core** for both the composition
 /// canvas ([`derive_composition_view`]) and the pipeline canvas
@@ -1262,7 +1288,10 @@ fn resolve_support_anchors(
 ///
 /// Per-node rules (Phase 1, transforms-precise):
 /// - **Origin slot**: its pre-seeded rows verbatim, no edges.
-/// - **Node with parseable CXL**: passthrough rows for input columns not
+/// - **Aggregate node**: group-key rows, then aggregate emit rows. Group-key and
+///   aggregate expression supports produce derive edges; unrelated input columns
+///   do not pass through.
+/// - **Other node with parseable CXL**: passthrough rows for input columns not
 ///   shadowed by an emit, then emitted rows — see
 ///   [`field_lineage::transform_output_fields`]. Edges: each emit's let-resolved
 ///   support ∩ input columns yields derive edges; each surviving passthrough
@@ -1357,6 +1386,87 @@ fn compute_field_lineage(
         // schema-changing node that DOES carry CXL (none today, but future-proof)
         // still falls through to the precise emit analysis.
         if node_cxl(node).is_none() && !node_preserves_input_schema(node) {
+            continue;
+        }
+
+        if let PipelineNode::Aggregate { config, .. } = node {
+            match node_cxl(node).map(field_lineage::parse_clean) {
+                Some(Some(program)) => {
+                    out_fields[idx] =
+                        field_lineage::aggregate_output_fields(&config.group_by, &program);
+                    let output_names: std::collections::HashSet<&str> = out_fields[idx]
+                        .iter()
+                        .map(|row| row.name.as_str())
+                        .collect();
+
+                    // Group keys are output fields on the grouped record. They
+                    // derive from the matching input field(s), but the rest of
+                    // the input row does not pass through the aggregate.
+                    let aliases = &input_aliases[idx];
+                    let group_keys: Vec<String> = out_fields[idx]
+                        .iter()
+                        .filter(|row| matches!(row.kind, FieldKind::PassThrough))
+                        .map(|row| row.name.clone())
+                        .collect();
+                    for group_key in group_keys {
+                        for (p, from_field) in
+                            resolve_support_anchors(&group_key, &producers_of, aliases)
+                        {
+                            field_edges.push(FieldEdge {
+                                from_node: p,
+                                from_field,
+                                to_node: idx,
+                                to_field: group_key.clone(),
+                                kind: FieldEdgeKind::Derive,
+                            });
+                        }
+                    }
+
+                    let supports = field_lineage::emit_supports(&program);
+                    let mut emitted_so_far: std::collections::HashSet<&str> =
+                        std::collections::HashSet::new();
+                    for (target, support) in &supports {
+                        if !output_names.contains(target.as_str()) {
+                            emitted_so_far.insert(target.as_str());
+                            continue;
+                        }
+                        for member in support {
+                            let col = bare_column(member);
+                            let anchors = resolve_support_anchors(member, &producers_of, aliases);
+                            if !anchors.is_empty() {
+                                for (p, from_field) in anchors {
+                                    field_edges.push(FieldEdge {
+                                        from_node: p,
+                                        from_field,
+                                        to_node: idx,
+                                        to_field: target.clone(),
+                                        kind: FieldEdgeKind::Derive,
+                                    });
+                                }
+                            } else if emitted_so_far.contains(col) && output_names.contains(col) {
+                                field_edges.push(FieldEdge {
+                                    from_node: idx,
+                                    from_field: col.to_string(),
+                                    to_node: idx,
+                                    to_field: target.clone(),
+                                    kind: FieldEdgeKind::Derive,
+                                });
+                            }
+                        }
+                        emitted_so_far.insert(target.as_str());
+                    }
+                }
+                Some(None) | None => {
+                    // Group keys are config-derived and safe to show even when
+                    // CXL emits are unavailable. Edges are still skipped to
+                    // preserve the existing "parse errors do not infer field
+                    // edges" invariant for the whole node.
+                    out_fields[idx] =
+                        field_lineage::aggregate_group_key_output_fields(&config.group_by);
+                }
+            }
+
+            stamp_passthrough_metadata(&mut out_fields[idx], &col_meta, true);
             continue;
         }
 
@@ -1529,14 +1639,7 @@ fn compute_field_lineage(
         // column it is no longer that column's correlation-key driver and stays
         // unmarked/untyped (typing an emit needs the engine typechecker, Phase
         // 2b / #68).
-        for row in out_fields[idx].iter_mut() {
-            if matches!(row.kind, FieldKind::PassThrough)
-                && let Some(meta) = col_meta.get(&row.name)
-            {
-                row.ty = meta.ty.clone();
-                row.is_correlation_key = meta.is_ck;
-            }
-        }
+        stamp_passthrough_metadata(&mut out_fields[idx], &col_meta, false);
     }
 
     (out_fields, field_edges)
@@ -3697,6 +3800,205 @@ nodes:
             closure,
             std::collections::HashSet::from([derive_idx]),
             "c's closure is exactly the a→c derive edge, no carries"
+        );
+    }
+
+    /// Aggregate nodes produce grouped rows, not transform-style passthrough
+    /// rows. Group keys appear first and derive from the matching input fields;
+    /// aggregate emits derive from the input fields their CXL expressions read.
+    #[test]
+    fn aggregate_fields_are_group_keys_and_emits_with_lineage() {
+        let yaml = r#"
+pipeline:
+  name: aggregate_lineage
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./orders.csv
+      schema:
+        - { name: department, type: string }
+        - { name: amount, type: float }
+        - { name: status, type: string }
+  - type: aggregate
+    name: totals
+    input: orders
+    config:
+      group_by: [department]
+      cxl: |
+        emit total = sum(amount)
+        emit row_count = count(*)
+"#;
+        let config = parse_config(yaml).expect("aggregate fixture parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_orders = stage_idx(&view, "orders");
+        let i_totals = stage_idx(&view, "totals");
+
+        assert_eq!(
+            view.stages[i_totals].fields,
+            vec![
+                FieldRow {
+                    name: "department".to_string(),
+                    kind: FieldKind::PassThrough,
+                    ty: Some("string".to_string()),
+                    ..Default::default()
+                },
+                FieldRow {
+                    name: "total".to_string(),
+                    kind: FieldKind::Emitted,
+                    ..Default::default()
+                },
+                FieldRow {
+                    name: "row_count".to_string(),
+                    kind: FieldKind::Emitted,
+                    ..Default::default()
+                },
+            ],
+            "aggregate rows should be group keys plus emits only"
+        );
+        assert!(
+            view.stages[i_totals]
+                .fields
+                .iter()
+                .all(|row| row.name != "amount" && row.name != "status"),
+            "non-group input fields must not pass through aggregate rows"
+        );
+
+        let group_key_edge = FieldEdge {
+            from_node: i_orders,
+            from_field: "department".to_string(),
+            to_node: i_totals,
+            to_field: "department".to_string(),
+            kind: FieldEdgeKind::Derive,
+        };
+        let total_edge = FieldEdge {
+            from_node: i_orders,
+            from_field: "amount".to_string(),
+            to_node: i_totals,
+            to_field: "total".to_string(),
+            kind: FieldEdgeKind::Derive,
+        };
+        assert!(
+            view.field_edges.contains(&group_key_edge),
+            "group key should derive from source department, got {:?}",
+            view.field_edges
+        );
+        assert!(
+            view.field_edges.contains(&total_edge),
+            "aggregate emit should derive from source amount, got {:?}",
+            view.field_edges
+        );
+        assert!(
+            !view
+                .field_edges
+                .iter()
+                .any(|edge| edge.to_node == i_totals && edge.to_field == "status"),
+            "unrelated source fields should not create aggregate passthrough edges"
+        );
+    }
+
+    /// A qualified group key is displayed as the aggregate output key while its
+    /// lineage resolves to the matching bare producer field. This keeps the UI
+    /// answer precise for cases like `source_b.field → aggregate.group_by`.
+    #[test]
+    fn aggregate_qualified_group_key_resolves_to_source_field() {
+        let yaml = r#"
+pipeline:
+  name: aggregate_qualified_group_key
+nodes:
+  - type: source
+    name: source_b
+    config:
+      name: source_b
+      type: csv
+      path: ./source_b.csv
+      schema:
+        - { name: field, type: string }
+        - { name: amount, type: float }
+  - type: aggregate
+    name: grouped
+    input: source_b
+    config:
+      group_by: [source_b.field]
+      cxl: |
+        emit n = count(*)
+"#;
+        let config = parse_config(yaml).expect("qualified group-key fixture parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_source = stage_idx(&view, "source_b");
+        let i_grouped = stage_idx(&view, "grouped");
+
+        let group_key = field_by_name(&view, i_grouped, "source_b.field");
+        assert_eq!(group_key.kind, FieldKind::PassThrough);
+        assert_eq!(
+            group_key.ty.as_deref(),
+            Some("string"),
+            "qualified group key should inherit the matching producer field type"
+        );
+
+        let edge = FieldEdge {
+            from_node: i_source,
+            from_field: "field".to_string(),
+            to_node: i_grouped,
+            to_field: "source_b.field".to_string(),
+            kind: FieldEdgeKind::Derive,
+        };
+        assert!(
+            view.field_edges.contains(&edge),
+            "qualified group key should draw lineage from source_b.field, got {:?}",
+            view.field_edges
+        );
+    }
+
+    /// Invalid CXL cannot be trusted for emit extraction. Aggregate group keys
+    /// still render from normal node config, but no lineage edges are inferred.
+    #[test]
+    fn aggregate_invalid_cxl_keeps_group_keys_without_edges() {
+        let yaml = r#"
+pipeline:
+  name: aggregate_invalid_cxl
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./orders.csv
+      schema:
+        - { name: department, type: string }
+        - { name: amount, type: float }
+  - type: aggregate
+    name: totals
+    input: orders
+    config:
+      group_by: [department]
+      cxl: |
+        emit total =
+"#;
+        let config = parse_config(yaml).expect("invalid-CXL aggregate YAML parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_totals = stage_idx(&view, "totals");
+        assert_eq!(
+            view.stages[i_totals].fields,
+            vec![FieldRow {
+                name: "department".to_string(),
+                kind: FieldKind::PassThrough,
+                ty: Some("string".to_string()),
+                ..Default::default()
+            }],
+            "invalid aggregate CXL should degrade to config-derived group keys"
+        );
+        assert!(
+            view.field_edges
+                .iter()
+                .all(|edge| edge.to_node != i_totals && edge.from_node != i_totals),
+            "invalid aggregate CXL should not infer edges, got {:?}",
+            view.field_edges
         );
     }
 
