@@ -142,3 +142,11 @@ When architecture changes, append a dated entry with:
 - The canvas hover/pin selection model now supports field endpoints and role-port endpoints; role edges temporarily reveal hidden producer fields and tint the target role row.
 - The port-aware layout model includes Aggregate group-key role ports and exports `PipelineView::role_edge_paths` parallel to `role_edges`.
 - Verification: `cargo fmt --all --check`, `cargo test -p klinx pipeline_view`, `cargo test -p klinx canvas`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check`.
+
+## 2026-06-17: Adaptive Canvas Node Field Disclosure
+
+- Canvas nodes now support global display modes Auto, Compact, Preview, Schema, and Full, plus per-node overrides cycled from the node header.
+- `components/canvas/panel.rs` owns display-mode resolution, preview ranking, filters, load-more state, and temporary hidden-row reveal before connector anchor resolution. This keeps rendered rows, field anchors, branch ports, card heights, fit-to-view bounds, and hover/pin lineage connectors synchronized.
+- Auto mode uses graph size, maximum schema width, zoom level, and active lineage/search state to reduce row detail for wide schemas and large 30+ node graphs while keeping small graphs schema-readable by default.
+- Preview ranking prioritizes correlation keys, emitted or derived fields, operator-relevant fields, declared fields, and passthrough filler. Active lineage/search/pinned rows keep their normal visible position when already projected; hidden active endpoints append as temporary reveal rows so anchors resolve without reordering the list being scanned.
+- Verification: `cargo test -p klinx components::canvas::panel`, `cargo test -p klinx pipeline_view`, `cargo test -p klinx field_lineage`, `cargo clippy --workspace -- -D warnings`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check`.

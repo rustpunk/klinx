@@ -1285,6 +1285,20 @@ input:-webkit-autofill:focus {
   flex-shrink: 0;
 }
 
+.klinx-display-mode-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--klinx-border-subtle);
+}
+
+.klinx-display-mode-group .klinx-view-toggle {
+  min-width: 46px;
+  padding: 0 7px;
+}
+
 .klinx-view-toggle {
   display: inline-flex;
   align-items: center;
@@ -4367,19 +4381,27 @@ input:-webkit-autofill:focus {
 
 /* ── Field-level lineage: rows, anchors, collapse, dimming ────────────────── */
 
-/* Collapse/expand toggle for field-bearing cards. Lives in the badge row so it
+/* Display-mode control for field-bearing cards. Lives in the badge row so it
    never overlaps the port squares or the drill button. */
-.klinx-node-collapse-btn {
+.klinx-node-display-btn {
   background: none;
-  border: none;
-  padding: 0 2px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  padding: 0 3px;
   cursor: pointer;
   color: var(--klinx-iron);
   font-size: 10px;
   line-height: 1;
+  font-family: var(--klinx-font-ui);
+  font-weight: 700;
 }
-.klinx-node-collapse-btn:hover {
+.klinx-node-display-btn:hover {
   color: var(--klinx-bone);
+  border-color: var(--klinx-border-medium);
+}
+.klinx-node--display-override .klinx-node-display-btn {
+  color: var(--klinx-verdigris);
+  border-color: color-mix(in srgb, var(--klinx-verdigris) 42%, transparent);
 }
 
 .klinx-node-field-tools {

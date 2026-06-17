@@ -7,7 +7,8 @@ nodes:
     config:
       name: invoices
       type: csv
-      path: ./data/invoices.csv
+      path: ./data/
+      correlation_key: [invoice_id, customer_id]
       options:
         has_header: true
       schema:

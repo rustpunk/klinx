@@ -8,6 +8,109 @@ use crate::state::{CompositionDrillFrame, use_app_state};
 
 use super::{CanvasHover, LineageTarget, PinnedField};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum GlobalNodeDisplayMode {
+    #[default]
+    Auto,
+    Compact,
+    Preview,
+    Schema,
+    Full,
+}
+
+impl GlobalNodeDisplayMode {
+    pub(super) const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::Compact,
+        Self::Preview,
+        Self::Schema,
+        Self::Full,
+    ];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "AUTO",
+            Self::Compact => "COMPACT",
+            Self::Preview => "PREVIEW",
+            Self::Schema => "SCHEMA",
+            Self::Full => "FULL",
+        }
+    }
+
+    pub(super) fn title(self) -> &'static str {
+        match self {
+            Self::Auto => "Adaptive node detail",
+            Self::Compact => "Header and topology ports",
+            Self::Preview => "Ranked high-signal fields",
+            Self::Schema => "Schema rows with wide-field cap",
+            Self::Full => "All known fields",
+        }
+    }
+
+    pub(super) fn resolved(self) -> Option<ResolvedNodeDisplayMode> {
+        match self {
+            Self::Auto => None,
+            Self::Compact => Some(ResolvedNodeDisplayMode::Compact),
+            Self::Preview => Some(ResolvedNodeDisplayMode::Preview),
+            Self::Schema => Some(ResolvedNodeDisplayMode::Schema),
+            Self::Full => Some(ResolvedNodeDisplayMode::Full),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ResolvedNodeDisplayMode {
+    #[default]
+    Compact,
+    Preview,
+    Schema,
+    Full,
+}
+
+impl ResolvedNodeDisplayMode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Compact => "Compact",
+            Self::Preview => "Preview",
+            Self::Schema => "Schema",
+            Self::Full => "Full",
+        }
+    }
+
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::Compact => "C",
+            Self::Preview => "P",
+            Self::Schema => "S",
+            Self::Full => "F",
+        }
+    }
+
+    pub(super) fn next_override(self) -> Option<Self> {
+        match self {
+            Self::Compact => Some(Self::Preview),
+            Self::Preview => Some(Self::Schema),
+            Self::Schema => Some(Self::Full),
+            Self::Full => None,
+        }
+    }
+
+    fn as_data_attr(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Preview => "preview",
+            Self::Schema => "schema",
+            Self::Full => "full",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NodeDisplayAction {
+    CycleOverride,
+    ClearOverride,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct FieldDisplayInfo {
     pub total_count: usize,
@@ -18,6 +121,9 @@ pub(super) struct FieldDisplayInfo {
     pub query: String,
     pub searchable: bool,
     pub can_reduce: bool,
+    pub mode: ResolvedNodeDisplayMode,
+    pub global_mode: GlobalNodeDisplayMode,
+    pub override_mode: Option<ResolvedNodeDisplayMode>,
 }
 
 /// A single pipeline stage rendered as a rustpunk node card on the canvas.
@@ -44,6 +150,7 @@ pub fn CanvasNode(
     field_display: FieldDisplayInfo,
     on_field_query: EventHandler<String>,
     on_field_toggle: EventHandler<()>,
+    on_display_action: EventHandler<NodeDisplayAction>,
     dimmed: bool,
     highlighted_fields: Vec<String>,
     highlighted_role_ports: Vec<String>,
@@ -61,13 +168,7 @@ pub fn CanvasNode(
     // component body (hooks must not run inside event handlers/conditionals); the
     // inner `Signal` is `Copy`, so the handlers capture them directly.
     let mut hovered = use_context::<CanvasHover>();
-    let mut pinned = use_context::<PinnedField>();
 
-    // Local collapse state — a field-bearing card can be folded back to the
-    // compact header-only look. Local (not app-state) because collapse is a
-    // pure view concern with no model meaning. Cards without fields never show
-    // the toggle, so this signal is inert for them.
-    let mut collapsed = use_signal(|| false);
     let has_fields = field_display.total_count > 0;
     let has_input_roles = stage.role_ports_on(StagePortSide::Input).next().is_some();
     // Route and Cull nodes carry extra output ports (rendered as branch ports
@@ -77,9 +178,9 @@ pub fn CanvasNode(
     // A Route's outputs ARE its branch ports, so it has no node-level output
     // port; a Cull keeps its node-level main output ALONGSIDE the side-output.
     let keeps_node_out = stage.keeps_node_output_port();
-    let show_input_roles = has_input_roles && !*collapsed.read();
-    let show_rows = !stage.fields.is_empty() && !*collapsed.read();
-    let show_branches = has_branches && !*collapsed.read();
+    let show_input_roles = has_input_roles;
+    let show_rows = !stage.fields.is_empty();
+    let show_branches = has_branches;
     let field_tools_visible = field_display.searchable;
     let toggle_display = field_display.hidden_count > 0 || field_display.can_reduce;
     let toggle_label = if field_display.hidden_count > 0 {
@@ -144,10 +245,27 @@ pub fn CanvasNode(
     };
     // Append the dim modifier when this node is outside the revealed field's
     // lineage closure; an undimmed card keeps exactly its classic class string.
-    let node_class = if dimmed {
-        format!("{base_class} klinx-node--dimmed")
-    } else {
-        base_class.to_string()
+    let mut node_class = base_class.to_string();
+    if dimmed {
+        node_class.push_str(" klinx-node--dimmed");
+    }
+    if field_display.override_mode.is_some() {
+        node_class.push_str(" klinx-node--display-override");
+    }
+
+    let display_button_label = field_display
+        .override_mode
+        .map_or("A", ResolvedNodeDisplayMode::short_label);
+    let display_button_title = match field_display.override_mode {
+        Some(mode) => format!(
+            "Node display override: {}. Click to cycle; Shift-click to use Auto.",
+            mode.label()
+        ),
+        None => format!(
+            "Node display: Auto → {} from global {}. Click to override.",
+            field_display.mode.label(),
+            field_display.global_mode.label()
+        ),
     };
 
     let border_style = format!(
@@ -171,6 +289,7 @@ pub fn CanvasNode(
             key: "{stage.id}",
             class: "{node_class}",
             "data-stage-kind": kind_attr,
+            "data-node-display": field_display.mode.as_data_attr(),
             style: "{border_style}",
             onmousedown: move |e: MouseEvent| e.stop_propagation(),
             // Leaving the card clears only THIS node's hover. The node-index
@@ -218,36 +337,22 @@ pub fn CanvasNode(
                     class: "klinx-node-badge",
                     style: "color: var(--klinx-stage-accent);",
                     span { class: "klinx-node-type-badge", "{badge}" }
-                    // Collapse/expand toggle — on any card that carries field rows,
-                    // semantic role ports, or Route branch ports.
+                    // Display-mode control. The panel owns the actual projection so
+                    // card geometry, anchors, and rendered rows stay synchronized.
                     if has_fields || has_input_roles || has_branches {
                         button {
-                            class: "klinx-node-collapse-btn",
-                            title: if *collapsed.read() { "Expand fields" } else { "Collapse fields" },
+                            class: "klinx-node-display-btn",
+                            title: "{display_button_title}",
                             onclick: move |e: MouseEvent| {
-                                // Toggle only; never select. Stop propagation so the
-                                // card's onclick selection handler does not also fire.
                                 e.stop_propagation();
-                                let now = *collapsed.read();
-                                collapsed.set(!now);
-                                // Collapsing unmounts the field rows, so their
-                                // container `onmouseleave` can never fire to clear a
-                                // delayed/active hover that targets this node. Clear
-                                // both hover and pin to avoid phantom row anchors; a
-                                // later pointer move / click re-establishes.
-                                if !now {
-                                    hovered.force_clear_if_node(index);
-                                    if pinned
-                                        .0
-                                        .peek()
-                                        .as_ref()
-                                        .is_some_and(|target| target.node() == index)
-                                    {
-                                        pinned.0.set(None);
-                                    }
-                                }
+                                let action = if e.data().modifiers().shift() {
+                                    NodeDisplayAction::ClearOverride
+                                } else {
+                                    NodeDisplayAction::CycleOverride
+                                };
+                                on_display_action.call(action);
                             },
-                            if *collapsed.read() { "▸" } else { "▾" }
+                            "{display_button_label}"
                         }
                     }
                 }
