@@ -53,6 +53,23 @@ pub const FIELD_HEADER_HEIGHT: f32 = NODE_HEIGHT;
 /// silently de-syncs the cables from the dots.
 pub const FIELD_ROW_HEIGHT: f32 = 22.0;
 
+/// One point in a routed canvas connector path.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CanvasPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Optional renderer-ready connector route.
+///
+/// Empty views use endpoint-derived connector geometry. Port-aware layout
+/// migration fills these paths so the SVG renderer can draw reserved lanes
+/// without re-running layout work in the component layer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CanvasConnectorPath {
+    pub points: Vec<CanvasPoint>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum StageKind {
     Source,
@@ -413,11 +430,19 @@ pub struct PipelineView {
     /// Explicit connections between stages. A connection that leaves a Route
     /// node records the source branch it originates from (`from_branch`).
     pub connections: Vec<Connection>,
+    /// Optional routed paths parallel to [`PipelineView::connections`].
+    ///
+    /// Empty in the current default barycenter layout. When populated by the
+    /// port-aware layout migration, the canvas renderer uses these point lists
+    /// instead of deriving every connector from only its endpoints.
+    pub connection_paths: Vec<CanvasConnectorPath>,
     /// Field-level lineage edges between stage rows. Populated by both the
     /// composition pass (#66) and the pipeline pass (#68); empty for views
     /// without resolvable field schemas (e.g. partial/degraded views), where an
     /// empty `field_edges` means the canvas draws node-level connectors only.
     pub field_edges: Vec<FieldEdge>,
+    /// Optional routed paths parallel to [`PipelineView::field_edges`].
+    pub field_edge_paths: Vec<CanvasConnectorPath>,
 }
 
 /// Axis-aligned bounding box of a node layout in world coordinates.
@@ -790,7 +815,9 @@ fn derive_view_from_nodes_inner(
     PipelineView {
         stages,
         connections,
+        connection_paths: Vec::new(),
         field_edges,
+        field_edge_paths: Vec::new(),
     }
 }
 
@@ -988,7 +1015,9 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
     PipelineView {
         stages,
         connections,
+        connection_paths: Vec::new(),
         field_edges,
+        field_edge_paths: Vec::new(),
     }
 }
 
@@ -2388,7 +2417,9 @@ pub fn derive_partial_pipeline_view(
     PipelineView {
         stages,
         connections,
+        connection_paths: Vec::new(),
         field_edges: Vec::new(),
+        field_edge_paths: Vec::new(),
     }
 }
 
@@ -2549,7 +2580,9 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
     PipelineView {
         stages,
         connections,
+        connection_paths: Vec::new(),
         field_edges,
+        field_edge_paths: Vec::new(),
     }
 }
 

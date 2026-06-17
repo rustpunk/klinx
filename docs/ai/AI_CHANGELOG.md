@@ -45,11 +45,24 @@ When architecture changes, append a dated entry with:
 ## 2026-06-17: Layout Migration Compatibility Boundary
 
 - Added an explicit canvas layout selection wrapper around the existing pipeline view model.
-- `CanvasLayoutEngine::CurrentBarycenter` remains the visible/default layout path; existing `derive_pipeline_view` callers are unchanged.
-- `CanvasLayoutEngine::PortAwareSugiyama` is an opt-in comparison path that applies the port-aware layout model's deterministic node positions while preserving the existing `PipelineView` connection and field-edge data for renderer compatibility.
+- `CanvasLayoutEngine::CurrentBarycenter` remains the default for plain `derive_pipeline_view` callers.
+- `CanvasLayoutEngine::PortAwareSugiyama` applies the port-aware layout model's deterministic node positions while preserving the existing `PipelineView` connection and field-edge data for renderer compatibility; the visible canvas now requests this layout path.
 - Port-aware requests fall back to the current barycenter view when stage, branch, or field anchors cannot be validated, returning `CanvasLayoutFallback` metadata instead of panicking or partially applying new coordinates.
 - The open migration question is now narrowed to visual QA and the eventual default-switch policy.
 - Verification: `CARGO_TARGET_DIR=<scratch-target> cargo test -p klinx pipeline_view`, `CARGO_TARGET_DIR=<scratch-target> cargo clippy -p klinx -- -D warnings`, `CARGO_TARGET_DIR=<scratch-target> cargo clippy -p klinx --all-targets -- -D warnings`, `cargo fmt --all --check`, and `git diff --check`.
+
+## 2026-06-17: Port-Aware Connector Path Rendering
+
+- Added optional `PipelineView::connection_paths` and `PipelineView::field_edge_paths` vectors, parallel to `connections` and `field_edges`.
+- Existing barycenter-derived views leave those path vectors empty, preserving endpoint-derived connector fallback for callers that do not request the port-aware layout.
+- `apply_canvas_layout(..., CanvasLayoutEngine::PortAwareSugiyama)` now carries the layout model's orthogonal lane paths into world-space canvas paths, including route/cull branch and field endpoint semantics.
+- `components/canvas/connector.rs` can render rounded orthogonal polylines from layout-provided point lists; `components/canvas/panel.rs` now requests the port-aware layout for the visible canvas, then repopulates visible connector lane positions dynamically so hidden edges do not reserve channels.
+- Node-level connectors and active field-lineage connectors now repopulate their channel lanes from the currently visible connector set, centered in clean free corridors and fanning outward as visible connector count increases. Node-level pipes use one transform-orange stroke and run a second lane-reservation pass across overlapping connector groups so unrelated visible pipes do not stack on the same channel. Skip-rank paths score candidate lanes against rendered node rectangles so an intermediate card is not selected as the channel.
+- Connector routing now validates the complete orthogonal polyline, not only the vertical lane X: blocked horizontal legs detour through a bounded free-space grid around rendered card rectangles, and unrelated independent connectors are blocked from reusing full pipe segments unless they share an endpoint/trunk.
+- During a pinned field-lineage reveal, hovering another participating field spotlights that field's direct connector neighbourhood while keeping the full pinned lineage visible.
+- Connector SVG overlays remain pointer-passive and below opaque node cards; dimmed cards recede with filter styling rather than alpha so connector strokes cannot bleed through field interiors.
+- `docs/ai/30_DESIGN_RULES.md` now records the optional path-vector contract.
+- Verification: `cargo fmt --all --check`, `cargo test -p klinx connector`, `cargo test -p klinx canvas`, `cargo test -p klinx`, `cargo clippy -p klinx -- -D warnings`, `cargo clippy -p klinx --all-targets -- -D warnings`, and `git diff --check`.
 
 ## 2026-06-16: Milestone Orchestration Workflow
 
