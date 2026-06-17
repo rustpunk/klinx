@@ -17,7 +17,9 @@ use crate::state::{ChannelViewMode, use_app_state};
 use super::connector::{
     Connector, ConnectorEndpoints, ConnectorObstacle, FieldConnector, obstacle_aware_channel_paths,
 };
-use super::node::{CanvasNode, FieldDisplayInfo};
+use super::node::{
+    CanvasNode, FieldDisplayInfo, GlobalNodeDisplayMode, NodeDisplayAction, ResolvedNodeDisplayMode,
+};
 use super::{CanvasHover, HoverTarget, LineageTarget, PinnedField};
 
 /// Resolved world-space endpoints + accent for one field-lineage cable.
@@ -91,10 +93,174 @@ const DEFAULT_VIEWPORT_H: f32 = 700.0;
 /// Default number of field rows rendered per node before the user loads more or
 /// filters. This bounds card height and per-row connector work for wide schemas.
 const FIELD_ROW_CAP: usize = 24;
+/// Rows shown in Preview mode before explicit per-node expansion.
+const PREVIEW_FIELD_ROW_CAP: usize = 6;
+const SMALL_GRAPH_NODE_LIMIT: usize = 8;
+const LARGE_GRAPH_NODE_LIMIT: usize = 30;
+const SMALL_GRAPH_FIELD_LIMIT: usize = 12;
+const WIDE_SCHEMA_FIELD_LIMIT: usize = FIELD_ROW_CAP;
+const AUTO_COMPACT_ZOOM: f32 = 0.55;
+const AUTO_PREVIEW_ZOOM: f32 = 0.95;
 #[derive(Clone, Debug, Default, PartialEq)]
 struct FieldDisplayState {
     visible_limit: usize,
     query: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GraphDisplayProfile {
+    node_count: usize,
+    max_field_count: usize,
+}
+
+impl GraphDisplayProfile {
+    fn from_stages(stages: &[StageView]) -> Self {
+        Self {
+            node_count: stages.len(),
+            max_field_count: stages
+                .iter()
+                .map(|stage| stage.fields.len())
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct FieldRankSignals {
+    produced_or_derived_by_node: HashMap<usize, HashSet<String>>,
+    operator_relevant_by_node: HashMap<usize, HashSet<String>>,
+}
+
+fn build_field_rank_signals(
+    stages: &[StageView],
+    field_edges: &[FieldEdge],
+    role_edges: &[RoleEdge],
+) -> FieldRankSignals {
+    let mut signals = FieldRankSignals::default();
+    for edge in field_edges {
+        if matches!(edge.kind, FieldEdgeKind::Derive | FieldEdgeKind::Access) {
+            signals
+                .produced_or_derived_by_node
+                .entry(edge.from_node)
+                .or_default()
+                .insert(edge.from_field.clone());
+            signals
+                .produced_or_derived_by_node
+                .entry(edge.to_node)
+                .or_default()
+                .insert(edge.to_field.clone());
+        }
+
+        if stages
+            .get(edge.from_node)
+            .is_some_and(|stage| stage_kind_prioritizes_operator_fields(&stage.kind))
+        {
+            signals
+                .operator_relevant_by_node
+                .entry(edge.from_node)
+                .or_default()
+                .insert(edge.from_field.clone());
+        }
+        if stages
+            .get(edge.to_node)
+            .is_some_and(|stage| stage_kind_prioritizes_operator_fields(&stage.kind))
+        {
+            signals
+                .operator_relevant_by_node
+                .entry(edge.to_node)
+                .or_default()
+                .insert(edge.to_field.clone());
+        }
+    }
+
+    for edge in role_edges {
+        signals
+            .produced_or_derived_by_node
+            .entry(edge.from_node)
+            .or_default()
+            .insert(edge.from_field.clone());
+        signals
+            .operator_relevant_by_node
+            .entry(edge.from_node)
+            .or_default()
+            .insert(edge.from_field.clone());
+    }
+
+    signals
+}
+
+fn stage_kind_prioritizes_operator_fields(kind: &crate::pipeline_view::StageKind) -> bool {
+    matches!(
+        kind,
+        crate::pipeline_view::StageKind::Aggregate
+            | crate::pipeline_view::StageKind::Route
+            | crate::pipeline_view::StageKind::Merge
+            | crate::pipeline_view::StageKind::Combine
+            | crate::pipeline_view::StageKind::Output
+            | crate::pipeline_view::StageKind::OutputPort
+    )
+}
+
+fn resolve_node_display_mode(
+    global: GlobalNodeDisplayMode,
+    node_override: Option<ResolvedNodeDisplayMode>,
+    profile: GraphDisplayProfile,
+    zoom: f32,
+    has_auto_focus: bool,
+) -> ResolvedNodeDisplayMode {
+    if let Some(mode) = node_override {
+        return mode;
+    }
+
+    match global.resolved() {
+        Some(mode) => mode,
+        None => {
+            let base = if zoom < AUTO_COMPACT_ZOOM {
+                ResolvedNodeDisplayMode::Compact
+            } else if zoom < AUTO_PREVIEW_ZOOM {
+                ResolvedNodeDisplayMode::Preview
+            } else if profile.node_count >= LARGE_GRAPH_NODE_LIMIT {
+                ResolvedNodeDisplayMode::Compact
+            } else if profile.max_field_count > WIDE_SCHEMA_FIELD_LIMIT {
+                ResolvedNodeDisplayMode::Preview
+            } else if profile.node_count <= SMALL_GRAPH_NODE_LIMIT
+                && profile.max_field_count <= SMALL_GRAPH_FIELD_LIMIT
+            {
+                ResolvedNodeDisplayMode::Schema
+            } else {
+                ResolvedNodeDisplayMode::Preview
+            };
+
+            if has_auto_focus && matches!(base, ResolvedNodeDisplayMode::Compact) {
+                ResolvedNodeDisplayMode::Preview
+            } else {
+                base
+            }
+        }
+    }
+}
+
+fn default_limit_for_mode(mode: ResolvedNodeDisplayMode, query: &str) -> usize {
+    if !query.trim().is_empty() && matches!(mode, ResolvedNodeDisplayMode::Compact) {
+        return FIELD_ROW_CAP;
+    }
+
+    match mode {
+        ResolvedNodeDisplayMode::Compact => 0,
+        ResolvedNodeDisplayMode::Preview => PREVIEW_FIELD_ROW_CAP,
+        ResolvedNodeDisplayMode::Schema => FIELD_ROW_CAP,
+        ResolvedNodeDisplayMode::Full => usize::MAX,
+    }
+}
+
+fn page_size_for_mode(mode: ResolvedNodeDisplayMode) -> usize {
+    match mode {
+        ResolvedNodeDisplayMode::Compact | ResolvedNodeDisplayMode::Preview => {
+            PREVIEW_FIELD_ROW_CAP
+        }
+        ResolvedNodeDisplayMode::Schema | ResolvedNodeDisplayMode::Full => FIELD_ROW_CAP,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,32 +269,53 @@ struct ProjectedStage {
     display: FieldDisplayInfo,
 }
 
+#[derive(Clone, Copy)]
+struct FieldProjectionContext<'a> {
+    stage_index: usize,
+    mode: ResolvedNodeDisplayMode,
+    global_mode: GlobalNodeDisplayMode,
+    override_mode: Option<ResolvedNodeDisplayMode>,
+    temporary_fields: &'a HashSet<String>,
+    rank_signals: &'a FieldRankSignals,
+}
+
 fn project_stage_fields(
     stage: &StageView,
     state: &FieldDisplayState,
-    temporary_fields: &HashSet<String>,
+    context: FieldProjectionContext<'_>,
 ) -> ProjectedStage {
     let query = state.query.trim();
-    let visible_limit = state.visible_limit.max(FIELD_ROW_CAP);
-    let mut fields: Vec<FieldRow> = stage
+    let default_limit = default_limit_for_mode(context.mode, query);
+    let visible_limit = if matches!(context.mode, ResolvedNodeDisplayMode::Full) {
+        usize::MAX
+    } else if state.visible_limit == 0 {
+        default_limit
+    } else {
+        state.visible_limit.max(default_limit)
+    };
+    let matching_fields: Vec<(usize, &FieldRow)> = stage
         .fields
         .iter()
-        .filter(|field| field_matches_query(field, query))
-        .cloned()
+        .enumerate()
+        .filter(|(_, field)| field_matches_query(field, query))
         .collect();
-    let matching_count = fields.len();
-    let capped = matching_count > visible_limit;
-    if capped {
-        fields.truncate(visible_limit);
-    }
+    let matching_count = matching_fields.len();
+    let mut fields = visible_fields_for_mode(
+        context.stage_index,
+        stage,
+        &matching_fields,
+        context.mode,
+        visible_limit,
+        context.rank_signals,
+    );
 
     let hidden_count = matching_count.saturating_sub(fields.len());
-    let next_count = hidden_count.min(FIELD_ROW_CAP);
+    let next_count = hidden_count.min(page_size_for_mode(context.mode));
     let mut visible_names: HashSet<String> =
         fields.iter().map(|field| field.name.clone()).collect();
     let mut appended_temporary_fields = Vec::new();
     for field in &stage.fields {
-        if temporary_fields.contains(&field.name) && !visible_names.contains(&field.name) {
+        if context.temporary_fields.contains(&field.name) && !visible_names.contains(&field.name) {
             visible_names.insert(field.name.clone());
             appended_temporary_fields.push(field.name.clone());
             fields.push(field.clone());
@@ -146,10 +333,87 @@ fn project_stage_fields(
             next_count,
             temporary_fields: appended_temporary_fields,
             query: state.query.clone(),
-            searchable: stage.fields.len() > FIELD_ROW_CAP || !query.is_empty(),
-            can_reduce: visible_limit > FIELD_ROW_CAP && matching_count > FIELD_ROW_CAP,
+            searchable: stage.fields.len() > PREVIEW_FIELD_ROW_CAP
+                || !query.is_empty()
+                || (matches!(context.mode, ResolvedNodeDisplayMode::Compact)
+                    && !stage.fields.is_empty()),
+            can_reduce: state.visible_limit > default_limit && matching_count > default_limit,
+            mode: context.mode,
+            global_mode: context.global_mode,
+            override_mode: context.override_mode,
         },
     }
+}
+
+fn visible_fields_for_mode(
+    stage_index: usize,
+    stage: &StageView,
+    matching_fields: &[(usize, &FieldRow)],
+    mode: ResolvedNodeDisplayMode,
+    visible_limit: usize,
+    rank_signals: &FieldRankSignals,
+) -> Vec<FieldRow> {
+    if visible_limit == 0 {
+        return Vec::new();
+    }
+
+    let limit = visible_limit.min(matching_fields.len());
+    match mode {
+        ResolvedNodeDisplayMode::Compact | ResolvedNodeDisplayMode::Schema => matching_fields
+            .iter()
+            .take(limit)
+            .map(|(_, field)| (*field).clone())
+            .collect(),
+        ResolvedNodeDisplayMode::Full => matching_fields
+            .iter()
+            .map(|(_, field)| (*field).clone())
+            .collect(),
+        ResolvedNodeDisplayMode::Preview => {
+            let mut ranked = matching_fields.to_vec();
+            ranked.sort_by_key(|(index, field)| {
+                (
+                    preview_rank(stage_index, stage, field, rank_signals),
+                    *index,
+                )
+            });
+            ranked
+                .into_iter()
+                .take(limit)
+                .map(|(_, field)| field.clone())
+                .collect()
+        }
+    }
+}
+
+fn preview_rank(
+    stage_index: usize,
+    stage: &StageView,
+    field: &FieldRow,
+    rank_signals: &FieldRankSignals,
+) -> u8 {
+    if field.is_correlation_key {
+        return 1;
+    }
+    if matches!(field.kind, crate::pipeline_view::FieldKind::Emitted)
+        || rank_signals
+            .produced_or_derived_by_node
+            .get(&stage_index)
+            .is_some_and(|fields| fields.contains(&field.name))
+    {
+        return 2;
+    }
+    if stage_kind_prioritizes_operator_fields(&stage.kind)
+        && rank_signals
+            .operator_relevant_by_node
+            .get(&stage_index)
+            .is_some_and(|fields| fields.contains(&field.name))
+    {
+        return 3;
+    }
+    if matches!(field.kind, crate::pipeline_view::FieldKind::Declared) {
+        return 4;
+    }
+    5
 }
 
 fn field_matches_query(field: &FieldRow, query: &str) -> bool {
@@ -383,6 +647,22 @@ pub fn CanvasPanel() -> Element {
     let state = use_app_state();
     let mut field_display_states = use_signal(HashMap::<String, FieldDisplayState>::new);
     let mut global_field_query = use_signal(String::new);
+    let mut global_node_display_mode = use_signal(|| GlobalNodeDisplayMode::Auto);
+    let mut node_display_overrides = use_signal(HashMap::<String, ResolvedNodeDisplayMode>::new);
+
+    // ── Transform state (local — only the canvas needs these) ────────────────
+    let mut pan_x = use_signal(|| 0.0_f32);
+    let mut pan_y = use_signal(|| 0.0_f32);
+    let mut zoom = use_signal(|| 1.0_f32);
+
+    // ── Viewport pixel size — measured on mount/resize so Fit-to-View can frame
+    // the graph against the real pane. Seeded with sane defaults because the
+    // `onmounted` measurement is async and may not have run on first fit. ─────
+    let mut viewport_w = use_signal(|| DEFAULT_VIEWPORT_W);
+    let mut viewport_h = use_signal(|| DEFAULT_VIEWPORT_H);
+
+    // ── Non-reactive drag state — hot path, no re-renders during drag ─────────
+    let drag = use_hook(|| Rc::new(RefCell::new(DragState::default())));
 
     let view_mode = *state.channel_view_mode.read();
     let drill_stack = state.composition_drill_stack.read();
@@ -541,15 +821,44 @@ pub fn CanvasPanel() -> Element {
     );
     merge_field_name_sets(&mut temporary_fields_by_node, &global_matches_by_node);
 
+    let rank_signals = build_field_rank_signals(&raw_stages, &field_edges, &role_edges);
+    let display_profile = GraphDisplayProfile::from_stages(&raw_stages);
+    let zoom_for_auto = *zoom.read();
+    let global_display_mode = *global_node_display_mode.read();
+    let selected_stage_ids = state.selected_stages.read().clone();
+    let visible_stage_ids: HashSet<String> =
+        raw_stages.iter().map(|stage| stage.id.clone()).collect();
     let projected: Vec<ProjectedStage> = {
         let display_states = field_display_states.read();
+        let display_overrides = node_display_overrides.read();
         raw_stages
             .iter()
             .enumerate()
             .map(|(index, stage)| {
-                let state = display_states.get(&stage.id).cloned().unwrap_or_default();
+                let display_state = display_states.get(&stage.id).cloned().unwrap_or_default();
                 let temporary_fields = temporary_fields_by_node.remove(&index).unwrap_or_default();
-                project_stage_fields(stage, &state, &temporary_fields)
+                let override_mode = display_overrides.get(&stage.id).copied();
+                let has_auto_focus =
+                    selected_stage_ids.contains(stage.id.as_str()) || !temporary_fields.is_empty();
+                let mode = resolve_node_display_mode(
+                    global_display_mode,
+                    override_mode,
+                    display_profile,
+                    zoom_for_auto,
+                    has_auto_focus,
+                );
+                project_stage_fields(
+                    stage,
+                    &display_state,
+                    FieldProjectionContext {
+                        stage_index: index,
+                        mode,
+                        global_mode: global_display_mode,
+                        override_mode,
+                        temporary_fields: &temporary_fields,
+                        rank_signals: &rank_signals,
+                    },
+                )
             })
             .collect()
     };
@@ -658,6 +967,16 @@ pub fn CanvasPanel() -> Element {
         hovered.force_clear();
         let mut pinned = pinned_field;
         pinned.0.set(None);
+
+        if node_display_overrides
+            .peek()
+            .keys()
+            .any(|stage_id| !visible_stage_ids.contains(stage_id))
+        {
+            node_display_overrides
+                .write()
+                .retain(|stage_id, _| visible_stage_ids.contains(stage_id));
+        }
     });
 
     // An empty closure means no field cables and no dim; global field search only
@@ -755,20 +1074,6 @@ pub fn CanvasPanel() -> Element {
             .collect::<HashMap<_, _>>();
     // Any field hovered with a non-empty closure dims the rest of the canvas.
     let hover_active = !active_field_edges.is_empty() || !active_role_edges.is_empty();
-
-    // ── Transform state (local — only the canvas needs these) ────────────────
-    let mut pan_x = use_signal(|| 0.0_f32);
-    let mut pan_y = use_signal(|| 0.0_f32);
-    let mut zoom = use_signal(|| 1.0_f32);
-
-    // ── Viewport pixel size — measured on mount/resize so Fit-to-View can frame
-    // the graph against the real pane. Seeded with sane defaults because the
-    // `onmounted` measurement is async and may not have run on first fit. ─────
-    let mut viewport_w = use_signal(|| DEFAULT_VIEWPORT_W);
-    let mut viewport_h = use_signal(|| DEFAULT_VIEWPORT_H);
-
-    // ── Non-reactive drag state — hot path, no re-renders during drag ─────────
-    let drag = use_hook(|| Rc::new(RefCell::new(DragState::default())));
 
     // Bounding box of the current layout (None when empty). `LayoutBounds` is
     // Copy, so each fit handler captures it without cloning the stage list.
@@ -912,7 +1217,7 @@ pub fn CanvasPanel() -> Element {
         let _ = min_y; // min_y handled by SVG viewBox if needed; overflow:visible covers it.
         (max_x + 80.0, max_y + 80.0)
     };
-    let node_cards: Vec<(usize, StageView, FieldDisplayInfo, String, String)> = stages
+    let node_cards: Vec<(usize, StageView, FieldDisplayInfo, String, String, String)> = stages
         .iter()
         .cloned()
         .zip(field_displays.iter().cloned())
@@ -920,7 +1225,15 @@ pub fn CanvasPanel() -> Element {
         .map(|(index, (stage, display))| {
             let query_stage_id = stage.id.clone();
             let expand_stage_id = stage.id.clone();
-            (index, stage, display, query_stage_id, expand_stage_id)
+            let display_stage_id = stage.id.clone();
+            (
+                index,
+                stage,
+                display,
+                query_stage_id,
+                expand_stage_id,
+                display_stage_id,
+            )
         })
         .collect();
 
@@ -1012,6 +1325,20 @@ pub fn CanvasPanel() -> Element {
                 }
 
                 div {
+                    class: "klinx-display-mode-group",
+                    for display_mode in GlobalNodeDisplayMode::ALL {
+                        button {
+                            class: if global_display_mode == display_mode { "klinx-view-toggle klinx-view-toggle--active" } else { "klinx-view-toggle" },
+                            title: "{display_mode.title()}",
+                            onclick: move |_| {
+                                global_node_display_mode.set(display_mode);
+                            },
+                            span { class: "klinx-view-toggle-label", "{display_mode.label()}" }
+                        }
+                    }
+                }
+
+                div {
                     class: "klinx-global-field-search",
                     input {
                         class: "klinx-global-field-search-input",
@@ -1094,7 +1421,7 @@ pub fn CanvasPanel() -> Element {
                 }
 
                 // Node cards
-                for (index, stage, display, query_stage_id, expand_stage_id) in node_cards {
+                for (index, stage, display, query_stage_id, expand_stage_id, display_stage_id) in node_cards {
                     // Hand each card its pre-grouped lineage-endpoint field names
                     // (#87). `remove` MOVES the Vec out (each index is visited once,
                     // so this never loses a card's names), avoiding a clone and any
@@ -1125,12 +1452,47 @@ pub fn CanvasPanel() -> Element {
                             let mut states = field_display_states.write();
                             let entry = states.entry(expand_stage_id.clone()).or_default();
                             if display.hidden_count > 0 {
+                                let page_size = page_size_for_mode(display.mode);
                                 entry.visible_limit = entry
                                     .visible_limit
-                                    .max(FIELD_ROW_CAP)
-                                    .saturating_add(FIELD_ROW_CAP);
+                                    .max(page_size)
+                                    .saturating_add(page_size);
                             } else if display.can_reduce {
-                                entry.visible_limit = FIELD_ROW_CAP;
+                                entry.visible_limit = 0;
+                            }
+                        },
+                        on_display_action: move |action: NodeDisplayAction| {
+                            hovered_field.force_clear_if_node(index);
+                            if pinned_field
+                                .0
+                                .peek()
+                                .as_ref()
+                                .is_some_and(|target| target.node() == index)
+                            {
+                                pinned_field.0.set(None);
+                            }
+                            let mut overrides = node_display_overrides.write();
+                            match action {
+                                NodeDisplayAction::ClearOverride => {
+                                    overrides.remove(&display_stage_id);
+                                }
+                                NodeDisplayAction::CycleOverride => {
+                                    let next = overrides
+                                        .get(&display_stage_id)
+                                        .copied()
+                                        .map_or(
+                                            Some(ResolvedNodeDisplayMode::Compact),
+                                            ResolvedNodeDisplayMode::next_override,
+                                        );
+                                    match next {
+                                        Some(mode) => {
+                                            overrides.insert(display_stage_id.clone(), mode);
+                                        }
+                                        None => {
+                                            overrides.remove(&display_stage_id);
+                                        }
+                                    }
+                                }
                             }
                         },
                         // Dim cards outside the revealed field's lineage closure.
@@ -1187,16 +1549,18 @@ mod tests {
 
     use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
     use crate::pipeline_view::{
-        CanvasPoint, FieldKind, FieldRow, NODE_WIDTH, RouteBranch, StageKind, StageView,
-        derive_pipeline_view,
+        CanvasPoint, FIELD_ROW_HEIGHT, FieldKind, FieldRow, NODE_WIDTH, RouteBranch, StageKind,
+        StageView, derive_pipeline_view,
     };
 
     use super::super::connector::{
         ConnectorEndpoints, ConnectorObstacle, obstacle_aware_channel_paths,
     };
     use super::{
-        FIELD_ROW_CAP, FieldDisplayState, field_matches_by_node, project_stage_fields,
-        rendered_card_height, text_matches_query,
+        FIELD_ROW_CAP, FieldDisplayState, FieldProjectionContext, FieldRankSignals,
+        GlobalNodeDisplayMode, GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP, ResolvedNodeDisplayMode,
+        field_matches_by_node, project_stage_fields, rendered_card_height,
+        resolve_node_display_mode, text_matches_query,
     };
 
     fn wide_stage(count: usize) -> StageView {
@@ -1227,11 +1591,35 @@ mod tests {
         }
     }
 
+    fn project_for_test(
+        stage: &StageView,
+        state: &FieldDisplayState,
+        mode: ResolvedNodeDisplayMode,
+        temporary_fields: &HashSet<String>,
+    ) -> super::ProjectedStage {
+        project_stage_fields(
+            stage,
+            state,
+            FieldProjectionContext {
+                stage_index: 0,
+                mode,
+                global_mode: GlobalNodeDisplayMode::Auto,
+                override_mode: None,
+                temporary_fields,
+                rank_signals: &FieldRankSignals::default(),
+            },
+        )
+    }
+
     #[test]
     fn wide_schema_projection_caps_default_rows() {
         let stage = wide_stage(120);
-        let projected =
-            project_stage_fields(&stage, &FieldDisplayState::default(), &HashSet::new());
+        let projected = project_for_test(
+            &stage,
+            &FieldDisplayState::default(),
+            ResolvedNodeDisplayMode::Schema,
+            &HashSet::new(),
+        );
 
         assert_eq!(projected.stage.fields.len(), FIELD_ROW_CAP);
         assert_eq!(projected.display.total_count, 120);
@@ -1250,12 +1638,13 @@ mod tests {
     #[test]
     fn wide_schema_projection_filters_and_expands_rows() {
         let stage = wide_stage(120);
-        let filtered = project_stage_fields(
+        let filtered = project_for_test(
             &stage,
             &FieldDisplayState {
                 visible_limit: FIELD_ROW_CAP,
                 query: "customer".to_string(),
             },
+            ResolvedNodeDisplayMode::Schema,
             &HashSet::new(),
         );
 
@@ -1266,12 +1655,13 @@ mod tests {
         assert_eq!(filtered.display.next_count, 0);
         assert_eq!(filtered.stage.field_index("field_099"), Some(0));
 
-        let paged = project_stage_fields(
+        let paged = project_for_test(
             &stage,
             &FieldDisplayState {
                 visible_limit: FIELD_ROW_CAP * 2,
                 query: String::new(),
             },
+            ResolvedNodeDisplayMode::Schema,
             &HashSet::new(),
         );
 
@@ -1282,12 +1672,13 @@ mod tests {
         assert_eq!(paged.stage.fields[FIELD_ROW_CAP].name, "field_024");
         assert_eq!(paged.stage.field_index("field_099"), None);
 
-        let fully_visible = project_stage_fields(
+        let fully_visible = project_for_test(
             &stage,
             &FieldDisplayState {
                 visible_limit: 120,
                 query: String::new(),
             },
+            ResolvedNodeDisplayMode::Schema,
             &HashSet::new(),
         );
 
@@ -1302,7 +1693,12 @@ mod tests {
     fn wide_schema_projection_appends_temporary_hidden_fields() {
         let stage = wide_stage(120);
         let temporary = HashSet::from(["field_099".to_string(), "field_010".to_string()]);
-        let projected = project_stage_fields(&stage, &FieldDisplayState::default(), &temporary);
+        let projected = project_for_test(
+            &stage,
+            &FieldDisplayState::default(),
+            ResolvedNodeDisplayMode::Schema,
+            &temporary,
+        );
 
         assert_eq!(projected.stage.fields.len(), FIELD_ROW_CAP + 1);
         assert_eq!(
@@ -1316,16 +1712,213 @@ mod tests {
         assert_eq!(projected.display.temporary_fields, vec!["field_099"]);
         assert_eq!(projected.display.hidden_count, 120 - FIELD_ROW_CAP);
 
-        let expanded = project_stage_fields(
+        let expanded = project_for_test(
             &stage,
             &FieldDisplayState {
                 visible_limit: 120,
                 query: String::new(),
             },
+            ResolvedNodeDisplayMode::Schema,
             &temporary,
         );
         assert_eq!(expanded.stage.fields.len(), 120);
         assert!(expanded.display.temporary_fields.is_empty());
+    }
+
+    #[test]
+    fn preview_projection_keeps_visible_active_rows_stable_and_appends_hidden_ones() {
+        let mut stage = wide_stage(0);
+        stage.kind = StageKind::Combine;
+        stage.fields = vec![
+            FieldRow {
+                name: "filler".to_string(),
+                kind: FieldKind::PassThrough,
+                ..Default::default()
+            },
+            FieldRow {
+                name: "declared".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            },
+            FieldRow {
+                name: "join_key".to_string(),
+                kind: FieldKind::PassThrough,
+                ..Default::default()
+            },
+            FieldRow {
+                name: "derived_total".to_string(),
+                kind: FieldKind::Emitted,
+                ..Default::default()
+            },
+            FieldRow {
+                name: "correlation".to_string(),
+                kind: FieldKind::Declared,
+                is_correlation_key: true,
+                ..Default::default()
+            },
+            FieldRow {
+                name: "extra".to_string(),
+                kind: FieldKind::PassThrough,
+                ..Default::default()
+            },
+            FieldRow {
+                name: "active_match".to_string(),
+                kind: FieldKind::PassThrough,
+                ..Default::default()
+            },
+        ];
+        let mut rank_signals = FieldRankSignals::default();
+        rank_signals
+            .operator_relevant_by_node
+            .entry(0)
+            .or_default()
+            .insert("join_key".to_string());
+        let temporary = HashSet::from(["active_match".to_string(), "filler".to_string()]);
+
+        let projected = project_stage_fields(
+            &stage,
+            &FieldDisplayState::default(),
+            FieldProjectionContext {
+                stage_index: 0,
+                mode: ResolvedNodeDisplayMode::Preview,
+                global_mode: GlobalNodeDisplayMode::Auto,
+                override_mode: None,
+                temporary_fields: &temporary,
+                rank_signals: &rank_signals,
+            },
+        );
+
+        let names = projected
+            .stage
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "correlation",
+                "derived_total",
+                "join_key",
+                "declared",
+                "filler",
+                "extra",
+                "active_match",
+            ]
+        );
+        assert_eq!(projected.stage.fields.len(), PREVIEW_FIELD_ROW_CAP + 1);
+        assert_eq!(projected.display.hidden_count, 1);
+        assert_eq!(projected.display.temporary_fields, vec!["active_match"]);
+    }
+
+    #[test]
+    fn compact_projection_hides_fields_but_temporarily_reveals_active_endpoint() {
+        let stage = wide_stage(30);
+        let temporary = HashSet::from(["field_029".to_string()]);
+        let projected = project_for_test(
+            &stage,
+            &FieldDisplayState::default(),
+            ResolvedNodeDisplayMode::Compact,
+            &temporary,
+        );
+
+        assert_eq!(projected.stage.fields.len(), 1);
+        assert_eq!(projected.stage.fields[0].name, "field_029");
+        assert_eq!(projected.stage.field_index("field_029"), Some(0));
+        assert_eq!(projected.display.hidden_count, 30);
+        assert_eq!(projected.display.temporary_fields, vec!["field_029"]);
+    }
+
+    #[test]
+    fn auto_mode_defaults_by_graph_size_schema_width_and_zoom() {
+        let small = GraphDisplayProfile {
+            node_count: 5,
+            max_field_count: 12,
+        };
+        let wide = GraphDisplayProfile {
+            node_count: 5,
+            max_field_count: FIELD_ROW_CAP + 1,
+        };
+        let large = GraphDisplayProfile {
+            node_count: 30,
+            max_field_count: 8,
+        };
+
+        assert_eq!(
+            resolve_node_display_mode(GlobalNodeDisplayMode::Auto, None, small, 1.0, false),
+            ResolvedNodeDisplayMode::Schema
+        );
+        assert_eq!(
+            resolve_node_display_mode(GlobalNodeDisplayMode::Auto, None, wide, 1.0, false),
+            ResolvedNodeDisplayMode::Preview
+        );
+        assert_eq!(
+            resolve_node_display_mode(GlobalNodeDisplayMode::Auto, None, large, 1.0, false),
+            ResolvedNodeDisplayMode::Compact
+        );
+        assert_eq!(
+            resolve_node_display_mode(GlobalNodeDisplayMode::Auto, None, large, 1.0, true),
+            ResolvedNodeDisplayMode::Preview
+        );
+        assert_eq!(
+            resolve_node_display_mode(GlobalNodeDisplayMode::Auto, None, small, 0.4, false),
+            ResolvedNodeDisplayMode::Compact
+        );
+        assert_eq!(
+            resolve_node_display_mode(GlobalNodeDisplayMode::Schema, None, large, 0.4, true),
+            ResolvedNodeDisplayMode::Schema
+        );
+        assert_eq!(
+            resolve_node_display_mode(
+                GlobalNodeDisplayMode::Auto,
+                Some(ResolvedNodeDisplayMode::Full),
+                large,
+                0.4,
+                true,
+            ),
+            ResolvedNodeDisplayMode::Full
+        );
+    }
+
+    #[test]
+    fn compact_projection_keeps_branch_geometry_synced_with_temporary_fields() {
+        let mut stage = wide_stage(4);
+        stage.branches = vec![RouteBranch {
+            name: "default".to_string(),
+            predicate: None,
+            is_default: true,
+        }];
+
+        let compact = project_for_test(
+            &stage,
+            &FieldDisplayState::default(),
+            ResolvedNodeDisplayMode::Compact,
+            &HashSet::new(),
+        );
+        assert!(compact.stage.fields.is_empty());
+        assert_eq!(compact.stage.branches.len(), 1);
+        let compact_branch_y = compact.stage.branch_anchor_out(0).1;
+
+        let temporary = HashSet::from(["field_003".to_string()]);
+        let revealed = project_for_test(
+            &stage,
+            &FieldDisplayState::default(),
+            ResolvedNodeDisplayMode::Compact,
+            &temporary,
+        );
+
+        assert_eq!(revealed.stage.fields.len(), 1);
+        assert_eq!(
+            revealed.stage.branch_anchor_out(0).1 - compact_branch_y,
+            FIELD_ROW_HEIGHT,
+            "branch anchors move by exactly one row when a temporary field appears"
+        );
+        assert_eq!(
+            rendered_card_height(&revealed.stage, &revealed.display)
+                - rendered_card_height(&compact.stage, &compact.display),
+            FIELD_ROW_HEIGHT * 2.0,
+            "rendered card height includes the temporary row plus its footer"
+        );
     }
 
     #[test]
@@ -1376,7 +1969,12 @@ mod tests {
             .stages
             .iter()
             .map(|stage| {
-                project_stage_fields(stage, &FieldDisplayState::default(), &HashSet::new())
+                project_for_test(
+                    stage,
+                    &FieldDisplayState::default(),
+                    ResolvedNodeDisplayMode::Schema,
+                    &HashSet::new(),
+                )
             })
             .collect::<Vec<_>>();
         let field_displays = projected
