@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::{
     COLUMN_CENTER_Y, CanvasConnectorPath, CanvasPoint, Connection, FIELD_HEADER_HEIGHT,
@@ -118,6 +118,7 @@ pub struct LayoutGraph {
 pub struct LayoutNode {
     pub stage_index: usize,
     pub id: String,
+    pub kind: StageKind,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -191,6 +192,22 @@ pub struct ConnectorPath {
     pub points: Vec<LayoutPoint>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LayoutMetrics {
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub rank_count: usize,
+    pub max_rank_height: usize,
+    pub total_rank_span: usize,
+    pub average_rank_span: f32,
+    pub max_rank_span: usize,
+    pub skip_rank_edge_count: usize,
+    pub source_skip_rank_edge_count: usize,
+    pub estimated_crossings: usize,
+    pub route_length: f32,
+    pub card_overlap_risk: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LayoutPoint {
     pub x: f32,
@@ -225,6 +242,24 @@ impl PortScore {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NodeOrderScore {
+    total: f32,
+    weight: f32,
+}
+
+impl NodeOrderScore {
+    fn average(self) -> f32 {
+        self.total / self.weight
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeOrderDirection {
+    Predecessors,
+    Successors,
+}
+
 impl LayoutGraph {
     pub fn from_pipeline_view(view: &PipelineView) -> Self {
         let nodes = view
@@ -243,9 +278,13 @@ impl LayoutGraph {
         edges.extend(view.role_edges.iter().map(role_edge));
 
         let mut graph = Self { nodes, edges };
-        graph.assign_longest_path_ranks();
-        graph.order_ports_for_crossing_reduction();
-        graph.assign_node_positions();
+        graph.assign_weighted_layered_ranks();
+        let mut node_layer_orders = graph.initial_node_layer_orders();
+        graph.order_ports_for_crossing_reduction(&node_layer_orders);
+        node_layer_orders = graph.minimize_node_crossings(node_layer_orders);
+        graph.order_ports_for_crossing_reduction(&node_layer_orders);
+        node_layer_orders = graph.minimize_node_crossings(node_layer_orders);
+        graph.assign_node_positions(&node_layer_orders);
         graph.route_orthogonal_lane_paths();
         graph
     }
@@ -258,14 +297,69 @@ impl LayoutGraph {
             .into_iter()
             .map(|rank| LayoutLayer {
                 rank,
-                nodes: self
-                    .nodes
-                    .iter()
-                    .filter(|node| node.rank == rank)
-                    .map(|node| node.stage_index)
-                    .collect(),
+                nodes: {
+                    let mut nodes = self
+                        .nodes
+                        .iter()
+                        .filter(|node| node.rank == rank)
+                        .collect::<Vec<_>>();
+                    nodes.sort_by(|a, b| {
+                        a.y.partial_cmp(&b.y)
+                            .unwrap_or(Ordering::Equal)
+                            .then_with(|| a.stage_index.cmp(&b.stage_index))
+                    });
+                    nodes.into_iter().map(|node| node.stage_index).collect()
+                },
             })
             .collect()
+    }
+
+    pub fn metrics(&self) -> LayoutMetrics {
+        let rank_heights = self.rank_heights();
+        let rank_count = rank_heights.len();
+        let max_rank_height = rank_heights.values().copied().max().unwrap_or(0);
+        let mut total_rank_span = 0;
+        let mut max_rank_span = 0;
+        let mut skip_rank_edge_count = 0;
+        let mut source_skip_rank_edge_count = 0;
+        for edge in &self.edges {
+            let span = rank_span(edge, &self.nodes);
+            total_rank_span += span;
+            max_rank_span = max_rank_span.max(span);
+            if span > 1 {
+                skip_rank_edge_count += 1;
+                if matches!(&self.nodes[edge.from_node].kind, StageKind::Source) {
+                    source_skip_rank_edge_count += 1;
+                }
+            }
+        }
+
+        LayoutMetrics {
+            node_count: self.nodes.len(),
+            edge_count: self.edges.len(),
+            rank_count,
+            max_rank_height,
+            total_rank_span,
+            average_rank_span: if self.edges.is_empty() {
+                0.0
+            } else {
+                total_rank_span as f32 / self.edges.len() as f32
+            },
+            max_rank_span,
+            skip_rank_edge_count,
+            source_skip_rank_edge_count,
+            estimated_crossings: self.estimated_crossings(),
+            route_length: self.total_route_length(),
+            card_overlap_risk: self.card_overlap_risk(),
+        }
+    }
+
+    fn assign_weighted_layered_ranks(&mut self) {
+        self.assign_longest_path_ranks();
+        self.rank_sources_by_first_use();
+        self.repair_downstream_ranks();
+        self.relax_ranks_for_short_edges();
+        self.repair_downstream_ranks();
     }
 
     fn assign_longest_path_ranks(&mut self) {
@@ -287,6 +381,117 @@ impl LayoutGraph {
         }
     }
 
+    fn rank_sources_by_first_use(&mut self) {
+        for node_index in 0..self.nodes.len() {
+            if !matches!(&self.nodes[node_index].kind, StageKind::Source) {
+                continue;
+            }
+            let first_consumer_rank = self
+                .edges
+                .iter()
+                .filter(|edge| edge.from_node == node_index)
+                .map(|edge| self.nodes[edge.to_node].rank)
+                .min();
+            if let Some(rank) = first_consumer_rank {
+                self.nodes[node_index].rank = rank.saturating_sub(1);
+            }
+        }
+    }
+
+    fn repair_downstream_ranks(&mut self) {
+        for _ in 0..self.nodes.len() {
+            let mut changed = false;
+            for edge in &self.edges {
+                let next = self.nodes[edge.from_node].rank + 1;
+                if self.nodes[edge.to_node].rank < next {
+                    self.nodes[edge.to_node].rank = next;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn relax_ranks_for_short_edges(&mut self) {
+        const RANK_RELAX_PASSES: usize = 3;
+
+        for _ in 0..RANK_RELAX_PASSES {
+            let mut changed = false;
+            let current_ranks = self.nodes.iter().map(|node| node.rank).collect::<Vec<_>>();
+            let mut next_ranks = current_ranks.clone();
+
+            for node_index in 0..self.nodes.len() {
+                let min_rank = self
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.to_node == node_index)
+                    .map(|edge| current_ranks[edge.from_node] + 1)
+                    .max()
+                    .unwrap_or(0);
+                let max_rank = self
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from_node == node_index)
+                    .map(|edge| current_ranks[edge.to_node].saturating_sub(1))
+                    .min()
+                    .unwrap_or(current_ranks[node_index]);
+                if min_rank > max_rank {
+                    continue;
+                }
+
+                let current_cost =
+                    self.incident_rank_cost(node_index, current_ranks[node_index], &current_ranks);
+                let mut best_rank = current_ranks[node_index];
+                let mut best_cost = current_cost;
+                for candidate in min_rank..=max_rank {
+                    let cost = self.incident_rank_cost(node_index, candidate, &current_ranks);
+                    if cost < best_cost
+                        || (cost == best_cost
+                            && candidate.abs_diff(current_ranks[node_index])
+                                < best_rank.abs_diff(current_ranks[node_index]))
+                    {
+                        best_rank = candidate;
+                        best_cost = cost;
+                    }
+                }
+
+                if best_rank != current_ranks[node_index] && best_cost < current_cost {
+                    next_ranks[node_index] = best_rank;
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+            for (node, rank) in self.nodes.iter_mut().zip(next_ranks) {
+                node.rank = rank;
+            }
+        }
+    }
+
+    fn incident_rank_cost(
+        &self,
+        node_index: usize,
+        candidate_rank: usize,
+        ranks: &[usize],
+    ) -> u128 {
+        let mut cost = 0_u128;
+        for edge in &self.edges {
+            let weight = edge_rank_weight(edge.kind) as u128;
+            if edge.from_node == node_index {
+                let span = ranks[edge.to_node].saturating_sub(candidate_rank);
+                cost += weight * (span as u128) * (span as u128);
+            } else if edge.to_node == node_index {
+                let span = candidate_rank.saturating_sub(ranks[edge.from_node]);
+                cost += weight * (span as u128) * (span as u128);
+            }
+        }
+        cost
+    }
+
     /// Run a bounded, deterministic port-ordering pass.
     ///
     /// Only field-row ports are crossing-reordered. Route branch ports keep
@@ -294,10 +499,9 @@ impl LayoutGraph {
     /// outputs keep their authored side-output identity. This preserves the
     /// semantic row order the current canvas exposes while still letting field
     /// lineage ports move toward their incident edges before renderer migration.
-    fn order_ports_for_crossing_reduction(&mut self) {
+    fn order_ports_for_crossing_reduction(&mut self, node_layer_orders: &[usize]) {
         let base_orders = self.port_order_map();
-        let node_layer_orders = self.node_layer_orders();
-        let scores = self.port_scores(&base_orders, &node_layer_orders);
+        let scores = self.port_scores(&base_orders, node_layer_orders);
 
         for (node_index, node) in self.nodes.iter_mut().enumerate() {
             order_port_side(
@@ -310,7 +514,7 @@ impl LayoutGraph {
         }
 
         let output_ordered = self.port_order_map();
-        let input_scores = self.port_scores(&output_ordered, &node_layer_orders);
+        let input_scores = self.port_scores(&output_ordered, node_layer_orders);
         for (node_index, node) in self.nodes.iter_mut().enumerate() {
             order_port_side(
                 node_index,
@@ -341,8 +545,8 @@ impl LayoutGraph {
         orders
     }
 
-    fn node_layer_orders(&self) -> Vec<usize> {
-        let mut by_rank: HashMap<usize, Vec<usize>> = HashMap::new();
+    fn initial_node_layer_orders(&self) -> Vec<usize> {
+        let mut by_rank: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (node_index, node) in self.nodes.iter().enumerate() {
             by_rank.entry(node.rank).or_default().push(node_index);
         }
@@ -395,10 +599,175 @@ impl LayoutGraph {
         scores
     }
 
-    fn assign_node_positions(&mut self) {
+    fn minimize_node_crossings(&self, initial_orders: Vec<usize>) -> Vec<usize> {
+        const NODE_ORDER_SWEEPS: usize = 6;
+
+        let ranks = self.sorted_ranks();
+        let mut orders = initial_orders;
+        for _ in 0..NODE_ORDER_SWEEPS {
+            let previous = orders.clone();
+
+            for &rank in ranks.iter().skip(1) {
+                self.reorder_rank_by_neighbor_scores(
+                    rank,
+                    NodeOrderDirection::Predecessors,
+                    &mut orders,
+                );
+            }
+            for &rank in ranks.iter().rev().skip(1) {
+                self.reorder_rank_by_neighbor_scores(
+                    rank,
+                    NodeOrderDirection::Successors,
+                    &mut orders,
+                );
+            }
+
+            if orders == previous {
+                break;
+            }
+        }
+        orders
+    }
+
+    fn reorder_rank_by_neighbor_scores(
+        &self,
+        rank: usize,
+        direction: NodeOrderDirection,
+        orders: &mut [usize],
+    ) {
+        let mut node_indices = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(node_index, node)| (node.rank == rank).then_some(node_index))
+            .collect::<Vec<_>>();
+        node_indices.sort_by(|&a, &b| {
+            compare_optional_node_scores(
+                self.node_order_score(a, direction, orders),
+                self.node_order_score(b, direction, orders),
+            )
+            .then_with(|| orders[a].cmp(&orders[b]))
+            .then_with(|| self.nodes[a].stage_index.cmp(&self.nodes[b].stage_index))
+        });
+
+        for (order, node_index) in node_indices.into_iter().enumerate() {
+            orders[node_index] = order;
+        }
+    }
+
+    fn node_order_score(
+        &self,
+        node_index: usize,
+        direction: NodeOrderDirection,
+        orders: &[usize],
+    ) -> Option<NodeOrderScore> {
+        let mut score = NodeOrderScore {
+            total: 0.0,
+            weight: 0.0,
+        };
+
+        for edge in &self.edges {
+            let (neighbor, port_side, port_id) = match direction {
+                NodeOrderDirection::Predecessors if edge.to_node == node_index => (
+                    edge.from_node,
+                    LayoutPortSide::Output,
+                    edge.from_port.as_str(),
+                ),
+                NodeOrderDirection::Successors if edge.from_node == node_index => {
+                    (edge.to_node, LayoutPortSide::Input, edge.to_port.as_str())
+                }
+                _ => continue,
+            };
+            let weight = edge_order_weight(edge.kind);
+            score.total +=
+                endpoint_order_score(&self.nodes[neighbor], neighbor, port_side, port_id, orders)
+                    * weight;
+            score.weight += weight;
+        }
+
+        (score.weight > 0.0).then_some(score)
+    }
+
+    fn sorted_ranks(&self) -> Vec<usize> {
         let mut ranks: Vec<usize> = self.nodes.iter().map(|node| node.rank).collect();
         ranks.sort_unstable();
         ranks.dedup();
+        ranks
+    }
+
+    fn rank_heights(&self) -> BTreeMap<usize, usize> {
+        let mut heights = BTreeMap::new();
+        for node in &self.nodes {
+            *heights.entry(node.rank).or_insert(0) += 1;
+        }
+        heights
+    }
+
+    fn estimated_crossings(&self) -> usize {
+        let mut edge_groups: HashMap<(usize, usize), Vec<(f32, f32)>> = HashMap::new();
+        for edge in &self.edges {
+            if !matches!(
+                edge.kind,
+                LayoutEdgeKind::Node | LayoutEdgeKind::RouteBranch | LayoutEdgeKind::CullSideOutput
+            ) {
+                continue;
+            }
+            let from = &self.nodes[edge.from_node];
+            let to = &self.nodes[edge.to_node];
+            if to.rank <= from.rank {
+                continue;
+            }
+            let start = port_anchor(from, &edge.from_port, LayoutPortSide::Output);
+            let end = port_anchor(to, &edge.to_port, LayoutPortSide::Input);
+            edge_groups
+                .entry((from.rank, to.rank))
+                .or_default()
+                .push((start.y, end.y));
+        }
+
+        let mut crossings = 0;
+        for endpoints in edge_groups.values() {
+            for (idx, &(a_start, a_end)) in endpoints.iter().enumerate() {
+                for &(b_start, b_end) in &endpoints[idx + 1..] {
+                    if (a_start < b_start && a_end > b_end) || (a_start > b_start && a_end < b_end)
+                    {
+                        crossings += 1;
+                    }
+                }
+            }
+        }
+        crossings
+    }
+
+    fn total_route_length(&self) -> f32 {
+        self.edges
+            .iter()
+            .map(|edge| {
+                edge.path
+                    .points
+                    .windows(2)
+                    .map(|points| {
+                        (points[1].x - points[0].x).abs() + (points[1].y - points[0].y).abs()
+                    })
+                    .sum::<f32>()
+            })
+            .sum()
+    }
+
+    fn card_overlap_risk(&self) -> usize {
+        let mut overlaps = 0;
+        for (idx, a) in self.nodes.iter().enumerate() {
+            for b in &self.nodes[idx + 1..] {
+                if rects_overlap(a, b) {
+                    overlaps += 1;
+                }
+            }
+        }
+        overlaps
+    }
+
+    fn assign_node_positions(&mut self, node_layer_orders: &[usize]) {
+        let ranks = self.sorted_ranks();
 
         for rank in ranks {
             let mut node_indices = self
@@ -407,7 +776,15 @@ impl LayoutGraph {
                 .enumerate()
                 .filter_map(|(node_index, node)| (node.rank == rank).then_some(node_index))
                 .collect::<Vec<_>>();
-            node_indices.sort_unstable_by_key(|&node_index| self.nodes[node_index].stage_index);
+            node_indices.sort_unstable_by_key(|&node_index| {
+                (
+                    node_layer_orders
+                        .get(node_index)
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                    self.nodes[node_index].stage_index,
+                )
+            });
 
             let x = rank as f32 * (NODE_WIDTH + NODE_GAP);
             let mut y = 0.0;
@@ -550,6 +927,7 @@ impl LayoutNode {
         Self {
             stage_index,
             id: stage.id.clone(),
+            kind: stage.kind.clone(),
             x: 0.0,
             y: 0.0,
             width: NODE_WIDTH,
@@ -683,6 +1061,72 @@ fn role_edge(edge: &RoleEdge) -> LayoutEdge {
         kind: LayoutEdgeKind::AggregateGroupKey,
         path: ConnectorPath::default(),
     }
+}
+
+fn compare_optional_node_scores(a: Option<NodeOrderScore>, b: Option<NodeOrderScore>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => a
+            .average()
+            .partial_cmp(&b.average())
+            .unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn endpoint_order_score(
+    node: &LayoutNode,
+    node_index: usize,
+    side: LayoutPortSide,
+    port_id: &str,
+    node_layer_orders: &[usize],
+) -> f32 {
+    const NODE_SCORE_STRIDE: f32 = 10_000.0;
+
+    let ports = match side {
+        LayoutPortSide::Input => &node.input_ports,
+        LayoutPortSide::Output => &node.output_ports,
+    };
+    let port_order = ports
+        .iter()
+        .find(|port| port.id == port_id)
+        .map(|port| port.order)
+        .unwrap_or(0);
+    node_layer_orders.get(node_index).copied().unwrap_or(0) as f32 * NODE_SCORE_STRIDE
+        + port_order as f32
+}
+
+fn edge_rank_weight(kind: LayoutEdgeKind) -> usize {
+    match kind {
+        LayoutEdgeKind::Node => 64,
+        LayoutEdgeKind::RouteBranch | LayoutEdgeKind::CullSideOutput => 48,
+        LayoutEdgeKind::AggregateGroupKey => 24,
+        LayoutEdgeKind::Field => 16,
+    }
+}
+
+fn edge_order_weight(kind: LayoutEdgeKind) -> f32 {
+    edge_rank_weight(kind) as f32
+}
+
+fn rank_span(edge: &LayoutEdge, nodes: &[LayoutNode]) -> usize {
+    nodes[edge.to_node]
+        .rank
+        .saturating_sub(nodes[edge.from_node].rank)
+}
+
+fn rects_overlap(a: &LayoutNode, b: &LayoutNode) -> bool {
+    let a_left = a.x;
+    let a_right = a.x + a.width;
+    let a_top = a.y;
+    let a_bottom = a.y + a.height;
+    let b_left = b.x;
+    let b_right = b.x + b.width;
+    let b_top = b.y;
+    let b_bottom = b.y + b.height;
+
+    a_left < b_right && b_left < a_right && a_top < b_bottom && b_top < a_bottom
 }
 
 fn order_port_side(
@@ -1187,7 +1631,9 @@ mod tests {
     use crate::pipeline_view::{
         Connection, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, PipelineView, RoleEdge,
         RouteBranch, StageKind, StagePortKind, StagePortRow, StagePortSide, StageView,
+        derive_pipeline_view,
     };
+    use clinker_plan::config::parse_config;
 
     fn stage(id: &str) -> StageView {
         StageView {
@@ -1225,6 +1671,104 @@ mod tests {
         let mut ports = node.input_ports.iter().collect::<Vec<_>>();
         ports.sort_unstable_by_key(|port| port.order);
         ports.into_iter().map(|port| port.id.as_str()).collect()
+    }
+
+    fn fixture_graph(yaml: &str) -> LayoutGraph {
+        let config = parse_config(yaml).expect("fixture pipeline parses");
+        let view = derive_pipeline_view(&config);
+        LayoutGraph::from_pipeline_view(&view)
+    }
+
+    fn legacy_longest_path_graph(yaml: &str) -> LayoutGraph {
+        let config = parse_config(yaml).expect("fixture pipeline parses");
+        let view = derive_pipeline_view(&config);
+        let nodes = view
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(stage_index, stage)| LayoutNode::from_stage(stage_index, stage))
+            .collect();
+        let mut edges = Vec::new();
+        edges.extend(
+            view.connections
+                .iter()
+                .map(|connection| connection_edge(connection, &view.stages)),
+        );
+        edges.extend(view.field_edges.iter().map(field_edge));
+        edges.extend(view.role_edges.iter().map(role_edge));
+
+        let mut graph = LayoutGraph { nodes, edges };
+        graph.assign_longest_path_ranks();
+        let node_layer_orders = graph.initial_node_layer_orders();
+        graph.order_ports_for_crossing_reduction(&node_layer_orders);
+        graph.assign_node_positions(&node_layer_orders);
+        graph.route_orthogonal_lane_paths();
+        graph
+    }
+
+    fn rank_of(graph: &LayoutGraph, id: &str) -> usize {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| node.rank)
+            .unwrap_or_else(|| panic!("missing layout node {id}"))
+    }
+
+    fn assert_edges_flow_left_to_right(graph: &LayoutGraph) {
+        for edge in &graph.edges {
+            assert!(
+                graph.nodes[edge.to_node].rank > graph.nodes[edge.from_node].rank,
+                "edge {:?} should flow left-to-right: {}({}) -> {}({})",
+                edge.kind,
+                graph.nodes[edge.from_node].id,
+                graph.nodes[edge.from_node].rank,
+                graph.nodes[edge.to_node].id,
+                graph.nodes[edge.to_node].rank
+            );
+        }
+    }
+
+    fn assert_sources_left_of_consumers(graph: &LayoutGraph) {
+        for edge in &graph.edges {
+            if matches!(&graph.nodes[edge.from_node].kind, StageKind::Source) {
+                assert!(
+                    graph.nodes[edge.from_node].rank < graph.nodes[edge.to_node].rank,
+                    "source {} should remain left of consumer {}",
+                    graph.nodes[edge.from_node].id,
+                    graph.nodes[edge.to_node].id
+                );
+            }
+        }
+    }
+
+    fn assert_benchmark_targets(
+        yaml: &str,
+        legacy_max_span: usize,
+        target_max_span: usize,
+        crossing_baseline: usize,
+    ) {
+        let legacy = legacy_longest_path_graph(yaml);
+        let legacy_metrics = legacy.metrics();
+        assert_eq!(legacy_metrics.max_rank_span, legacy_max_span);
+
+        let graph = fixture_graph(yaml);
+        let metrics = graph.metrics();
+        assert!(
+            metrics.max_rank_span <= target_max_span,
+            "expected max rank span <= {target_max_span}, got {metrics:?}"
+        );
+        assert!(
+            metrics.source_skip_rank_edge_count < legacy_metrics.source_skip_rank_edge_count,
+            "source skip-rank edges should decrease from legacy metrics {legacy_metrics:?} to {metrics:?}"
+        );
+        assert!(
+            metrics.estimated_crossings <= crossing_baseline,
+            "estimated crossings should not exceed baseline {crossing_baseline}: {metrics:?}"
+        );
+        assert_eq!(metrics.card_overlap_risk, 0);
+        assert_edges_flow_left_to_right(&graph);
+        assert_sources_left_of_consumers(&graph);
     }
 
     #[test]
@@ -1282,6 +1826,63 @@ mod tests {
     }
 
     #[test]
+    fn branch_fan_out_orders_consumers_by_branch_port_order() {
+        let mut route = stage("route");
+        route.kind = StageKind::Route;
+        route.branches = vec![
+            RouteBranch {
+                name: "gold".to_string(),
+                predicate: Some("tier == 'gold'".to_string()),
+                is_default: false,
+            },
+            RouteBranch {
+                name: "silver".to_string(),
+                predicate: Some("tier == 'silver'".to_string()),
+                is_default: false,
+            },
+            RouteBranch {
+                name: "standard".to_string(),
+                predicate: None,
+                is_default: true,
+            },
+        ];
+        let view = PipelineView {
+            stages: vec![
+                route,
+                stage("standard_sink"),
+                stage("silver_sink"),
+                stage("gold_sink"),
+            ],
+            connections: vec![
+                Connection {
+                    from: 0,
+                    to: 3,
+                    from_branch: Some(0),
+                },
+                Connection {
+                    from: 0,
+                    to: 2,
+                    from_branch: Some(1),
+                },
+                Connection {
+                    from: 0,
+                    to: 1,
+                    from_branch: Some(2),
+                },
+            ],
+            connection_paths: Vec::new(),
+            field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
+        };
+
+        let graph = LayoutGraph::from_pipeline_view(&view);
+
+        assert_eq!(graph.layers()[1].nodes, vec![3, 2, 1]);
+    }
+
+    #[test]
     fn fan_in_places_consumer_after_all_inputs() {
         let view = PipelineView {
             stages: vec![stage("left"), stage("right"), stage("join")],
@@ -1307,6 +1908,64 @@ mod tests {
             graph.edges[0].path.points.last(),
             graph.edges[1].path.points.last()
         );
+    }
+
+    #[test]
+    fn sources_rank_to_first_use_instead_of_dedicated_zero_column() {
+        let yaml = r#"
+pipeline:
+  name: late_source_first_use
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./orders.csv
+      schema:
+        - { name: id, type: string }
+  - type: source
+    name: products
+    config:
+      name: products
+      type: csv
+      path: ./products.csv
+      schema:
+        - { name: id, type: string }
+  - type: transform
+    name: clean
+    input: orders
+    config:
+      cxl: |
+        emit id = id
+  - type: transform
+    name: normalized
+    input: clean
+    config:
+      cxl: |
+        emit id = id
+  - type: combine
+    name: joined
+    input:
+      orders: normalized
+      products: products
+    config:
+      where: "orders.id == products.id"
+      match: first
+      on_miss: null_fields
+      cxl: |
+        emit id = orders.id
+      propagate_ck: driver
+"#;
+        let graph = fixture_graph(yaml);
+
+        assert_eq!(rank_of(&graph, "orders"), 0);
+        assert_eq!(rank_of(&graph, "clean"), 1);
+        assert_eq!(rank_of(&graph, "normalized"), 2);
+        assert_eq!(rank_of(&graph, "products"), 2);
+        assert_eq!(rank_of(&graph, "joined"), 3);
+        assert_edges_flow_left_to_right(&graph);
+        assert_sources_left_of_consumers(&graph);
     }
 
     #[test]
@@ -1961,6 +2620,40 @@ mod tests {
                 y: result.view.stages[1].role_port_anchor_in(0).1,
             })
         );
+    }
+
+    #[test]
+    fn order_fulfillment_benchmark_shortens_source_edges() {
+        assert_benchmark_targets(
+            include_str!("../../../../examples/pipelines/order_fulfillment.yaml"),
+            2,
+            1,
+            0,
+        );
+    }
+
+    #[test]
+    fn source_reuse_benchmark_shortens_reused_late_sources() {
+        let yaml =
+            include_str!("../../../../examples/pipelines/layout_benchmark_source_reuse.yaml");
+        assert_benchmark_targets(yaml, 7, 2, 2);
+
+        let graph = fixture_graph(yaml);
+        assert_eq!(rank_of(&graph, "orders"), 0);
+        assert_eq!(rank_of(&graph, "products"), 2);
+        assert_eq!(rank_of(&graph, "audit_events"), 6);
+    }
+
+    #[test]
+    fn order_lifecycle_benchmark_shortens_late_source_fan_in() {
+        let yaml =
+            include_str!("../../../../examples/pipelines/layout_benchmark_order_lifecycle.yaml");
+        assert_benchmark_targets(yaml, 8, 1, 8);
+
+        let graph = fixture_graph(yaml);
+        assert_eq!(rank_of(&graph, "orders"), 0);
+        assert_eq!(rank_of(&graph, "products"), 4);
+        assert_eq!(rank_of(&graph, "audit_events"), 7);
     }
 
     #[test]
