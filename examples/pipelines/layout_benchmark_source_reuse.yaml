@@ -1,0 +1,165 @@
+pipeline:
+  name: layout_benchmark_source_reuse
+
+# Canvas layout benchmark: one catalog source is reused by branch-local combines
+# after a route, while a second audit source is not consumed until the final
+# reporting step. The current source-at-column-zero layout makes those support
+# sources produce long skip-rank edges.
+
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./data/orders.csv
+      options:
+        has_header: true
+      schema:
+        - { name: order_id, type: string }
+        - { name: order_date, type: string }
+        - { name: quantity, type: int }
+        - { name: unit_price, type: float }
+        - { name: product_code, type: string }
+        - { name: priority_level, type: string }
+
+  - type: source
+    name: products
+    config:
+      name: products
+      type: csv
+      path: ./data/products.csv
+      options:
+        has_header: true
+      schema:
+        - { name: product_code, type: string }
+        - { name: product_name, type: string }
+        - { name: category, type: string }
+        - { name: weight_kg, type: string }
+
+  - type: source
+    name: audit_events
+    config:
+      name: audit_events
+      type: csv
+      path: ./data/audit_events.csv
+      options:
+        has_header: true
+      schema:
+        - { name: order_id, type: string }
+        - { name: event_id, type: string }
+        - { name: actor, type: string }
+        - { name: event_type, type: string }
+
+  - type: transform
+    name: order_metrics
+    input: orders
+    config:
+      cxl: |
+        emit order_id = order_id
+        emit order_ref = "ORD-" + order_id.to_string().pad_left(3, "0")
+        emit order_date = order_date
+        emit quantity = quantity
+        emit unit_price = unit_price
+        emit product_code = product_code
+        emit priority_level = priority_level
+        emit line_total = quantity * unit_price
+
+  - type: route
+    name: classify_orders
+    input: order_metrics
+    config:
+      mode: exclusive
+      conditions:
+        priority: 'priority_level == "urgent" or priority_level == "high"'
+      default: standard
+
+  - type: combine
+    name: priority_product_lookup
+    input:
+      priority_orders: classify_orders.priority
+      products: products
+    config:
+      where: "priority_orders.product_code == products.product_code"
+      match: first
+      on_miss: null_fields
+      cxl: |
+        emit order_id = priority_orders.order_id
+        emit order_ref = priority_orders.order_ref
+        emit product_code = priority_orders.product_code
+        emit category = products.category
+        emit line_total = priority_orders.line_total
+        emit lane = "priority"
+      propagate_ck: driver
+
+  - type: transform
+    name: standard_precheck
+    input: classify_orders.standard
+    config:
+      cxl: |
+        emit order_id = order_id
+        emit order_ref = order_ref
+        emit product_code = product_code
+        emit line_total = line_total
+        emit lane = "standard"
+
+  - type: combine
+    name: standard_product_lookup
+    input:
+      standard_orders: standard_precheck
+      products: products
+    config:
+      where: "standard_orders.product_code == products.product_code"
+      match: first
+      on_miss: null_fields
+      cxl: |
+        emit order_id = standard_orders.order_id
+        emit order_ref = standard_orders.order_ref
+        emit product_code = standard_orders.product_code
+        emit category = products.category
+        emit line_total = standard_orders.line_total
+        emit lane = standard_orders.lane
+      propagate_ck: driver
+
+  - type: merge
+    name: enriched_orders
+    inputs: [priority_product_lookup, standard_product_lookup]
+    config:
+      mode: concat
+
+  - type: aggregate
+    name: lane_category_totals
+    input: enriched_orders
+    config:
+      group_by: [lane, category]
+      cxl: |
+        emit total_sales = sum(line_total)
+        emit order_count = count(*)
+
+  - type: combine
+    name: audited_totals
+    input:
+      totals: lane_category_totals
+      audit: audit_events
+    config:
+      where: "totals.lane == audit.actor"
+      match: first
+      on_miss: null_fields
+      cxl: |
+        emit lane = totals.lane
+        emit category = totals.category
+        emit total_sales = totals.total_sales
+        emit order_count = totals.order_count
+        emit audit_event = audit.event_id
+      propagate_ck: driver
+
+  - type: output
+    name: totals
+    input: audited_totals
+    config:
+      name: totals
+      type: csv
+      path: ./output/layout_reuse_totals.csv
+
+error_handling:
+  strategy: continue

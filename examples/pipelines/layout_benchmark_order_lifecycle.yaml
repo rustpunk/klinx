@@ -1,0 +1,244 @@
+pipeline:
+  name: layout_benchmark_order_lifecycle
+
+# Canvas layout benchmark: intentionally combines late source use, route/cull
+# ports, branch rejoin, grouped operators, envelope framing, and multiple sinks.
+# It is meant to expose long source-to-use edges and rank-ordering problems in
+# the DAG canvas rather than to model a minimal production pipeline.
+
+nodes:
+  - type: source
+    name: orders
+    config:
+      name: orders
+      type: csv
+      path: ./data/orders.csv
+      options:
+        has_header: true
+      schema:
+        - { name: order_id, type: string }
+        - { name: order_date, type: string }
+        - { name: quantity, type: int }
+        - { name: unit_price, type: float }
+        - { name: product_code, type: string }
+        - { name: priority_level, type: string }
+
+  - type: source
+    name: products
+    config:
+      name: products
+      type: csv
+      path: ./data/products.csv
+      options:
+        has_header: true
+      schema:
+        - { name: product_code, type: string }
+        - { name: product_name, type: string }
+        - { name: category, type: string }
+        - { name: weight_kg, type: string }
+
+  - type: source
+    name: audit_events
+    config:
+      name: audit_events
+      type: csv
+      path: ./data/audit_events.csv
+      options:
+        has_header: true
+      schema:
+        - { name: order_id, type: string }
+        - { name: event_id, type: string }
+        - { name: actor, type: string }
+        - { name: event_type, type: string }
+
+  - type: transform
+    name: normalize_orders
+    input: orders
+    config:
+      cxl: |
+        emit order_id = order_id
+        emit order_ref = "ORD-" + order_id.to_string().pad_left(3, "0")
+        emit order_date = order_date
+        emit quantity = quantity
+        emit unit_price = unit_price
+        emit product_code = product_code
+        emit priority_level = priority_level
+        emit line_total = quantity * unit_price
+        emit review_state = "new"
+
+  - type: route
+    name: split_priority
+    input: normalize_orders
+    config:
+      mode: exclusive
+      conditions:
+        urgent: 'priority_level == "urgent" or priority_level == "high"'
+        high_value: "line_total >= 500"
+      default: standard
+
+  - type: transform
+    name: priority_work
+    input: split_priority.urgent
+    config:
+      cxl: |
+        emit order_id = order_id
+        emit order_ref = order_ref
+        emit order_date = order_date
+        emit quantity = quantity
+        emit unit_price = unit_price
+        emit product_code = product_code
+        emit priority_level = priority_level
+        emit line_total = line_total
+        emit review_state = "priority"
+
+  - type: transform
+    name: high_value_work
+    input: split_priority.high_value
+    config:
+      cxl: |
+        emit order_id = order_id
+        emit order_ref = order_ref
+        emit order_date = order_date
+        emit quantity = quantity
+        emit unit_price = unit_price
+        emit product_code = product_code
+        emit priority_level = priority_level
+        emit line_total = line_total
+        emit review_state = "high_value"
+
+  - type: transform
+    name: standard_work
+    input: split_priority.standard
+    config:
+      cxl: |
+        emit order_id = order_id
+        emit order_ref = order_ref
+        emit order_date = order_date
+        emit quantity = quantity
+        emit unit_price = unit_price
+        emit product_code = product_code
+        emit priority_level = priority_level
+        emit line_total = line_total
+        emit review_state = "standard"
+
+  - type: merge
+    name: routed_orders
+    inputs: [priority_work, high_value_work, standard_work]
+    config:
+      mode: concat
+
+  - type: combine
+    name: product_enriched
+    input:
+      orders: routed_orders
+      products: products
+    config:
+      where: "orders.product_code == products.product_code"
+      match: first
+      on_miss: null_fields
+      cxl: |
+        emit order_id = orders.order_id
+        emit order_ref = orders.order_ref
+        emit order_date = orders.order_date
+        emit quantity = orders.quantity
+        emit unit_price = orders.unit_price
+        emit product_code = orders.product_code
+        emit priority_level = orders.priority_level
+        emit line_total = orders.line_total
+        emit review_state = orders.review_state
+        emit product_name = products.product_name
+        emit category = products.category
+        emit weight_kg = products.weight_kg
+      propagate_ck: driver
+
+  - type: reshape
+    name: synthesize_review_rows
+    input: product_enriched
+    config:
+      partition_by: [order_id]
+      order_by:
+        - { field: order_date, order: asc }
+      rules:
+        - name: review_high_total
+          when: "line_total >= 500"
+          mutate:
+            set:
+              review_state: "'reviewed'"
+          synthesize:
+            copy_from: trigger
+            overrides:
+              review_state: "'synthetic_review'"
+
+  - type: cull
+    name: cull_manual_review
+    input: synthesize_review_rows
+    config:
+      partition_by: [order_id]
+      removed_to: manual_review
+      rules:
+        - name: too_many_rows
+          drop_group_when: "count(*) > 2"
+
+  - type: combine
+    name: audit_joined
+    input:
+      orders: cull_manual_review
+      audit: audit_events
+    config:
+      where: "orders.order_ref == audit.order_id"
+      match: first
+      on_miss: null_fields
+      cxl: |
+        emit order_id = orders.order_id
+        emit order_ref = orders.order_ref
+        emit order_date = orders.order_date
+        emit product_code = orders.product_code
+        emit category = orders.category
+        emit line_total = orders.line_total
+        emit review_state = orders.review_state
+        emit event_id = audit.event_id
+        emit actor = audit.actor
+        emit event_type = audit.event_type
+      propagate_ck: driver
+
+  - type: aggregate
+    name: category_totals
+    input: product_enriched
+    config:
+      group_by: [category]
+      cxl: |
+        emit total_sales = sum(line_total)
+        emit order_count = count(*)
+
+  - type: envelope
+    name: framed_orders
+    body: audit_joined
+    config:
+      strategy: preserve
+
+  - type: output
+    name: clean_orders
+    input: framed_orders
+    config:
+      name: clean_orders
+      type: csv
+      path: ./output/layout_clean_orders.csv
+
+  - type: output
+    name: review_orders
+    input: cull_manual_review.manual_review
+    config:
+      name: review_orders
+      type: csv
+      path: ./output/layout_review_orders.csv
+
+  - type: output
+    name: category_report
+    input: category_totals
+    config:
+      name: category_report
+      type: csv
+      path: ./output/layout_category_report.csv
+
+error_handling:
+  strategy: continue

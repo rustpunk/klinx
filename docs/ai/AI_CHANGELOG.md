@@ -64,6 +64,14 @@ When architecture changes, append a dated entry with:
 - `docs/ai/30_DESIGN_RULES.md` now records the optional path-vector contract.
 - Verification: `cargo fmt --all --check`, `cargo test -p klinx connector`, `cargo test -p klinx canvas`, `cargo test -p klinx`, `cargo clippy -p klinx -- -D warnings`, `cargo clippy -p klinx --all-targets -- -D warnings`, and `git diff --check`.
 
+## 2026-06-17: Source First-Use Port-Aware Layout Ranking
+
+- `pipeline_view/layout_model.rs` now ranks source nodes immediately before their earliest consumer, then repairs downstream ranks so every edge still satisfies `rank[to] > rank[from]`.
+- The port-aware layout path adds bounded local rank relaxation and two-sided predecessor/successor node-order sweeps with weighted semantic port scores. Node-level dataflow carries the highest rank/order weight, route/cull branch ports stay fixed in authored/default order, aggregate role ports remain input ports, and field ports remain the only reorderable row ports.
+- Added `LayoutMetrics` for pure Rust layout checks: node/edge/rank counts, rank spans, skip-rank source edges, structural crossing estimates, route length, and card-overlap risk.
+- Added regression coverage for `order_fulfillment.yaml`, `layout_benchmark_source_reuse.yaml`, and `layout_benchmark_order_lifecycle.yaml`; benchmark max rank spans now target `<= 1`, `<= 2`, and `<= 1` respectively while reducing source skip-rank edges.
+- Verification: `CARGO_TARGET_DIR=<scratch-target> cargo test -p klinx layout_model -- --nocapture`, `CARGO_TARGET_DIR=<scratch-target> cargo test -p klinx pipeline_view`, `cargo fmt --all --check`, `git diff --check`, and `CARGO_TARGET_DIR=<scratch-target> cargo build --package klinx`.
+
 ## 2026-06-17: Aggregate Raw Field-Lineage Rows
 
 - Raw `pipeline_view` field-lineage derivation now treats Aggregate nodes as grouped output records: de-duplicated `group_by` keys first, then aggregate emit targets.
