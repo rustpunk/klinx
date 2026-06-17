@@ -565,6 +565,8 @@ mod tests {
             "hopping_sliding_5m_1h.yaml",
             "invoice_daily_rollup.yaml",
             "invoices.yaml",
+            "layout_benchmark_order_lifecycle.yaml",
+            "layout_benchmark_source_reuse.yaml",
             "long_field_support.yaml",
             "multi_source_session.yaml",
             "order_fulfillment.yaml",
@@ -670,12 +672,12 @@ mod tests {
         assert_eq!(collapsed.len(), 4);
         assert!(collapsed.iter().all(|r| r.depth == 0));
 
-        // Expand Pipelines: 4 sections + 9 pipeline files.
+        // Expand Pipelines: 4 sections + 11 pipeline files.
         let mut expanded = HashSet::new();
         expanded.insert(NodeId::Section(SectionKind::Pipelines));
         let rows = flatten(&tree, &expanded);
-        assert_eq!(rows.len(), 13);
-        assert_eq!(rows.iter().filter(|r| r.depth == 1).count(), 9);
+        assert_eq!(rows.len(), 15);
+        assert_eq!(rows.iter().filter(|r| r.depth == 1).count(), 11);
 
         // expand_sections expands all four.
         let all = expand_sections(&tree);
