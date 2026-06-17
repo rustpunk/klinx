@@ -65,14 +65,6 @@ When architecture changes, append a dated entry with:
 - Open question added for when and how to migrate the visible canvas to this model.
 - Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-100-target cargo test -p klinx layout_model`.
 
-## 2026-06-17: Layout Model Port Ordering
-
-- `pipeline_view/layout_model.rs` now gives layout ports explicit migration anchors back to existing `StageView` node, field-row, and branch-row anchors.
-- Field-row input and output ports run through a deterministic incident-edge barycenter ordering step for crossing-reduction preparation.
-- Route branch ports keep condition declaration order with the default branch last, and Cull `removed_to` ports are modeled distinctly from Route branches.
-- The visible canvas still uses `layout_positions`; this remains layout-model preparation only, not the renderer migration or final orthogonal lane routing.
-- Verification: `cargo test -p klinx layout_model`, `cargo test -p klinx pipeline_view`, and `cargo fmt --all --check`.
-
 ## 2026-06-16: Resolved Top-Level Pipeline Field Rows
 
 - Added `pipeline_view::derive_resolved_pipeline_view` for top-level canvas Resolved mode.
