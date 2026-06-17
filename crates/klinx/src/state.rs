@@ -18,7 +18,10 @@ use clinker_plan::plan::CompiledPlan;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::pipeline_view::PipelineView;
+use crate::pipeline_view::{
+    PipelineView, derive_body_view, derive_partial_pipeline_view, derive_pipeline_view,
+    derive_resolved_pipeline_view,
+};
 use crate::sync::EditSource;
 use crate::tab::{TabEntry, TabId};
 use crate::workspace::Workspace;
@@ -251,6 +254,22 @@ pub struct CompositionDrillFrame {
     pub use_path: std::path::PathBuf,
 }
 
+/// A selected output field on the currently visible canvas.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedField {
+    pub stage_id: String,
+    pub field_name: String,
+}
+
+impl SelectedField {
+    pub fn new(stage_id: impl Into<String>, field_name: impl Into<String>) -> Self {
+        Self {
+            stage_id: stage_id.into(),
+            field_name: field_name.into(),
+        }
+    }
+}
+
 /// Per-tab reactive state — consumed by canvas, inspector, YAML sidebar, etc.
 ///
 /// Downstream components call `use_context::<AppState>()` and get the
@@ -261,6 +280,7 @@ pub struct AppState {
     pub pipeline_layout: Signal<PipelineLayoutMode>,
     pub run_log_expanded: Signal<bool>,
     pub selected_stages: Signal<std::collections::HashSet<String>>,
+    pub selected_field: Signal<Option<SelectedField>>,
     /// Raw YAML text shown in the sidebar editor.
     pub yaml_text: Signal<String>,
     /// Parsed pipeline config (None if YAML is invalid).
@@ -309,6 +329,48 @@ pub struct AppState {
 pub fn use_app_state() -> AppState {
     let sig = use_context::<Signal<AppState>>();
     *sig.read()
+}
+
+/// Derive the DAG view currently shown by the canvas.
+///
+/// This is intentionally layout-free: callers that render cards/connectors can
+/// apply their layout engine afterward, while inspectors can read the same
+/// stage and lineage model without depending on canvas geometry.
+pub fn current_pipeline_view(state: AppState) -> PipelineView {
+    if let Some(comp_view) = state.composition_view.read().clone() {
+        return comp_view;
+    }
+
+    let drill_stack = state.composition_drill_stack.read();
+    if let Some(frame) = drill_stack.last() {
+        let compiled_guard = state.compiled_plan.read();
+        return compiled_guard
+            .as_ref()
+            .and_then(|plan| plan.body_of(frame.body_id))
+            .map(derive_body_view)
+            .unwrap_or_default();
+    }
+    drop(drill_stack);
+
+    match *state.channel_view_mode.read() {
+        ChannelViewMode::Resolved => {
+            let compiled_guard = state.compiled_plan.read();
+            match compiled_guard.as_ref() {
+                Some(plan) => derive_resolved_pipeline_view(plan),
+                None => match &*state.pipeline.read() {
+                    Some(config) => derive_pipeline_view(config),
+                    None => PipelineView::default(),
+                },
+            }
+        }
+        ChannelViewMode::Raw => match &*state.pipeline.read() {
+            Some(config) => derive_pipeline_view(config),
+            None => match &*state.partial_pipeline.read() {
+                Some(partial) => derive_partial_pipeline_view(partial),
+                None => PipelineView::default(),
+            },
+        },
+    }
 }
 
 /// Global tab management context — used by tab bar, title bar, keyboard handlers.

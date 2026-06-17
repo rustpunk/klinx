@@ -4,6 +4,7 @@ use crate::pipeline_view::{
     FieldKind, HEADER_PORT_Y, NODE_WIDTH, StageKind, StagePortKind, StagePortRow, StagePortSide,
     StageView,
 };
+use crate::state::SelectedField;
 use crate::state::{CompositionDrillFrame, use_app_state};
 
 use super::{CanvasHover, LineageTarget, PinnedField};
@@ -330,6 +331,8 @@ pub fn CanvasNode(
                             sel.set(set);
                         }
                     }
+                    let mut selected_field = state.selected_field;
+                    selected_field.set(None);
                 }
             },
 
@@ -440,6 +443,7 @@ pub fn CanvasNode(
                     for (i, field) in stage.fields.iter().enumerate() {
                         FieldRowView {
                             key: "{field.name}",
+                            stage_id: stage_id.clone(),
                             node_index: index,
                             row_index: i,
                             name: field.name.clone(),
@@ -558,6 +562,7 @@ pub fn CanvasNode(
 /// calling them source correlation keys.
 #[component]
 fn FieldRowView(
+    stage_id: String,
     node_index: usize,
     row_index: usize,
     name: String,
@@ -570,6 +575,7 @@ fn FieldRowView(
     show_input_anchor: bool,
     show_output_anchor: bool,
 ) -> Element {
+    let state = use_app_state();
     let mut hovered = use_context::<CanvasHover>();
     let mut pinned = use_context::<PinnedField>();
 
@@ -658,10 +664,17 @@ fn FieldRowView(
                     );
                     if already {
                         pinned.0.set(None);
+                        let mut selected_field = state.selected_field;
+                        selected_field.set(None);
                     } else {
                         pinned
                             .0
                             .set(Some(LineageTarget::Field(node_index, name.clone())));
+                        let mut selected_field = state.selected_field;
+                        selected_field
+                            .set(Some(SelectedField::new(stage_id.clone(), name.clone())));
+                        let mut selected_stages = state.selected_stages;
+                        selected_stages.set(std::collections::HashSet::new());
                     }
                 }
             },

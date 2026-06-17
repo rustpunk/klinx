@@ -120,62 +120,145 @@ pub fn try_parse_yaml(yaml: &str, workspace_root: Option<&Path>) -> ParseResult 
     }
 }
 
-/// Compute YAML line ranges for each named stage (best-effort).
-pub fn compute_yaml_ranges(yaml: &str, config: &PipelineConfig) -> HashMap<String, (usize, usize)> {
-    let mut ranges = HashMap::new();
-    let lines: Vec<&str> = yaml.lines().collect();
+/// Source range for one node block in the authoritative YAML document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct YamlNodeRange {
+    /// Inclusive 1-based line where the node block starts.
+    pub start_line: usize,
+    /// Inclusive 1-based line where the node block ends.
+    pub end_line: usize,
+    /// Byte offset where the node block starts.
+    pub start_byte: usize,
+    /// Byte offset one past the node block.
+    pub end_byte: usize,
+}
 
-    let mut stage_names: Vec<String> = Vec::new();
-    for input in config.source_configs() {
-        stage_names.push(input.name.clone());
-    }
-    for transform in config.transform_views() {
-        stage_names.push(transform.name.to_string());
-    }
-    for output in config.output_configs() {
-        stage_names.push(output.name.clone());
-    }
-
-    for name in &stage_names {
-        let name_pattern = format!("name: {name}");
-        if let Some(start_idx) = lines.iter().position(|line| line.contains(&name_pattern)) {
-            let mut block_start = start_idx;
-            if start_idx > 0 {
-                let line = lines[start_idx].trim_start();
-                if !(line.starts_with("- name:") || line.starts_with("name:")) {
-                    for i in (0..start_idx).rev() {
-                        let prev = lines[i].trim_start();
-                        if prev.starts_with("- ") {
-                            block_start = i;
-                            break;
-                        }
-                        if !prev.is_empty() {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            let base_indent = lines[block_start].len() - lines[block_start].trim_start().len();
-            let mut end_idx = start_idx;
-            #[allow(clippy::needless_range_loop)]
-            for i in (start_idx + 1)..lines.len() {
-                let line = lines[i];
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let indent = line.len() - line.trim_start().len();
-                if indent <= base_indent {
-                    break;
-                }
-                end_idx = i;
-            }
-
-            ranges.insert(name.clone(), (block_start + 1, end_idx + 1));
+/// Compute YAML source ranges for each named node.
+///
+/// The engine stores every parsed node as a spanned [`PipelineNode`]. Use those
+/// spans rather than scanning only source/transform/output helper lists so all
+/// node variants get a range and duplicate-like names cannot collide.
+pub fn compute_yaml_node_ranges(
+    yaml: &str,
+    config: &PipelineConfig,
+) -> HashMap<String, YamlNodeRange> {
+    let mut starts = Vec::with_capacity(config.nodes.len());
+    for node in &config.nodes {
+        let Some(offset) = node.referenced.span().byte_offset() else {
+            continue;
+        };
+        let offset = offset as usize;
+        if offset > yaml.len() {
+            continue;
         }
+        starts.push((node.value.name().to_string(), line_start(yaml, offset)));
+    }
+
+    if starts.windows(2).any(|window| window[0].1 >= window[1].1) {
+        return HashMap::new();
+    }
+
+    let Some((_, first_start)) = starts.first() else {
+        return HashMap::new();
+    };
+    let Some((_, last_start)) = starts.last() else {
+        return HashMap::new();
+    };
+    let nodes_end = find_nodes_block_end(yaml, *last_start);
+    let mut ranges = HashMap::with_capacity(starts.len());
+
+    for (index, (name, start_byte)) in starts.iter().enumerate() {
+        let end_byte = starts
+            .get(index + 1)
+            .map(|(_, next_start)| *next_start)
+            .unwrap_or(nodes_end)
+            .min(yaml.len());
+        if *start_byte < *first_start || *start_byte > end_byte {
+            continue;
+        }
+        ranges.insert(
+            name.clone(),
+            YamlNodeRange {
+                start_line: line_number_at(yaml, *start_byte),
+                end_line: line_number_at(yaml, end_byte.saturating_sub(1)),
+                start_byte: *start_byte,
+                end_byte,
+            },
+        );
     }
 
     ranges
+}
+
+/// Compute YAML line ranges for each named stage (best-effort).
+pub fn compute_yaml_ranges(yaml: &str, config: &PipelineConfig) -> HashMap<String, (usize, usize)> {
+    compute_yaml_node_ranges(yaml, config)
+        .into_iter()
+        .map(|(name, range)| (name, (range.start_line, range.end_line)))
+        .collect()
+}
+
+/// Replace one node block inside a full YAML document.
+///
+/// The caller supplies a previously-derived range; this helper never parses or
+/// serializes the whole config. It preserves all bytes outside the selected
+/// block and normalizes the replacement to end with one newline when the
+/// original range ended before more document content.
+pub fn splice_yaml_node_block(yaml: &str, range: YamlNodeRange, replacement: &str) -> String {
+    if range.start_byte > range.end_byte || range.end_byte > yaml.len() {
+        return yaml.to_string();
+    }
+
+    let mut normalized = replacement.to_string();
+    if range.end_byte < yaml.len() && !normalized.ends_with('\n') {
+        normalized.push('\n');
+    }
+
+    let mut out = String::with_capacity(
+        yaml.len().saturating_sub(range.end_byte - range.start_byte) + normalized.len(),
+    );
+    out.push_str(&yaml[..range.start_byte]);
+    out.push_str(&normalized);
+    out.push_str(&yaml[range.end_byte..]);
+    out
+}
+
+fn line_start(text: &str, offset: usize) -> usize {
+    text[..offset].rfind('\n').map_or(0, |idx| idx + 1)
+}
+
+fn line_number_at(text: &str, offset: usize) -> usize {
+    text[..offset.min(text.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
+fn find_nodes_block_end(text: &str, last_node_start: usize) -> usize {
+    let last_indent = text[last_node_start..]
+        .lines()
+        .next()
+        .map(line_indent)
+        .unwrap_or(0);
+    let search = &text[last_node_start..];
+    let mut cursor = last_node_start;
+    for line in search.lines() {
+        let line_start = cursor;
+        cursor += line.len() + 1;
+        if line_start == last_node_start || line.trim().is_empty() {
+            continue;
+        }
+        let indent = line_indent(line);
+        if indent < last_indent {
+            return line_start;
+        }
+    }
+    text.len()
+}
+
+fn line_indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
 }
 
 #[cfg(test)]
@@ -295,5 +378,209 @@ nodes:
             checked >= 5,
             "expected the bundled example comps, got {checked}"
         );
+    }
+
+    const ALL_VARIANTS_PIPELINE: &str = r#"
+pipeline:
+  name: variant_ranges
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: x, type: int }
+  - type: transform
+    name: clean
+    input: src
+    config:
+      cxl: |
+        emit x2 = x + 1
+  - type: aggregate
+    name: rollup
+    input: clean
+    config:
+      group_by: [x2]
+      cxl: |
+        emit count = 1
+  - type: route
+    name: split
+    input: clean
+    config:
+      conditions:
+        high: "x2 > 10"
+      default: low
+  - type: merge
+    name: joined
+    inputs: [split.high, split.low]
+  - type: combine
+    name: combined
+    input:
+      left: joined
+      right: rollup
+    config:
+      where: "left.x2 == right.x2"
+      match: first
+      on_miss: skip
+      cxl: |
+        emit count = right.count
+      propagate_ck: driver
+  - type: composition
+    name: sub
+    input: combined
+    use: compositions/clean_names.comp.yaml
+  - type: reshape
+    name: shaped
+    input: sub
+    config:
+      partition_by: [x2]
+      rules:
+        - name: fill
+          when: "x2 > 0"
+          synthesize:
+            copy_from: trigger
+  - type: cull
+    name: pruned
+    input: shaped
+    config:
+      partition_by: [x2]
+      removed_to: dropped
+      rules:
+        - name: drop_small
+          drop_group_when: "count(*) < 2"
+  - type: envelope
+    name: framed
+    body: pruned
+    config:
+      strategy: preserve
+  - type: output
+    name: out
+    input: framed
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+
+    #[test]
+    fn yaml_ranges_cover_every_pipeline_node_variant() {
+        let config = parse_config(ALL_VARIANTS_PIPELINE).expect("fixture parses");
+        let ranges = compute_yaml_node_ranges(ALL_VARIANTS_PIPELINE, &config);
+
+        for name in [
+            "src", "clean", "rollup", "split", "joined", "combined", "sub", "shaped", "pruned",
+            "framed", "out",
+        ] {
+            let range = ranges
+                .get(name)
+                .unwrap_or_else(|| panic!("range for {name}"));
+            let block = &ALL_VARIANTS_PIPELINE[range.start_byte..range.end_byte];
+            assert!(
+                block.contains(&format!("name: {name}")),
+                "block for {name} should contain its name: {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_ranges_do_not_confuse_duplicate_like_names() {
+        let yaml = r#"
+pipeline:
+  name: duplicate_like
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./src.csv
+      schema:
+        - { name: id, type: string }
+  - type: source
+    name: src_extra
+    config:
+      name: src_extra
+      type: csv
+      path: ./src_extra.csv
+      schema:
+        - { name: id, type: string }
+"#;
+        let config = parse_config(yaml).expect("fixture parses");
+        let ranges = compute_yaml_node_ranges(yaml, &config);
+        let src = ranges.get("src").expect("src range");
+        let src_block = &yaml[src.start_byte..src.end_byte];
+
+        assert!(src_block.contains("name: src"));
+        assert!(!src_block.contains("name: src_extra"));
+    }
+
+    #[test]
+    fn splice_yaml_node_block_preserves_outside_comments_and_grows_or_shrinks() {
+        let yaml = r#"
+pipeline:
+  name: splice
+# nodes stay below
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: id, type: string }
+  - type: output
+    name: out
+    input: src
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+# tail comment
+"#;
+        let config = parse_config(yaml).expect("fixture parses");
+        let ranges = compute_yaml_node_ranges(yaml, &config);
+        let range = *ranges.get("src").expect("src range");
+        let grown = splice_yaml_node_block(
+            yaml,
+            range,
+            "  - type: source\n    name: src\n    config:\n      name: src\n      type: csv\n      path: ./changed.csv\n      schema:\n        - { name: id, type: string }",
+        );
+
+        assert!(grown.contains("# nodes stay below"));
+        assert!(grown.contains("path: ./changed.csv"));
+        assert!(grown.contains("name: out"));
+        assert!(grown.contains("# tail comment"));
+
+        let reparsed = parse_config(&grown).expect("grown YAML still parses");
+        let out_range = *compute_yaml_node_ranges(&grown, &reparsed)
+            .get("src")
+            .expect("src range after grow");
+        let shrunk = splice_yaml_node_block(
+            &grown,
+            out_range,
+            "  - type: source\n    name: src\n    config:\n      name: src\n      type: csv\n      path: ./short.csv",
+        );
+        assert!(shrunk.contains("path: ./short.csv"));
+        assert!(!shrunk.contains("schema:"));
+        assert!(shrunk.contains("name: out"));
+    }
+
+    #[test]
+    fn splice_yaml_node_block_allows_temporarily_invalid_draft() {
+        let config = parse_config(ALL_VARIANTS_PIPELINE).expect("fixture parses");
+        let range = *compute_yaml_node_ranges(ALL_VARIANTS_PIPELINE, &config)
+            .get("clean")
+            .expect("clean range");
+        let edited = splice_yaml_node_block(
+            ALL_VARIANTS_PIPELINE,
+            range,
+            "  - type: transform\n    name: clean\n    input: src\n    config:\n      cxl: |\n        emit x2 =",
+        );
+
+        assert!(edited.contains("emit x2 ="));
+        assert!(edited.contains("name: rollup"));
     }
 }

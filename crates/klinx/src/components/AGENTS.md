@@ -14,7 +14,7 @@ This directory is the Dioxus component layer for the Klinx desktop IDE. It rende
 ## Important Public APIs Or Entry Points
 
 - `components::mod.rs` module exports.
-- `CanvasPanel`, `YamlSidebar`, `InspectorPanel`, `FileExplorer`, `SearchPanel`, `SchemaPanel`, `SchematicsPanel`, `VersionMode`.
+- `CanvasPanel`, `YamlSidebar`, `SelectedInspector`, `FileExplorer`, `SearchPanel`, `SchemaPanel`, `SchematicsPanel`, `VersionMode`.
 - Utility overlays: `CommandPalette`, `SettingsOverlay`, `TemplateGallery`, `ToastOverlay`, `ConfirmDialog`.
 
 ## Internal Module Map
