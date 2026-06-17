@@ -4,7 +4,10 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use super::{Connection, FieldEdge, NODE_WIDTH, PipelineView, StageKind, StageView};
+use super::{
+    Connection, FIELD_HEADER_HEIGHT, FIELD_ROW_HEIGHT, FieldEdge, HEADER_PORT_Y, NODE_GAP,
+    NODE_WIDTH, PipelineView, STACK_GAP, StageKind, StageView,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutGraph {
@@ -16,6 +19,8 @@ pub struct LayoutGraph {
 pub struct LayoutNode {
     pub stage_index: usize,
     pub id: String,
+    pub x: f32,
+    pub y: f32,
     pub width: f32,
     pub height: f32,
     pub rank: usize,
@@ -137,7 +142,8 @@ impl LayoutGraph {
         let mut graph = Self { nodes, edges };
         graph.assign_longest_path_ranks();
         graph.order_ports_for_crossing_reduction();
-        graph.route_placeholder_paths();
+        graph.assign_node_positions();
+        graph.route_orthogonal_lane_paths();
         graph
     }
 
@@ -286,29 +292,96 @@ impl LayoutGraph {
         scores
     }
 
-    fn route_placeholder_paths(&mut self) {
-        for edge in &mut self.edges {
+    fn assign_node_positions(&mut self) {
+        let mut ranks: Vec<usize> = self.nodes.iter().map(|node| node.rank).collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+
+        for rank in ranks {
+            let mut node_indices = self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(node_index, node)| (node.rank == rank).then_some(node_index))
+                .collect::<Vec<_>>();
+            node_indices.sort_unstable_by_key(|&node_index| self.nodes[node_index].stage_index);
+
+            let x = rank as f32 * (NODE_WIDTH + NODE_GAP);
+            let mut y = 0.0;
+            for node_index in node_indices {
+                self.nodes[node_index].x = x;
+                self.nodes[node_index].y = y;
+                y += self.nodes[node_index].height + STACK_GAP;
+            }
+        }
+    }
+
+    fn route_orthogonal_lane_paths(&mut self) {
+        let lane_assignments = self.edge_lane_assignments();
+        for (edge_index, (lane_index, lane_count)) in lane_assignments
+            .iter()
+            .copied()
+            .enumerate()
+            .take(self.edges.len())
+        {
+            let edge = &self.edges[edge_index];
             let from = &self.nodes[edge.from_node];
             let to = &self.nodes[edge.to_node];
-            let start = LayoutPoint {
-                x: from.rank as f32,
-                y: port_order(from, &edge.from_port, LayoutPortSide::Output) as f32,
-            };
-            let end = LayoutPoint {
-                x: to.rank as f32,
-                y: port_order(to, &edge.to_port, LayoutPortSide::Input) as f32,
-            };
-            let mid_x = (start.x + end.x) / 2.0;
-            edge.path.points = vec![
+            let start = port_anchor(from, &edge.from_port, LayoutPortSide::Output);
+            let end = port_anchor(to, &edge.to_port, LayoutPortSide::Input);
+            let lane_x = connector_lane_x(from, to, lane_index, lane_count);
+
+            self.edges[edge_index].path.points = compact_path_points([
                 start,
                 LayoutPoint {
-                    x: mid_x,
+                    x: lane_x,
                     y: start.y,
                 },
-                LayoutPoint { x: mid_x, y: end.y },
+                LayoutPoint {
+                    x: lane_x,
+                    y: end.y,
+                },
                 end,
-            ];
+            ]);
         }
+    }
+
+    fn edge_lane_assignments(&self) -> Vec<(usize, usize)> {
+        let mut by_rank_gap: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (edge_index, edge) in self.edges.iter().enumerate() {
+            by_rank_gap
+                .entry(edge_rank_gap(edge, &self.nodes))
+                .or_default()
+                .push(edge_index);
+        }
+
+        let mut assignments = vec![(0, 1); self.edges.len()];
+        for edge_indices in by_rank_gap.values_mut() {
+            edge_indices.sort_unstable_by_key(|&edge_index| {
+                let edge = &self.edges[edge_index];
+                (
+                    self.nodes[edge.from_node].stage_index,
+                    port_order(
+                        &self.nodes[edge.from_node],
+                        &edge.from_port,
+                        LayoutPortSide::Output,
+                    ),
+                    self.nodes[edge.to_node].stage_index,
+                    port_order(
+                        &self.nodes[edge.to_node],
+                        &edge.to_port,
+                        LayoutPortSide::Input,
+                    ),
+                    edge_kind_order(edge.kind),
+                )
+            });
+            let lane_count = edge_indices.len();
+            for (lane_index, &edge_index) in edge_indices.iter().enumerate() {
+                assignments[edge_index] = (lane_index, lane_count);
+            }
+        }
+
+        assignments
     }
 }
 
@@ -359,6 +432,8 @@ impl LayoutNode {
         Self {
             stage_index,
             id: stage.id.clone(),
+            x: 0.0,
+            y: 0.0,
             width: NODE_WIDTH,
             height: stage.card_height(),
             rank: 0,
@@ -569,6 +644,103 @@ fn port_order(node: &LayoutNode, port_id: &str, side: LayoutPortSide) -> usize {
         .unwrap_or(0)
 }
 
+fn edge_rank_gap(edge: &LayoutEdge, nodes: &[LayoutNode]) -> (usize, usize) {
+    let from_rank = nodes[edge.from_node].rank;
+    let to_rank = nodes[edge.to_node].rank;
+    if from_rank <= to_rank {
+        (from_rank, to_rank)
+    } else {
+        (to_rank, from_rank)
+    }
+}
+
+fn edge_kind_order(kind: LayoutEdgeKind) -> usize {
+    match kind {
+        LayoutEdgeKind::Node => 0,
+        LayoutEdgeKind::Field => 1,
+        LayoutEdgeKind::RouteBranch => 2,
+        LayoutEdgeKind::CullSideOutput => 3,
+    }
+}
+
+fn connector_lane_x(
+    from: &LayoutNode,
+    to: &LayoutNode,
+    lane_index: usize,
+    lane_count: usize,
+) -> f32 {
+    let source_right = from.x + from.width;
+    let target_left = to.x;
+    if target_left > source_right {
+        let gap = target_left - source_right;
+        source_right + gap * (lane_index as f32 + 1.0) / (lane_count as f32 + 1.0)
+    } else {
+        source_right.max(target_left) + NODE_GAP * (lane_index as f32 + 1.0)
+    }
+}
+
+fn port_anchor(node: &LayoutNode, port_id: &str, side: LayoutPortSide) -> LayoutPoint {
+    let ports = match side {
+        LayoutPortSide::Input => &node.input_ports,
+        LayoutPortSide::Output => &node.output_ports,
+    };
+    let Some(port) = ports.iter().find(|port| port.id == port_id) else {
+        return LayoutPoint {
+            x: port_x(node, side),
+            y: node.y + HEADER_PORT_Y,
+        };
+    };
+
+    let y = match port.stage_anchor {
+        LayoutStageAnchor::NodeInput | LayoutStageAnchor::NodeOutput => node.y + HEADER_PORT_Y,
+        LayoutStageAnchor::FieldInput { field_index }
+        | LayoutStageAnchor::FieldOutput { field_index } => {
+            node.y
+                + FIELD_HEADER_HEIGHT
+                + field_index as f32 * FIELD_ROW_HEIGHT
+                + FIELD_ROW_HEIGHT / 2.0
+        }
+        LayoutStageAnchor::BranchOutput { branch_index } => {
+            node.y
+                + FIELD_HEADER_HEIGHT
+                + (field_port_count(node) + branch_index) as f32 * FIELD_ROW_HEIGHT
+                + FIELD_ROW_HEIGHT / 2.0
+        }
+    };
+
+    LayoutPoint {
+        x: port_x(node, side),
+        y,
+    }
+}
+
+fn port_x(node: &LayoutNode, side: LayoutPortSide) -> f32 {
+    match side {
+        LayoutPortSide::Input => node.x,
+        LayoutPortSide::Output => node.x + node.width,
+    }
+}
+
+fn field_port_count(node: &LayoutNode) -> usize {
+    node.output_ports
+        .iter()
+        .filter(|port| port.kind == LayoutPortKind::Field)
+        .count()
+}
+
+fn compact_path_points<const N: usize>(points: [LayoutPoint; N]) -> Vec<LayoutPoint> {
+    let mut compacted = Vec::with_capacity(N);
+    for point in points {
+        if compacted
+            .last()
+            .is_none_or(|previous: &LayoutPoint| *previous != point)
+        {
+            compacted.push(point);
+        }
+    }
+    compacted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,7 +800,23 @@ mod tests {
         assert_eq!(graph.layers()[2].nodes, vec![2]);
         assert_eq!(graph.edges[0].from_port, "node:out");
         assert_eq!(graph.edges[0].to_port, "node:in");
-        assert_eq!(graph.edges[0].path.points.len(), 4);
+        assert_eq!(
+            graph.edges[0].path.points,
+            vec![
+                LayoutPoint {
+                    x: NODE_WIDTH,
+                    y: HEADER_PORT_Y
+                },
+                LayoutPoint {
+                    x: NODE_WIDTH + NODE_GAP / 2.0,
+                    y: HEADER_PORT_Y
+                },
+                LayoutPoint {
+                    x: NODE_WIDTH + NODE_GAP,
+                    y: HEADER_PORT_Y
+                },
+            ]
+        );
     }
 
     #[test]
@@ -656,6 +844,16 @@ mod tests {
         assert_eq!(graph.nodes[0].rank, 0);
         assert_eq!(graph.nodes[1].rank, 0);
         assert_eq!(graph.nodes[2].rank, 1);
+        let first_lane_x = graph.edges[0].path.points[1].x;
+        let second_lane_x = graph.edges[1].path.points[1].x;
+        assert!(
+            first_lane_x < second_lane_x,
+            "fan-in edges should reserve distinct lanes in source order"
+        );
+        assert_eq!(
+            graph.edges[0].path.points.last(),
+            graph.edges[1].path.points.last()
+        );
     }
 
     #[test]
@@ -750,6 +948,18 @@ mod tests {
             Some(LayoutStageAnchor::FieldOutput { field_index: 119 })
         );
         assert_eq!(graph.edges[0].from_port, "field:out:field_119");
+        assert_eq!(
+            graph.edges[0].path.points.first(),
+            Some(&LayoutPoint {
+                x: NODE_WIDTH,
+                y: FIELD_HEADER_HEIGHT + 119.0 * FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
+            })
+        );
+        assert!(
+            graph.edges[0].path.points[1].x > NODE_WIDTH
+                && graph.edges[0].path.points[1].x < NODE_WIDTH + NODE_GAP,
+            "tall-card field edge should route through the inter-rank lane"
+        );
     }
 
     #[test]
@@ -816,6 +1026,23 @@ mod tests {
             graph.nodes[0].output_ports[2].stage_anchor,
             LayoutStageAnchor::BranchOutput { branch_index: 2 }
         );
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .map(|edge| edge.path.points[0].y)
+                .collect::<Vec<_>>(),
+            vec![
+                FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
+                FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
+                FIELD_HEADER_HEIGHT + 2.0 * FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
+            ]
+        );
+        assert!(
+            graph.edges[0].path.points[1].x < graph.edges[1].path.points[1].x
+                && graph.edges[1].path.points[1].x < graph.edges[2].path.points[1].x,
+            "branch fan-out should reserve ordered lanes"
+        );
     }
 
     #[test]
@@ -859,8 +1086,21 @@ mod tests {
             graph.nodes[0].output_ports[1].stage_anchor,
             LayoutStageAnchor::FieldOutput { field_index: 1 }
         );
-        assert_eq!(graph.edges[1].path.points[0].y, 1.0);
-        assert_eq!(graph.edges[1].path.points[3].y, 1.0);
+        assert_eq!(graph.edges[1].kind, LayoutEdgeKind::Field);
+        assert_eq!(
+            graph.edges[1].path.points.first(),
+            Some(&LayoutPoint {
+                x: NODE_WIDTH,
+                y: FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
+            })
+        );
+        assert_eq!(
+            graph.edges[1].path.points.last(),
+            Some(&LayoutPoint {
+                x: NODE_WIDTH + NODE_GAP,
+                y: FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
+            })
+        );
     }
 
     #[test]
