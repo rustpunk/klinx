@@ -185,6 +185,8 @@ pub fn CanvasNode(
     let show_input_roles = has_input_roles;
     let show_rows = !stage.fields.is_empty();
     let show_branches = has_branches;
+    let show_field_input_anchors = !matches!(&stage.kind, StageKind::Source);
+    let show_field_output_anchors = !matches!(&stage.kind, StageKind::Output);
     let field_tools_visible = field_display.searchable;
     let toggle_display = field_display.hidden_count > 0 || field_display.can_reduce;
     let toggle_label = if field_display.hidden_count > 0 {
@@ -450,6 +452,8 @@ pub fn CanvasNode(
                             temporary: temporary.contains(field.name.as_str()),
                             is_correlation_key: field.is_correlation_key,
                             is_aggregate_grain: field.is_aggregate_grain,
+                            show_input_anchor: show_field_input_anchors,
+                            show_output_anchor: show_field_output_anchors,
                         }
                     }
                 }
@@ -563,6 +567,8 @@ fn FieldRowView(
     temporary: bool,
     is_correlation_key: bool,
     is_aggregate_grain: bool,
+    show_input_anchor: bool,
+    show_output_anchor: bool,
 ) -> Element {
     let mut hovered = use_context::<CanvasHover>();
     let mut pinned = use_context::<PinnedField>();
@@ -659,14 +665,18 @@ fn FieldRowView(
                     }
                 }
             },
-            span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
+            if show_input_anchor {
+                span { class: "klinx-node-field-anchor klinx-node-field-anchor--in" }
+            }
             span { class: "klinx-node-field-name", "{name}" }
             // Compact datatype suffix (e.g. `: float`) when known. Declared and
             // carried columns have a type; emitted columns don't yet (Phase 2b).
             if let Some(t) = ty.as_ref() {
                 span { class: "klinx-node-field-type", "{t}" }
             }
-            span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }
+            if show_output_anchor {
+                span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }
+            }
         }
     }
 }

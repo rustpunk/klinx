@@ -4742,6 +4742,12 @@ input:-webkit-autofill:focus {
 .klinx-node-field-anchor {
   position: absolute;
   top: 50%;
+  --klinx-field-anchor-correlation-fill: var(--klinx-phosphor);
+  --klinx-field-anchor-correlation-split-fill: var(--klinx-phosphor);
+  --klinx-field-anchor-correlation-glow: color-mix(in srgb, var(--klinx-phosphor) 40%, transparent);
+  --klinx-field-anchor-aggregate-fill: color-mix(in srgb, var(--klinx-verdigris) 72%, var(--klinx-char-raised));
+  --klinx-field-anchor-aggregate-split-fill: var(--klinx-verdigris);
+  --klinx-field-anchor-aggregate-glow: color-mix(in srgb, var(--klinx-verdigris) 36%, transparent);
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -4750,48 +4756,66 @@ input:-webkit-autofill:focus {
   transform: translateY(-50%);
 }
 
+[data-theme="enamel"] .klinx-node-field-anchor {
+  --klinx-field-anchor-correlation-fill: #F2A000;
+  --klinx-field-anchor-correlation-split-fill: #F2A000;
+  --klinx-field-anchor-correlation-glow: rgba(90, 50, 0, 0.42);
+  --klinx-field-anchor-aggregate-fill: #1F7A74;
+  --klinx-field-anchor-aggregate-split-fill: #1F7A74;
+  --klinx-field-anchor-aggregate-glow: rgba(18, 63, 61, 0.34);
+}
+
 .klinx-node-field--correlation-key .klinx-node-field-anchor,
 .klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  width: 7px;
-  height: 7px;
+  width: 9px;
+  height: 9px;
   border-radius: 0;
-  transform: translateY(-50%) rotate(45deg);
+  border: 0;
+  background: var(--klinx-border-medium);
+  clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+  transform: translateY(-50%);
+  transition: filter 150ms ease;
+}
+
+/* Match the GROUP_BY wedge without rotating a box: the full clipped diamond sits
+   halfway outside the row, so overflow exposes the same triangle silhouette.
+   The inner clipped fill keeps the dark edge while still allowing a split fill. */
+.klinx-node-field--correlation-key .klinx-node-field-anchor--in,
+.klinx-node-field--aggregate-grain .klinx-node-field-anchor--in {
+  left: -5.5px;
+}
+
+.klinx-node-field--correlation-key .klinx-node-field-anchor--out,
+.klinx-node-field--aggregate-grain .klinx-node-field-anchor--out {
+  right: -4.5px;
+}
+
+.klinx-node-field--correlation-key .klinx-node-field-anchor::before,
+.klinx-node-field--aggregate-grain .klinx-node-field-anchor::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  background: var(--klinx-field-anchor-fill);
+  clip-path: inherit;
 }
 
 .klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  background: color-mix(in srgb, var(--klinx-verdigris) 72%, var(--klinx-char-raised));
-  border-color: color-mix(in srgb, var(--klinx-verdigris) 54%, var(--klinx-bone));
-  box-shadow:
-    0 0 0 2px color-mix(in srgb, var(--klinx-verdigris) 24%, transparent),
-    0 0 7px color-mix(in srgb, var(--klinx-verdigris) 36%, transparent);
+  --klinx-field-anchor-fill: var(--klinx-field-anchor-aggregate-fill);
 }
 
 [data-theme="enamel"] .klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  background: #1F7A74;
-  border-color: #123F3D;
-  box-shadow:
-    0 0 0 2px rgba(31, 122, 116, 0.28),
-    0 0 0 4px rgba(31, 122, 116, 0.14),
-    0 0 8px rgba(18, 63, 61, 0.32);
+  --klinx-field-anchor-fill: var(--klinx-field-anchor-aggregate-fill);
 }
 
 /* Correlation-key cue (#88): mark the existing field ports instead of inserting
-   extra text into short schema rows. The port fill + ring keep the marker
-   discoverable without taking horizontal space or changing row height. */
+   extra text into short schema rows. The port fill keeps the marker discoverable
+   without taking horizontal space or changing row height. */
 .klinx-node-field--correlation-key .klinx-node-field-anchor {
-  background: var(--klinx-phosphor);
-  border-color: color-mix(in srgb, var(--klinx-phosphor) 40%, var(--klinx-bone));
-  box-shadow:
-    0 0 0 2px color-mix(in srgb, var(--klinx-phosphor) 24%, transparent),
-    0 0 7px color-mix(in srgb, var(--klinx-phosphor) 40%, transparent);
+  --klinx-field-anchor-fill: var(--klinx-field-anchor-correlation-fill);
 }
 
 [data-theme="enamel"] .klinx-node-field--correlation-key .klinx-node-field-anchor {
-  background: #F2A000;
-  border-color: #5A3200;
-  box-shadow:
-    0 0 0 2px rgba(109, 63, 0, 0.66),
-    0 0 8px rgba(90, 50, 0, 0.42);
+  --klinx-field-anchor-fill: var(--klinx-field-anchor-correlation-fill);
 }
 
 [data-theme="enamel"] .klinx-node-field--correlation-key .klinx-node-field-name {
@@ -4800,19 +4824,43 @@ input:-webkit-autofill:focus {
 }
 
 .klinx-node-field--correlation-key.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  background: color-mix(in srgb, var(--klinx-verdigris) 78%, var(--klinx-char-raised));
-  border-color: color-mix(in srgb, var(--klinx-phosphor) 72%, var(--klinx-verdigris));
-  box-shadow:
-    0 0 0 2px color-mix(in srgb, var(--klinx-phosphor) 26%, transparent),
-    0 0 7px color-mix(in srgb, var(--klinx-verdigris) 38%, transparent);
+  --klinx-field-anchor-fill: linear-gradient(
+    to bottom,
+    var(--klinx-field-anchor-correlation-split-fill) 0,
+    var(--klinx-field-anchor-correlation-split-fill) 50%,
+    var(--klinx-field-anchor-aggregate-split-fill) 50%,
+    var(--klinx-field-anchor-aggregate-split-fill) 100%
+  );
 }
 
 [data-theme="enamel"] .klinx-node-field--correlation-key.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  background: #1F7A74;
-  border-color: #8A5A00;
-  box-shadow:
-    0 0 0 2px rgba(242, 160, 0, 0.34),
-    0 0 8px rgba(18, 63, 61, 0.34);
+  --klinx-field-anchor-fill: linear-gradient(
+    to bottom,
+    var(--klinx-field-anchor-correlation-split-fill) 0,
+    var(--klinx-field-anchor-correlation-split-fill) 50%,
+    var(--klinx-field-anchor-aggregate-split-fill) 50%,
+    var(--klinx-field-anchor-aggregate-split-fill) 100%
+  );
+}
+
+.klinx-node-field--aggregate-grain:hover .klinx-node-field-anchor,
+.klinx-node-field--aggregate-grain.klinx-node-field--pinned .klinx-node-field-anchor,
+.klinx-node--selected .klinx-node-field--aggregate-grain .klinx-node-field-anchor {
+  filter: drop-shadow(0 0 4px var(--klinx-field-anchor-aggregate-glow));
+}
+
+.klinx-node-field--correlation-key:hover .klinx-node-field-anchor,
+.klinx-node-field--correlation-key.klinx-node-field--pinned .klinx-node-field-anchor,
+.klinx-node--selected .klinx-node-field--correlation-key .klinx-node-field-anchor {
+  filter: drop-shadow(0 0 4px var(--klinx-field-anchor-correlation-glow));
+}
+
+.klinx-node-field--correlation-key.klinx-node-field--aggregate-grain:hover .klinx-node-field-anchor,
+.klinx-node-field--correlation-key.klinx-node-field--aggregate-grain.klinx-node-field--pinned .klinx-node-field-anchor,
+.klinx-node--selected .klinx-node-field--correlation-key.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
+  filter:
+    drop-shadow(0 -1px 3px var(--klinx-field-anchor-correlation-glow))
+    drop-shadow(0 1px 3px var(--klinx-field-anchor-aggregate-glow));
 }
 
 .klinx-node-field-anchor--in {
