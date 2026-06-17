@@ -4482,8 +4482,28 @@ input:-webkit-autofill:focus {
    row starts exactly `FIELD_HEADER_HEIGHT` below the card top. Any margin here
    would shift every row off its `field_row_y(i)` anchor. */
 .klinx-node-role-ports {
+  position: relative;
   margin-top: 0;
   box-shadow: inset 0 -1px 0 var(--klinx-border-medium);
+}
+
+.klinx-node-role-section-header {
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  color: var(--klinx-stage-accent);
+  font-family: var(--klinx-font-code);
+  font-size: 9px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--klinx-char-raised) 22%, transparent);
+  box-shadow: inset 0 -1px 0 var(--klinx-border-subtle);
+}
+
+[data-theme="enamel"] .klinx-node-role-section-header {
+  background: rgba(64, 74, 84, 0.045);
+  box-shadow: inset 0 -1px 0 #B7C0C8;
 }
 
 .klinx-node-role-port {
@@ -4538,6 +4558,10 @@ input:-webkit-autofill:focus {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.klinx-node-role-ports[data-role-section="group-by"] .klinx-node-role-port-role {
+  display: none;
 }
 .klinx-node-role-port-name {
   flex: 1 1 auto;
@@ -4693,13 +4717,28 @@ input:-webkit-autofill:focus {
   color: var(--klinx-verdigris);
 }
 
-/* Per-field LEFT/RIGHT anchor dots — the visual endpoints field cables attach
-   to. Centered on the row's mid-line via `top:50%` + `translateY(-50%)`: with
-   the row exactly FIELD_ROW_HEIGHT tall, the dot center lands at
+/* Aggregate failure-grain cue: Aggregate group_by keys, and downstream
+   passthrough copies of those grouped fields, behave like the post-aggregate
+   correlation grain. Keep the cue close to CK styling (port-centered and
+   space-free) but use the lineage verdigris family so it does not read as a
+   source-declared correlation_key. */
+.klinx-node-field--aggregate-grain .klinx-node-field-name {
+  color: color-mix(in srgb, var(--klinx-verdigris) 72%, var(--klinx-bone));
+  font-weight: 650;
+}
+
+[data-theme="enamel"] .klinx-node-field--aggregate-grain .klinx-node-field-name {
+  color: #1F5F5C;
+  font-weight: 700;
+}
+
+/* Per-field LEFT/RIGHT anchors — the visual endpoints field cables attach to.
+   Centered on the row's mid-line via `top:50%` + `translateY(-50%)`: with the
+   row exactly FIELD_ROW_HEIGHT tall, the anchor center lands at
    `field_row_y(row_index)` in world space, matching `field_anchor_*`. The 6px
-   dot at `left:-4px`/`right:-4px` (offset from the row's padding box, which
-   spans the card content width) puts each center on `canvas_x` / `canvas_x +
-   NODE_WIDTH` — the x of `field_anchor_in`/`field_anchor_out`. */
+   base dot at `left:-4px`/`right:-4px` (offset from the row's padding box,
+   which spans the card content width) puts each center on `canvas_x` /
+   `canvas_x + NODE_WIDTH` — the x of `field_anchor_in`/`field_anchor_out`. */
 .klinx-node-field-anchor {
   position: absolute;
   top: 50%;
@@ -4709,6 +4748,31 @@ input:-webkit-autofill:focus {
   background: var(--klinx-char-raised);
   border: 1px solid var(--klinx-border-medium);
   transform: translateY(-50%);
+}
+
+.klinx-node-field--correlation-key .klinx-node-field-anchor,
+.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
+  width: 7px;
+  height: 7px;
+  border-radius: 0;
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
+  background: color-mix(in srgb, var(--klinx-verdigris) 72%, var(--klinx-char-raised));
+  border-color: color-mix(in srgb, var(--klinx-verdigris) 54%, var(--klinx-bone));
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--klinx-verdigris) 24%, transparent),
+    0 0 7px color-mix(in srgb, var(--klinx-verdigris) 36%, transparent);
+}
+
+[data-theme="enamel"] .klinx-node-field--aggregate-grain .klinx-node-field-anchor {
+  background: #1F7A74;
+  border-color: #123F3D;
+  box-shadow:
+    0 0 0 2px rgba(31, 122, 116, 0.28),
+    0 0 0 4px rgba(31, 122, 116, 0.14),
+    0 0 8px rgba(18, 63, 61, 0.32);
 }
 
 /* Correlation-key cue (#88): mark the existing field ports instead of inserting
@@ -4726,14 +4790,29 @@ input:-webkit-autofill:focus {
   background: #F2A000;
   border-color: #5A3200;
   box-shadow:
-    0 0 0 2px #6D3F00,
-    0 0 0 4px rgba(242, 160, 0, 0.34),
+    0 0 0 2px rgba(109, 63, 0, 0.66),
     0 0 8px rgba(90, 50, 0, 0.42);
 }
 
 [data-theme="enamel"] .klinx-node-field--correlation-key .klinx-node-field-name {
   color: #6D3F00;
   font-weight: 700;
+}
+
+.klinx-node-field--correlation-key.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
+  background: color-mix(in srgb, var(--klinx-verdigris) 78%, var(--klinx-char-raised));
+  border-color: color-mix(in srgb, var(--klinx-phosphor) 72%, var(--klinx-verdigris));
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--klinx-phosphor) 26%, transparent),
+    0 0 7px color-mix(in srgb, var(--klinx-verdigris) 38%, transparent);
+}
+
+[data-theme="enamel"] .klinx-node-field--correlation-key.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
+  background: #1F7A74;
+  border-color: #8A5A00;
+  box-shadow:
+    0 0 0 2px rgba(242, 160, 0, 0.34),
+    0 0 8px rgba(18, 63, 61, 0.34);
 }
 
 .klinx-node-field-anchor--in {

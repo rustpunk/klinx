@@ -150,3 +150,11 @@ When architecture changes, append a dated entry with:
 - Auto mode uses graph size, maximum schema width, zoom level, and active lineage/search state to reduce row detail for wide schemas and large 30+ node graphs while keeping small graphs schema-readable by default.
 - Preview ranking prioritizes correlation keys, emitted or derived fields, operator-relevant fields, declared fields, and passthrough filler. Active lineage/search/pinned rows keep their normal visible position when already projected; hidden active endpoints append as temporary reveal rows so anchors resolve without reordering the list being scanned.
 - Verification: `cargo test -p klinx components::canvas::panel`, `cargo test -p klinx pipeline_view`, `cargo test -p klinx field_lineage`, `cargo clippy --workspace -- -D warnings`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check`.
+
+## 2026-06-17: Aggregate Failure-Grain Field Markers
+
+- Aggregate `group_by` output fields now carry a separate `FieldRow::is_aggregate_grain` marker. This lets the canvas style fields like `invoice_date` as part of the post-Aggregate failure grain without labeling them as source-declared `correlation_key` fields.
+- Aggregate group-key role ports now render under one shared `GROUP_BY` section label while preserving one hidden/semantic role-port row per group key for connector anchors.
+- The marker propagates through unchanged passthrough rows after the Aggregate, and preview projection prioritizes aggregate-grain rows with source CK rows so the grouped failure grain remains visible on dense nodes.
+- Normal canvas rows still filter hidden `$ck.*` engine fields; `$ck.aggregate.<name>` remains an internal bridge represented by the visible group-key fields and tooltips rather than a normal business column.
+- Verification: `cargo test -p klinx field_lineage`, `cargo test -p klinx pipeline_view`, `cargo test -p klinx components::canvas::panel`, `cargo fmt --all --check`, `git diff --check`, both workspace clippy passes, `cargo build --package klinx`, and a headless screenshot smoke check against the example workspace.
