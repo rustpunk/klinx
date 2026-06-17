@@ -169,8 +169,12 @@ pub fn CanvasNode(
     // inner `Signal` is `Copy`, so the handlers capture them directly.
     let mut hovered = use_context::<CanvasHover>();
 
+    let input_role_ports: Vec<StagePortRow> =
+        stage.role_ports_on(StagePortSide::Input).cloned().collect();
+    let input_role_section = role_port_section_attr(&input_role_ports);
+    let input_role_has_header = input_role_section == "group-by";
     let has_fields = field_display.total_count > 0;
-    let has_input_roles = stage.role_ports_on(StagePortSide::Input).next().is_some();
+    let has_input_roles = !input_role_ports.is_empty();
     // Route and Cull nodes carry extra output ports (rendered as branch ports
     // below the columns): a Route's condition/default branches, or a Cull's
     // `removed_to` side-output.
@@ -390,10 +394,17 @@ pub fn CanvasNode(
             if show_input_roles {
                 div {
                     class: "klinx-node-role-ports",
+                    "data-role-section": input_role_section,
                     onmouseleave: move |_| {
                         hovered.close_if_node(index);
                     },
-                    for port in stage.role_ports_on(StagePortSide::Input) {
+                    if input_role_has_header {
+                        div {
+                            class: "klinx-node-role-section-header",
+                            "GROUP_BY"
+                        }
+                    }
+                    for port in input_role_ports.iter() {
                         RolePortRowView {
                             key: "{port.id}",
                             node_index: index,
@@ -438,6 +449,7 @@ pub fn CanvasNode(
                             highlighted: highlighted.contains(field.name.as_str()),
                             temporary: temporary.contains(field.name.as_str()),
                             is_correlation_key: field.is_correlation_key,
+                            is_aggregate_grain: field.is_aggregate_grain,
                         }
                     }
                 }
@@ -536,6 +548,10 @@ pub fn CanvasNode(
 /// `is_correlation_key` (#88) highlights the row's field ports only on marked
 /// rows. Unmarked rows reserve no gutter, keeping wide-schema field names close
 /// to the left port while preserving source schema order.
+///
+/// `is_aggregate_grain` marks Aggregate `group_by` fields, and carried copies
+/// of those fields downstream, as the grouped-record failure grain without
+/// calling them source correlation keys.
 #[component]
 fn FieldRowView(
     node_index: usize,
@@ -546,6 +562,7 @@ fn FieldRowView(
     highlighted: bool,
     temporary: bool,
     is_correlation_key: bool,
+    is_aggregate_grain: bool,
 ) -> Element {
     let mut hovered = use_context::<CanvasHover>();
     let mut pinned = use_context::<PinnedField>();
@@ -578,7 +595,10 @@ fn FieldRowView(
         None => name.clone(),
     };
     if is_correlation_key {
-        tip.push_str(" · correlation key");
+        tip.push_str(" · source correlation key");
+    }
+    if is_aggregate_grain {
+        tip.push_str(" · aggregate failure grain");
     }
     if temporary {
         tip.push_str(" · temporarily revealed");
@@ -600,6 +620,9 @@ fn FieldRowView(
     }
     if is_correlation_key {
         row_class.push_str(" klinx-node-field--correlation-key");
+    }
+    if is_aggregate_grain {
+        row_class.push_str(" klinx-node-field--aggregate-grain");
     }
 
     rsx! {
@@ -645,6 +668,17 @@ fn FieldRowView(
             }
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }
         }
+    }
+}
+
+fn role_port_section_attr(ports: &[StagePortRow]) -> &'static str {
+    if ports
+        .iter()
+        .all(|port| matches!(port.kind, StagePortKind::AggregateGroupKey))
+    {
+        "group-by"
+    } else {
+        "mixed"
     }
 }
 

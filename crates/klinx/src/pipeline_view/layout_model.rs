@@ -879,10 +879,10 @@ impl LayoutNode {
                 &port.label,
                 port.kind,
                 idx,
-                idx + 1,
+                stage.input_role_header_count() + idx + 1,
             )
         }));
-        let input_field_order = input_role_ports.len() + 1;
+        let input_field_order = stage.input_role_header_count() + input_role_ports.len() + 1;
         input_ports.extend(stage.fields.iter().enumerate().map(|(idx, field)| {
             LayoutPort::field(
                 &format!("field:in:{}", field.name),
@@ -1291,20 +1291,24 @@ fn port_anchor(node: &LayoutNode, port_id: &str, side: LayoutPortSide) -> Layout
         LayoutStageAnchor::RoleInput { role_index } => {
             node.y
                 + FIELD_HEADER_HEIGHT
-                + role_index as f32 * FIELD_ROW_HEIGHT
+                + (input_role_header_count(node) + role_index) as f32 * FIELD_ROW_HEIGHT
                 + FIELD_ROW_HEIGHT / 2.0
         }
         LayoutStageAnchor::FieldInput { field_index }
         | LayoutStageAnchor::FieldOutput { field_index } => {
             node.y
                 + FIELD_HEADER_HEIGHT
-                + (input_role_port_count(node) + field_index) as f32 * FIELD_ROW_HEIGHT
+                + (input_role_header_count(node) + input_role_port_count(node) + field_index) as f32
+                    * FIELD_ROW_HEIGHT
                 + FIELD_ROW_HEIGHT / 2.0
         }
         LayoutStageAnchor::BranchOutput { branch_index } => {
             node.y
                 + FIELD_HEADER_HEIGHT
-                + (input_role_port_count(node) + field_port_count(node) + branch_index) as f32
+                + (input_role_header_count(node)
+                    + input_role_port_count(node)
+                    + field_port_count(node)
+                    + branch_index) as f32
                     * FIELD_ROW_HEIGHT
                 + FIELD_ROW_HEIGHT / 2.0
         }
@@ -1335,6 +1339,14 @@ fn input_role_port_count(node: &LayoutNode) -> usize {
         .iter()
         .filter(|port| port.kind == LayoutPortKind::AggregateGroupKey)
         .count()
+}
+
+fn input_role_header_count(node: &LayoutNode) -> usize {
+    if input_role_port_count(node) > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 fn compact_path_points<const N: usize>(points: [LayoutPoint; N]) -> Vec<LayoutPoint> {
@@ -1658,6 +1670,7 @@ mod tests {
             kind: FieldKind::Declared,
             ty: None,
             is_correlation_key: false,
+            is_aggregate_grain: false,
         }
     }
 
@@ -2605,7 +2618,7 @@ nodes:
             graph.edges[0].path.points.last(),
             Some(&LayoutPoint {
                 x: NODE_WIDTH + NODE_GAP,
-                y: FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
+                y: FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
             })
         );
 

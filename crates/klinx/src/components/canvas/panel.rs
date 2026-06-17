@@ -391,7 +391,7 @@ fn preview_rank(
     field: &FieldRow,
     rank_signals: &FieldRankSignals,
 ) -> u8 {
-    if field.is_correlation_key {
+    if field.is_correlation_key || field.is_aggregate_grain {
         return 1;
     }
     if matches!(field.kind, crate::pipeline_view::FieldKind::Emitted)
@@ -425,6 +425,8 @@ fn field_matches_query(field: &FieldRow, query: &str) -> bool {
             .as_ref()
             .is_some_and(|ty| text_matches_query(ty, query))
         || text_matches_query(field_kind_label(field), query)
+        || (field.is_correlation_key && text_matches_query("source correlation key", query))
+        || (field.is_aggregate_grain && text_matches_query("aggregate failure grain", query))
 }
 
 fn text_matches_query(value: &str, query: &str) -> bool {
@@ -1559,7 +1561,7 @@ mod tests {
     use super::{
         FIELD_ROW_CAP, FieldDisplayState, FieldProjectionContext, FieldRankSignals,
         GlobalNodeDisplayMode, GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP, ResolvedNodeDisplayMode,
-        field_matches_by_node, project_stage_fields, rendered_card_height,
+        field_matches_by_node, preview_rank, project_stage_fields, rendered_card_height,
         resolve_node_display_mode, text_matches_query,
     };
 
@@ -1584,6 +1586,7 @@ mod tests {
                     },
                     ty: Some(if i == 99 { "customer_id" } else { "int" }.to_string()),
                     is_correlation_key: false,
+                    is_aggregate_grain: false,
                 })
                 .collect(),
             branches: Vec::<RouteBranch>::new(),
@@ -1809,6 +1812,23 @@ mod tests {
         assert_eq!(projected.stage.fields.len(), PREVIEW_FIELD_ROW_CAP + 1);
         assert_eq!(projected.display.hidden_count, 1);
         assert_eq!(projected.display.temporary_fields, vec!["active_match"]);
+    }
+
+    #[test]
+    fn preview_rank_prioritizes_aggregate_grain_rows() {
+        let stage = wide_stage(0);
+        let field = FieldRow {
+            name: "invoice_date".to_string(),
+            kind: FieldKind::PassThrough,
+            is_aggregate_grain: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            preview_rank(0, &stage, &field, &FieldRankSignals::default()),
+            1,
+            "aggregate failure-grain rows should stay visible like source CK rows"
+        );
     }
 
     #[test]

@@ -408,12 +408,14 @@ impl StageView {
     /// World-space vertical center of field row `i` inside this card.
     ///
     /// Input role rows, if any, occupy the first row slots below the
-    /// [`FIELD_HEADER_HEIGHT`] header. Field rows start after them at the fixed
-    /// [`FIELD_ROW_HEIGHT`] pitch; the anchor sits at the row's mid-line.
+    /// [`FIELD_HEADER_HEIGHT`] header, optionally under a role-section header.
+    /// Field rows start after them at the fixed [`FIELD_ROW_HEIGHT`] pitch; the
+    /// anchor sits at the row's mid-line.
     pub fn field_row_y(&self, i: usize) -> f32 {
         self.canvas_y
             + FIELD_HEADER_HEIGHT
-            + (self.input_role_count() + i) as f32 * FIELD_ROW_HEIGHT
+            + (self.input_role_header_count() + self.input_role_count() + i) as f32
+                * FIELD_ROW_HEIGHT
             + FIELD_ROW_HEIGHT / 2.0
     }
 
@@ -456,6 +458,14 @@ impl StageView {
         self.role_ports.iter().filter(move |port| port.side == side)
     }
 
+    pub fn input_role_header_count(&self) -> usize {
+        role_port_header_rows(&self.role_ports, StagePortSide::Input)
+    }
+
+    fn output_role_header_count(&self) -> usize {
+        role_port_header_rows(&self.role_ports, StagePortSide::Output)
+    }
+
     fn input_role_count(&self) -> usize {
         self.role_ports_on(StagePortSide::Input).count()
     }
@@ -466,8 +476,14 @@ impl StageView {
 
     fn role_port_row_y(&self, side: StagePortSide, i: usize) -> f32 {
         let row_slot = match side {
-            StagePortSide::Input => i,
-            StagePortSide::Output => self.input_role_count() + self.fields.len() + i,
+            StagePortSide::Input => self.input_role_header_count() + i,
+            StagePortSide::Output => {
+                self.input_role_header_count()
+                    + self.input_role_count()
+                    + self.fields.len()
+                    + self.output_role_header_count()
+                    + i
+            }
         };
         self.canvas_y
             + FIELD_HEADER_HEIGHT
@@ -480,7 +496,12 @@ impl StageView {
     pub fn branch_row_y(&self, i: usize) -> f32 {
         self.canvas_y
             + FIELD_HEADER_HEIGHT
-            + (self.input_role_count() + self.fields.len() + self.output_role_count() + i) as f32
+            + (self.input_role_header_count()
+                + self.input_role_count()
+                + self.fields.len()
+                + self.output_role_header_count()
+                + self.output_role_count()
+                + i) as f32
                 * FIELD_ROW_HEIGHT
             + FIELD_ROW_HEIGHT / 2.0
     }
@@ -496,13 +517,35 @@ impl StageView {
     /// their combined count. A card with neither is exactly [`NODE_HEIGHT`] (the
     /// classic look), so this is safe to use uniformly in bounds/layout math.
     pub fn card_height(&self) -> f32 {
-        let rows = self.role_ports.len() + self.fields.len() + self.branches.len();
+        let rows = role_port_header_rows_total(&self.role_ports)
+            + self.role_ports.len()
+            + self.fields.len()
+            + self.branches.len();
         if rows == 0 {
             NODE_HEIGHT
         } else {
             FIELD_HEADER_HEIGHT + rows as f32 * FIELD_ROW_HEIGHT
         }
     }
+}
+
+fn role_port_header_rows(ports: &[StagePortRow], side: StagePortSide) -> usize {
+    let mut ports = ports.iter().filter(|port| port.side == side);
+    let Some(first) = ports.next() else {
+        return 0;
+    };
+    if matches!(first.kind, StagePortKind::AggregateGroupKey)
+        && ports.all(|port| matches!(port.kind, StagePortKind::AggregateGroupKey))
+    {
+        1
+    } else {
+        0
+    }
+}
+
+fn role_port_header_rows_total(ports: &[StagePortRow]) -> usize {
+    role_port_header_rows(ports, StagePortSide::Input)
+        + role_port_header_rows(ports, StagePortSide::Output)
 }
 
 const NODE_GAP: f32 = 80.0;
@@ -922,7 +965,12 @@ fn derive_view_from_nodes_inner(
         .zip(&node_branches)
         .zip(&node_role_ports)
         .map(|((rows, branches), role_ports)| {
-            row_stack_height(rows.len() + branches.len() + role_ports.len())
+            row_stack_height(
+                rows.len()
+                    + branches.len()
+                    + role_ports.len()
+                    + role_port_header_rows_total(role_ports),
+            )
         })
         .collect();
     let positions = layout_positions(&cols, &predecessors, &heights);
@@ -1120,7 +1168,12 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
         .zip(&node_branches)
         .zip(&node_role_ports)
         .map(|((rows, branches), role_ports)| {
-            row_stack_height(rows.len() + branches.len() + role_ports.len())
+            row_stack_height(
+                rows.len()
+                    + branches.len()
+                    + role_ports.len()
+                    + role_port_header_rows_total(role_ports),
+            )
         })
         .collect();
     let positions = layout_positions(&cols, &predecessors, &heights);
@@ -1229,6 +1282,7 @@ fn declared_rows(
             kind: FieldKind::Declared,
             ty: Some(compact_type(&c.ty)),
             is_correlation_key: ck_fields.contains(c.name.as_str()),
+            is_aggregate_grain: false,
         })
         .collect()
 }
@@ -1292,6 +1346,8 @@ struct ColMeta {
     ty: Option<String>,
     /// Whether any producer marked this column a correlation-key driver (#88).
     is_ck: bool,
+    /// Whether any producer marked this column as post-Aggregate group grain.
+    is_aggregate_grain: bool,
 }
 
 /// The bare column name an emit-support member denotes — the final dotted
@@ -1403,6 +1459,7 @@ fn stamp_passthrough_metadata(
         if let Some(meta) = meta {
             row.ty = meta.ty.clone();
             row.is_correlation_key = meta.is_ck;
+            row.is_aggregate_grain |= meta.is_aggregate_grain;
         }
     }
 }
@@ -1510,6 +1567,7 @@ fn compute_field_lineage(
                 // by a fan-in IS a CK driver if ANY producer marks it one, so OR
                 // across every producer rather than trusting the first (#88, #2).
                 meta.is_ck |= row.is_correlation_key;
+                meta.is_aggregate_grain |= row.is_aggregate_grain;
                 // Guard against a single malformed input listing the column twice
                 // so we never emit two carries to the same producer.
                 if !producers.contains(&p) {
@@ -1857,6 +1915,7 @@ fn composition_field_lineage(
             // An output port is a synthetic boundary label, not a source
             // column, so it never drives a correlation key.
             is_correlation_key: false,
+            is_aggregate_grain: false,
         }]));
     }
 
@@ -2012,6 +2071,7 @@ fn resolved_pipeline_field_lineage(
                     input_cols.push(row.name.clone());
                 }
                 meta.is_ck |= row.is_correlation_key;
+                meta.is_aggregate_grain |= row.is_aggregate_grain;
                 if !producers.contains(&p) {
                     producers.push(p);
                 }
@@ -2172,6 +2232,12 @@ fn resolved_row_fields(
             .unwrap_or_default(),
         _ => std::collections::HashSet::new(),
     };
+    let aggregate_group_keys: std::collections::HashSet<&str> = match node {
+        PipelineNode::Aggregate { config, .. } => {
+            config.group_by.iter().map(String::as_str).collect()
+        }
+        _ => std::collections::HashSet::new(),
+    };
 
     row.fields()
         .filter_map(|(field, ty)| {
@@ -2193,11 +2259,23 @@ fn resolved_row_fields(
                 FieldKind::PassThrough => col_meta.get(name).is_some_and(|meta| meta.is_ck),
                 FieldKind::Emitted => false,
             };
+            let is_aggregate_grain = match kind {
+                FieldKind::PassThrough => {
+                    aggregate_group_keys
+                        .iter()
+                        .any(|key| *key == name || bare_column(key) == name)
+                        || col_meta
+                            .get(name)
+                            .is_some_and(|meta| meta.is_aggregate_grain)
+                }
+                FieldKind::Declared | FieldKind::Emitted => false,
+            };
             Some(FieldRow {
                 name: name.to_string(),
                 kind,
                 ty: Some(compact_type(ty)),
                 is_correlation_key,
+                is_aggregate_grain,
             })
         })
         .collect()
@@ -2902,6 +2980,7 @@ fn body_row_fields(row: &cxl::typecheck::Row) -> Vec<FieldRow> {
             kind: FieldKind::Declared,
             ty: Some(compact_type(ty)),
             is_correlation_key: false,
+            is_aggregate_grain: false,
         })
         .collect()
 }
@@ -4050,6 +4129,7 @@ nodes:
                     name: "department".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: Some("string".to_string()),
+                    is_aggregate_grain: true,
                     ..Default::default()
                 },
                 FieldRow {
@@ -4275,6 +4355,11 @@ nodes:
                 1,
                 "group key {field} should remain one normal aggregate output row"
             );
+            let aggregate_field = field_by_name(&view, i_aggregate, field);
+            assert!(
+                aggregate_field.is_aggregate_grain,
+                "group key {field} should be marked as aggregate failure grain"
+            );
 
             assert!(
                 view.field_edges.iter().any(|edge| {
@@ -4297,6 +4382,114 @@ nodes:
                 "group key {field} should also feed the matching role input port"
             );
         }
+    }
+
+    /// An Aggregate changes the failure/correlation grain from the source
+    /// record key to the grouped record. Source CK fields that are also group
+    /// keys keep their source-CK marker; non-CK group keys still get the
+    /// aggregate failure-grain marker, and that marker follows downstream
+    /// passthrough rows.
+    #[test]
+    fn aggregate_group_keys_mark_post_aggregate_failure_grain() {
+        let yaml = r#"
+pipeline:
+  name: invoice_daily_rollup
+nodes:
+  - type: source
+    name: invoices
+    config:
+      name: invoices
+      type: csv
+      path: ./invoices.csv
+      correlation_key: [invoice_id, customer_id]
+      schema:
+        - { name: invoice_id, type: string }
+        - { name: customer_id, type: string }
+        - { name: invoice_date, type: string }
+        - { name: amount, type: float }
+  - type: aggregate
+    name: daily_totals
+    input: invoices
+    config:
+      group_by: [customer_id, invoice_date]
+      cxl: |
+        emit total_amount = sum(amount)
+        emit invoice_count = count(*)
+  - type: transform
+    name: annotate
+    input: daily_totals
+    config:
+      cxl: |
+        emit rollup_customer = customer_id
+  - type: output
+    name: daily_rollup
+    input: annotate
+    config:
+      name: daily_rollup
+      type: csv
+      path: ./daily-rollup.csv
+"#;
+
+        let config = parse_config(yaml).expect("invoice rollup fixture parses");
+        let raw = derive_pipeline_view(&config);
+        assert_invoice_rollup_grain(&raw);
+
+        let plan = config
+            .compile(&CompileContext::default())
+            .expect("invoice rollup fixture compiles");
+        let resolved = derive_resolved_pipeline_view(&plan);
+        assert_invoice_rollup_grain(&resolved);
+    }
+
+    fn assert_invoice_rollup_grain(view: &PipelineView) {
+        let i_source = stage_idx(view, "invoices");
+        let i_aggregate = stage_idx(view, "daily_totals");
+        let i_transform = stage_idx(view, "annotate");
+
+        assert!(field_by_name(view, i_source, "invoice_id").is_correlation_key);
+        assert!(
+            !view.stages[i_aggregate]
+                .fields
+                .iter()
+                .any(|row| row.name == "invoice_id"),
+            "invoice_id is a source-row CK and must not appear on grouped rows"
+        );
+
+        let aggregate_customer = field_by_name(view, i_aggregate, "customer_id");
+        assert!(
+            aggregate_customer.is_correlation_key,
+            "customer_id remains the surviving source CK component"
+        );
+        assert!(
+            aggregate_customer.is_aggregate_grain,
+            "customer_id is also part of the aggregate failure grain"
+        );
+
+        let aggregate_date = field_by_name(view, i_aggregate, "invoice_date");
+        assert!(
+            !aggregate_date.is_correlation_key,
+            "invoice_date was not declared as a source CK"
+        );
+        assert!(
+            aggregate_date.is_aggregate_grain,
+            "invoice_date is functionally part of the post-aggregate failure grain"
+        );
+
+        for field in ["customer_id", "invoice_date"] {
+            let carried = field_by_name(view, i_transform, field);
+            assert_eq!(carried.kind, FieldKind::PassThrough);
+            assert!(
+                carried.is_aggregate_grain,
+                "{field} keeps the aggregate failure-grain marker downstream"
+            );
+        }
+
+        let rollup_customer = field_by_name(view, i_transform, "rollup_customer");
+        assert_eq!(rollup_customer.kind, FieldKind::Emitted);
+        assert!(
+            !rollup_customer.is_aggregate_grain,
+            "a renamed emitted copy is not the original aggregate grain field"
+        );
     }
 
     /// A qualified group key is displayed as the aggregate output key while its
@@ -4333,6 +4526,10 @@ nodes:
 
         let group_key = field_by_name(&view, i_grouped, "source_b.field");
         assert_eq!(group_key.kind, FieldKind::PassThrough);
+        assert!(
+            group_key.is_aggregate_grain,
+            "qualified group key should be marked as aggregate failure grain"
+        );
         assert_eq!(
             group_key.ty.as_deref(),
             Some("string"),
@@ -4388,6 +4585,7 @@ nodes:
                 name: "department".to_string(),
                 kind: FieldKind::PassThrough,
                 ty: Some("string".to_string()),
+                is_aggregate_grain: true,
                 ..Default::default()
             }],
             "invalid aggregate CXL should degrade to config-derived group keys"
@@ -5858,7 +6056,7 @@ nodes:
     }
 
     #[test]
-    fn input_role_ports_shift_field_anchors_down_one_row() {
+    fn input_role_ports_shift_field_anchors_below_group_header() {
         let mut stage = stage_at(10.0, 20.0);
         stage.role_ports = vec![StagePortRow {
             id: "group_by:user_id".to_string(),
@@ -5872,22 +6070,26 @@ nodes:
             kind: FieldKind::PassThrough,
             ty: None,
             is_correlation_key: false,
+            is_aggregate_grain: false,
         }];
 
         assert_eq!(
             stage.role_port_anchor_in(0),
-            (10.0, 20.0 + FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT / 2.0)
-        );
-        assert_eq!(
-            stage.field_anchor_in(0),
             (
                 10.0,
                 20.0 + FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0
             )
         );
         assert_eq!(
+            stage.field_anchor_in(0),
+            (
+                10.0,
+                20.0 + FIELD_HEADER_HEIGHT + 2.0 * FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0
+            )
+        );
+        assert_eq!(
             stage.card_height(),
-            FIELD_HEADER_HEIGHT + 2.0 * FIELD_ROW_HEIGHT
+            FIELD_HEADER_HEIGHT + 3.0 * FIELD_ROW_HEIGHT
         );
     }
 

@@ -38,7 +38,7 @@ pub enum FieldKind {
 ///
 /// `Default` is derived so test literals can elide the rarely-set fields via
 /// `..Default::default()`; the zero value is a [`FieldKind::Declared`] row with
-/// no type and no correlation-key role.
+/// no type and no correlation-key/failure-grain role.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct FieldRow {
     pub name: String,
@@ -61,6 +61,14 @@ pub struct FieldRow {
     /// not a declared driver) nor for the engine-internal `$ck.<field>` shadow
     /// columns (those are not user-declared and klinx never surfaces them).
     pub is_correlation_key: bool,
+    /// Whether this field participates in the post-Aggregate failure grain.
+    ///
+    /// Aggregate `group_by` keys become the grouped-record correlation grain:
+    /// downstream failures are correlated by the aggregate group before the
+    /// engine expands back to contributing source rows. This is not the same as
+    /// a source-declared `correlation_key`, so it is tracked separately while
+    /// still propagating through unchanged passthrough rows.
+    pub is_aggregate_grain: bool,
 }
 
 /// How a [`FieldEdge`] relates its two endpoints — the three relationship
@@ -270,6 +278,7 @@ pub fn aggregate_group_key_output_fields(group_by: &[String]) -> Vec<FieldRow> {
                 name: key.clone(),
                 kind: FieldKind::PassThrough,
                 ty: None,
+                is_aggregate_grain: true,
                 ..Default::default()
             });
         }
@@ -596,11 +605,13 @@ mod tests {
                 FieldRow {
                     name: "department".to_string(),
                     kind: FieldKind::PassThrough,
+                    is_aggregate_grain: true,
                     ..Default::default()
                 },
                 FieldRow {
                     name: "region".to_string(),
                     kind: FieldKind::PassThrough,
+                    is_aggregate_grain: true,
                     ..Default::default()
                 },
                 FieldRow {
