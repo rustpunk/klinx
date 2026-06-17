@@ -14,8 +14,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cxl::ast::{Expr, Program, Statement};
+use cxl::ast::{BinOp, Expr, LiteralValue, Program, Statement, UnaryOp};
+use cxl::builtins::BuiltinRegistry;
 use cxl::parser::Parser;
+use cxl::typecheck::Type;
 
 /// How a field on a node's output record came to exist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -46,10 +48,14 @@ pub struct FieldRow {
     /// Compact datatype label for inline display (e.g. `float`, `string`,
     /// `int?` for a nullable int). `Some` for [`FieldKind::Declared`] columns
     /// (from a source/port schema) and for [`FieldKind::PassThrough`] columns
-    /// that carry a typed producer column through unchanged. `None` for
-    /// [`FieldKind::Emitted`] columns — typing an `emit` expression needs the
-    /// engine typechecker (Phase 2b / #68) — and when the producer column has no
-    /// known type.
+    /// that carry a typed producer column through unchanged. For
+    /// [`FieldKind::Emitted`] columns it holds the *conservatively inferred*
+    /// type of the emit expression ([`infer_emit_type`], #149) — `numeric` for
+    /// arithmetic, `bool` for comparisons/logical ops, the literal's type, a
+    /// builtin method's return type, or a `let`-chain's resolved type. `None`
+    /// when inference is genuinely ambiguous (the liberal Unknown fallback) or
+    /// when a producer column has no known type. The inferencer never asserts a
+    /// *wrong* type; it falls back to Unknown rather than guess.
     pub ty: Option<String>,
     /// Whether this field is a user-declared driver of a Source's
     /// `correlation_key` (#88). `true` for the [`FieldKind::Declared`] source
@@ -208,6 +214,225 @@ pub fn parse_clean(cxl: &str) -> Option<Program> {
     }
 }
 
+/// A short, lowercase datatype label for inline display on a field row, e.g.
+/// `float`, `string`, `datetime`, and `int?` for `Nullable(Int)`. The engine's
+/// `Display`/`display_name` are unsuitable: `display_name` drops the inner type
+/// of `Nullable`, and `Display` renders the verbose `Nullable(Int)` form.
+///
+/// Lives here (rather than in the canvas layer) so the lineage core can stamp an
+/// inferred emit type ([`infer_emit_type`], #149) onto an [`FieldRow`] without a
+/// round-trip through the renderer.
+pub fn compact_type(ty: &Type) -> String {
+    match ty {
+        Type::Nullable(inner) => format!("{}?", compact_type(inner)),
+        Type::Null => "null".to_string(),
+        Type::Bool => "bool".to_string(),
+        Type::Int => "int".to_string(),
+        Type::Float => "float".to_string(),
+        Type::String => "string".to_string(),
+        Type::Date => "date".to_string(),
+        Type::DateTime => "datetime".to_string(),
+        Type::Array => "array".to_string(),
+        Type::Map => "map".to_string(),
+        Type::Numeric => "numeric".to_string(),
+        Type::Any => "any".to_string(),
+    }
+}
+
+/// The process-wide builtin-method registry, built once.
+///
+/// `BuiltinRegistry::new()` constructs a ~50-entry method table (each entry
+/// allocating a `Vec`); the table is static data, so rebuilding it per node on
+/// every canvas re-derive (the view is recomputed on each CXL keystroke) is pure
+/// waste. One shared instance behind a `OnceLock` removes it.
+fn builtin_registry() -> &'static BuiltinRegistry {
+    static REGISTRY: std::sync::OnceLock<BuiltinRegistry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(BuiltinRegistry::new)
+}
+
+/// Whether `ty`'s base (nullable stripped) is a *known* numeric type.
+fn is_known_numeric(ty: &Type) -> bool {
+    matches!(
+        ty.unwrap_nullable(),
+        Type::Int | Type::Float | Type::Numeric
+    )
+}
+
+/// Whether `ty`'s base is a *known* string type.
+fn is_known_string(ty: &Type) -> bool {
+    matches!(ty.unwrap_nullable(), Type::String)
+}
+
+/// Whether `ty`'s base is a *known* type that arithmetic cannot operate on
+/// (bool/date/array/map). `Any`, `Null`, numerics and strings are excluded — the
+/// caller handles those separately.
+fn is_known_non_arithmetic(ty: &Type) -> bool {
+    matches!(
+        ty.unwrap_nullable(),
+        Type::Bool | Type::Date | Type::DateTime | Type::Array | Type::Map
+    )
+}
+
+/// Result type of CXL `+`, which is overloaded between numeric addition and
+/// string concatenation.
+///
+/// Conservative: `String` only when both sides are known strings; `Numeric` only
+/// when a side is known numeric and neither side is a known non-numeric; `Any`
+/// otherwise — crucially including the both-unknown case, where the operator
+/// could be either an add or a concat and `Numeric` would be a guess (#149).
+fn infer_add_type(lt: &Type, rt: &Type) -> Type {
+    if is_known_string(lt) && is_known_string(rt) {
+        Type::String
+    } else if is_known_string(lt)
+        || is_known_string(rt)
+        || is_known_non_arithmetic(lt)
+        || is_known_non_arithmetic(rt)
+    {
+        // A string mixed with a non-string, or any non-arithmetic operand: the
+        // engine rejects it, so we have no honest concrete type.
+        Type::Any
+    } else if is_known_numeric(lt) || is_known_numeric(rt) {
+        Type::Numeric
+    } else {
+        // Both operands unknown: could be a numeric add or a string concat.
+        Type::Any
+    }
+}
+
+/// Result type of CXL `-`, `*`, `/`, `%` — numeric-only operators. `Numeric`
+/// unless an operand is a known non-numeric type (string/bool/date/…), in which
+/// case the engine would reject it and we return `Any`. Two unknown operands
+/// still yield `Numeric`: these operators have no non-numeric overload, so the
+/// only valid typing of `a * b` is numeric.
+fn infer_numeric_binop_type(lt: &Type, rt: &Type) -> Type {
+    if is_known_string(lt)
+        || is_known_string(rt)
+        || is_known_non_arithmetic(lt)
+        || is_known_non_arithmetic(rt)
+    {
+        Type::Any
+    } else {
+        Type::Numeric
+    }
+}
+
+/// Conservatively infer the datatype of an `emit` expression *without* the engine
+/// typechecker (#149).
+///
+/// Mirrors the subset of the engine's own rules (`cxl/src/typecheck/pass.rs`)
+/// that can be decided from expression *shape* alone, and returns [`Type::Any`]
+/// — the liberal "Unknown" — for everything else. The guarantee is conservatism:
+/// the result is either a type the engine would also assign (possibly a wider
+/// supertype, e.g. `Numeric` where the engine resolves `Int`) or `Any`; it never
+/// asserts a type the engine would contradict.
+///
+/// Covered shapes:
+/// - literals → their concrete type;
+/// - arithmetic — operand-aware, because CXL `+` is overloaded:
+///   - `*`, `-`, `/`, `%` → [`Type::Numeric`] unless an operand is a *known*
+///     non-numeric type (then `Any` — the engine would reject it);
+///   - `+` → `String` when both operands are known strings (concatenation),
+///     `Numeric` when at least one operand is known numeric (and none is a known
+///     non-numeric), and `Any` when both operands are unknown (it could be
+///     either a numeric add or a string concat — `Numeric` would be a guess);
+/// - comparisons and logical ops → [`Type::Bool`];
+/// - unary `!` → `Bool`, unary `-` → its operand's inferred type;
+/// - method calls → the builtin's declared return type (covers string methods);
+/// - a reference to a `let` binding → that binding's inferred type
+///   (`let_types`), resolving `let`-chains transitively.
+///
+/// Bare input-column references are `Any` in raw mode (their type needs the
+/// source schema, which lives outside this pure analysis), as is any uncovered
+/// shape (conditionals, aggregates, window calls, …).
+fn infer_emit_type(
+    expr: &Expr,
+    let_types: &HashMap<String, Type>,
+    builtins: &BuiltinRegistry,
+) -> Type {
+    match expr {
+        Expr::Literal { value, .. } => match value {
+            LiteralValue::Int(_) => Type::Int,
+            LiteralValue::Float(_) => Type::Float,
+            LiteralValue::String(_) => Type::String,
+            LiteralValue::Bool(_) => Type::Bool,
+            LiteralValue::Date(_) => Type::Date,
+            LiteralValue::Null => Type::Null,
+        },
+        Expr::Binary { op, lhs, rhs, .. } => match op {
+            BinOp::Add => {
+                let lt = infer_emit_type(lhs, let_types, builtins);
+                let rt = infer_emit_type(rhs, let_types, builtins);
+                infer_add_type(&lt, &rt)
+            }
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                let lt = infer_emit_type(lhs, let_types, builtins);
+                let rt = infer_emit_type(rhs, let_types, builtins);
+                infer_numeric_binop_type(&lt, &rt)
+            }
+            BinOp::Eq
+            | BinOp::Neq
+            | BinOp::Gt
+            | BinOp::Lt
+            | BinOp::Gte
+            | BinOp::Lte
+            | BinOp::And
+            | BinOp::Or => Type::Bool,
+        },
+        Expr::Unary { op, operand, .. } => match op {
+            UnaryOp::Not => Type::Bool,
+            UnaryOp::Neg => infer_emit_type(operand, let_types, builtins),
+        },
+        // The engine resolves a method's return type through this same registry,
+        // so a known method agrees with the engine; an unknown method is `Any`.
+        Expr::MethodCall { method, .. } => builtins
+            .lookup_method(method.as_ref())
+            .map(|def| Type::from_type_tag(def.return_type))
+            .unwrap_or(Type::Any),
+        // A reference resolves to a `let` binding's inferred type when it names
+        // one; a bare input column has no known type here, so it stays `Any`.
+        Expr::FieldRef { name, .. } => let_types.get(name.as_ref()).cloned().unwrap_or(Type::Any),
+        // Everything else (qualified refs, conditionals, aggregates, window
+        // calls, …) is left Unknown — the conservative fallback.
+        _ => Type::Any,
+    }
+}
+
+/// The inferred type of every top-level `let` binding, in declaration order.
+///
+/// The type analogue of [`build_let_support`]: each `let`'s expression is typed
+/// against the bindings declared *before* it, so a chain
+/// `let u = a + 1.0; let v = u; emit y = v` resolves `v` (and thus `y`) through
+/// `u`'s inferred type. Declaration-ordered CXL cannot forward-reference, so a
+/// not-yet-seen name simply infers as `Any`.
+fn build_let_types(program: &Program, builtins: &BuiltinRegistry) -> HashMap<String, Type> {
+    let mut let_types: HashMap<String, Type> = HashMap::new();
+    for stmt in &program.statements {
+        if let Statement::Let { name, expr, .. } = stmt {
+            let ty = infer_emit_type(expr, &let_types, builtins);
+            let_types.insert(name.to_string(), ty);
+        }
+    }
+    let_types
+}
+
+/// The inferred type of every field-emit target, keyed by name.
+///
+/// Descends `emit each` bodies via `for_each_field_emit` so fanned-out fields are
+/// typed too. A name emitted more than once keeps its *last* type — CXL record
+/// semantics overwrite an earlier same-named emit, so the final value's type is
+/// the last writer's.
+fn emit_target_types(
+    program: &Program,
+    let_types: &HashMap<String, Type>,
+    builtins: &BuiltinRegistry,
+) -> HashMap<String, Type> {
+    let mut types: HashMap<String, Type> = HashMap::new();
+    cxl::ast::for_each_field_emit(&program.statements, &mut |name, expr| {
+        types.insert(name.to_string(), infer_emit_type(expr, let_types, builtins));
+    });
+    types
+}
+
 /// Compute a transform-like node's output field rows from its input columns
 /// and parsed CXL.
 ///
@@ -231,9 +456,13 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
     // as passthroughs and keep their datatypes, instead of all looking computed.
     let copies = emit_copy_targets(program, input_cols);
 
-    // Datatypes are filled in by the caller (`compute_field_lineage`): a
-    // PassThrough row inherits its producer column's type; an Emitted row's type
-    // would need the engine typechecker (Phase 2b), so it stays `None` here.
+    // Emitted-row datatypes are inferred here (#149); PassThrough datatypes are
+    // filled in by the caller (`compute_field_lineage`) from the producer column.
+    // The builtin registry is process-wide; the let-type map is per node.
+    let builtins = builtin_registry();
+    let let_types = build_let_types(program, builtins);
+    let emit_types = emit_target_types(program, &let_types, builtins);
+
     let mut rows: Vec<FieldRow> = Vec::new();
     for col in input_cols {
         if !emitted_set.contains(col.as_str()) {
@@ -254,10 +483,21 @@ pub fn transform_output_fields(input_cols: &[String], program: &Program) -> Vec<
         } else {
             FieldKind::Emitted
         };
+        // A computed Emitted row shows its inferred type, dropping the liberal
+        // `Any` Unknown to `None` (no label). An identity-copy row is a
+        // PassThrough whose type the caller carries from its producer, so leave
+        // it `None` here.
+        let ty = match kind {
+            FieldKind::Emitted => emit_types
+                .get(&name)
+                .filter(|t| **t != Type::Any)
+                .map(compact_type),
+            _ => None,
+        };
         rows.push(FieldRow {
             name,
             kind,
-            ty: None,
+            ty,
             ..Default::default()
         });
     }
@@ -562,7 +802,8 @@ mod tests {
 
     /// transform_output_fields: passthrough for unshadowed inputs (input
     /// order), then emitted targets (emit order). An emit that shadows an input
-    /// column appears once, as Emitted.
+    /// column appears once, as Emitted. Both arithmetic emits infer `numeric`
+    /// (#149); the carried input `x` has no inferred type here.
     #[test]
     fn output_fields_order_and_shadowing() {
         let prog = program("emit b = a * 2.0\nemit a = a + 1.0\n");
@@ -580,13 +821,13 @@ mod tests {
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::Emitted,
-                    ty: None,
+                    ty: Some("numeric".to_string()),
                     ..Default::default()
                 },
                 FieldRow {
                     name: "a".to_string(),
                     kind: FieldKind::Emitted,
-                    ty: None,
+                    ty: Some("numeric".to_string()),
                     ..Default::default()
                 },
             ]
@@ -668,11 +909,12 @@ mod tests {
                     ty: None,
                     ..Default::default()
                 },
-                // `c` is computed → Emitted (created/altered here).
+                // `c` is computed → Emitted (created/altered here); the
+                // arithmetic emit infers `numeric` (#149).
                 FieldRow {
                     name: "c".to_string(),
                     kind: FieldKind::Emitted,
-                    ty: None,
+                    ty: Some("numeric".to_string()),
                     ..Default::default()
                 },
             ]
@@ -958,6 +1200,84 @@ mod tests {
         // anchor — downstream and upstream each close the loop in one extra hop.
         assert_eq!(field_lineage_full(&edges, 0, "a"), HashSet::from([0, 1]));
         assert_eq!(field_lineage_full(&edges, 1, "a"), HashSet::from([0, 1]));
+    }
+
+    /// `infer_emit_type` (#149) covers the common emit shapes and falls back to
+    /// `Any` (the liberal Unknown) for everything else — never a wrong type.
+    #[test]
+    fn infer_emit_type_covers_common_shapes() {
+        let builtins = BuiltinRegistry::new();
+        let infer = |src: &str| {
+            let prog = program(src);
+            let emit_types =
+                emit_target_types(&prog, &build_let_types(&prog, &builtins), &builtins);
+            emit_types.get("y").cloned().expect("emit y present")
+        };
+
+        // Literals → their concrete type.
+        assert_eq!(infer("emit y = 1\n"), Type::Int);
+        assert_eq!(infer("emit y = 1.5\n"), Type::Float);
+        assert_eq!(infer("emit y = \"hi\"\n"), Type::String);
+        assert_eq!(infer("emit y = true\n"), Type::Bool);
+
+        // Arithmetic with a numeric signal → the honest `Numeric`
+        // over-approximation (the engine narrows to Int/Float once operand types
+        // are known).
+        assert_eq!(infer("emit y = a + 1\n"), Type::Numeric);
+        // `*`/`-`/`/`/`%` have no non-numeric overload, so even two unknown
+        // operands can only be a numeric op in a valid program.
+        assert_eq!(infer("emit y = a * b\n"), Type::Numeric);
+
+        // `+` is overloaded. Two known strings concatenate → String; two unknown
+        // operands could be add *or* concat, so we abstain (Any) rather than
+        // guess `numeric` — this is the conservatism guarantee (#149).
+        assert_eq!(infer("emit y = \"a\" + \"b\"\n"), Type::String);
+        assert_eq!(infer("emit y = a + b\n"), Type::Any);
+
+        // Comparisons and logical ops → Bool.
+        assert_eq!(infer("emit y = a > 3\n"), Type::Bool);
+        assert_eq!(infer("emit y = a == b\n"), Type::Bool);
+        assert_eq!(infer("emit y = a and b\n"), Type::Bool);
+        assert_eq!(infer("emit y = not a\n"), Type::Bool);
+
+        // String method → the builtin's declared return type.
+        assert_eq!(infer("emit y = name.upper()\n"), Type::String);
+        assert_eq!(infer("emit y = name.starts_with(\"x\")\n"), Type::Bool);
+
+        // A bare input-column reference is Unknown in raw mode (no schema here).
+        assert_eq!(infer("emit y = a\n"), Type::Any);
+    }
+
+    /// A known string `let` feeding `+` concatenates (#149): the overload is
+    /// resolved by the operand's inferred type, not guessed as numeric.
+    #[test]
+    fn infer_add_resolves_string_concat_via_let_types() {
+        let builtins = BuiltinRegistry::new();
+        // `s` is a known string (method return), so `s + s` is concatenation.
+        let prog = program("let s = name.upper()\nemit y = s + s\n");
+        let let_types = build_let_types(&prog, &builtins);
+        let emit_types = emit_target_types(&prog, &let_types, &builtins);
+        assert_eq!(emit_types.get("y"), Some(&Type::String));
+    }
+
+    /// Type inference resolves `let`-chains transitively, the type analogue of
+    /// `let_chain_resolves_transitively` (#149).
+    #[test]
+    fn infer_emit_type_resolves_let_chains() {
+        let builtins = BuiltinRegistry::new();
+        // `u` is numeric (arithmetic); `v` aliases `u`; `y` aliases `v` → numeric.
+        let prog = program("let u = a + 1.0\nlet v = u\nemit y = v\n");
+        let let_types = build_let_types(&prog, &builtins);
+        assert_eq!(let_types.get("u"), Some(&Type::Numeric));
+        assert_eq!(let_types.get("v"), Some(&Type::Numeric));
+        let emit_types = emit_target_types(&prog, &let_types, &builtins);
+        assert_eq!(emit_types.get("y"), Some(&Type::Numeric));
+
+        // A string-typed let flows through to its emit.
+        let prog = program("let s = name.upper()\nemit y = s\n");
+        let let_types = build_let_types(&prog, &builtins);
+        let emit_types = emit_target_types(&prog, &let_types, &builtins);
+        assert_eq!(emit_types.get("y"), Some(&Type::String));
     }
 
     /// A cyclic let-support map must not loop forever; the visiting guard makes
