@@ -126,3 +126,11 @@ When architecture changes, append a dated entry with:
 - Added a canvas toolbar global field search that highlights matches and temporarily reveals hidden matches without filtering normal node field lists.
 - Per-node field filter and global field search both support `*` and `?` wildcard matching against field names, types, and kind labels.
 - Verification: `cargo build --package klinx`, `cargo test -p klinx wide_schema_projection`, `cargo test -p klinx field_search_accepts_wildcards`, `cargo fmt --all --check`, `cargo clippy -p klinx -- -D warnings`, `cargo test -p klinx pipeline_view`, and `git diff --check`.
+
+## 2026-06-17: Aggregate Group-By Role Ports
+
+- Aggregate `group_by` keys now render as semantic input role rows above the Aggregate output fields. The grouped output record still renders as normal field rows: de-duplicated group keys first, then aggregate emit targets.
+- Added `RoleEdge` and `StagePortRow` plumbing so a producer field can feed `group_by:<field>` and the normal Aggregate output field without drawing duplicate cables into the same row.
+- The canvas hover/pin selection model now supports field endpoints and role-port endpoints; role edges temporarily reveal hidden producer fields and tint the target role row.
+- The port-aware layout model includes Aggregate group-key role ports and exports `PipelineView::role_edge_paths` parallel to `role_edges`.
+- Verification: `cargo fmt --all --check`, `cargo test -p klinx pipeline_view`, `cargo test -p klinx canvas`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check`.

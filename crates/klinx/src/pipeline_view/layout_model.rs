@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use super::{
     COLUMN_CENTER_Y, CanvasConnectorPath, CanvasPoint, Connection, FIELD_HEADER_HEIGHT,
     FIELD_ROW_HEIGHT, FieldEdge, HEADER_PORT_Y, LEFT_MARGIN, NODE_GAP, NODE_WIDTH, PipelineView,
-    STACK_GAP, StageKind, StageView,
+    RoleEdge, STACK_GAP, StageKind, StagePortKind, StagePortSide as ViewStagePortSide, StageView,
 };
 
 /// Canvas layout path requested by callers during the renderer migration.
@@ -146,6 +146,7 @@ pub enum LayoutPortSide {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutPortKind {
     Node,
+    AggregateGroupKey,
     Field,
     RouteBranch,
     CullSideOutput,
@@ -160,6 +161,7 @@ pub enum LayoutPortKind {
 pub enum LayoutStageAnchor {
     NodeInput,
     NodeOutput,
+    RoleInput { role_index: usize },
     FieldInput { field_index: usize },
     FieldOutput { field_index: usize },
     BranchOutput { branch_index: usize },
@@ -179,6 +181,7 @@ pub struct LayoutEdge {
 pub enum LayoutEdgeKind {
     Node,
     Field,
+    AggregateGroupKey,
     RouteBranch,
     CullSideOutput,
 }
@@ -237,6 +240,7 @@ impl LayoutGraph {
                 .map(|connection| connection_edge(connection, &view.stages)),
         );
         edges.extend(view.field_edges.iter().map(field_edge));
+        edges.extend(view.role_edges.iter().map(role_edge));
 
         let mut graph = Self { nodes, edges };
         graph.assign_longest_path_ranks();
@@ -487,13 +491,28 @@ impl LayoutGraph {
 impl LayoutNode {
     fn from_stage(stage_index: usize, stage: &StageView) -> Self {
         let mut input_ports = vec![LayoutPort::node("node:in", LayoutPortSide::Input, 0)];
+        let input_role_ports = stage
+            .role_ports
+            .iter()
+            .filter(|port| port.side == ViewStagePortSide::Input)
+            .collect::<Vec<_>>();
+        input_ports.extend(input_role_ports.iter().enumerate().map(|(idx, port)| {
+            LayoutPort::role_input(
+                &format!("role:in:{}", port.id),
+                &port.label,
+                port.kind,
+                idx,
+                idx + 1,
+            )
+        }));
+        let input_field_order = input_role_ports.len() + 1;
         input_ports.extend(stage.fields.iter().enumerate().map(|(idx, field)| {
             LayoutPort::field(
                 &format!("field:in:{}", field.name),
                 &field.name,
                 LayoutPortSide::Input,
                 idx,
-                idx + 1,
+                input_field_order + idx,
             )
         }));
 
@@ -577,6 +596,26 @@ impl LayoutPort {
         }
     }
 
+    fn role_input(
+        id: &str,
+        label: &str,
+        kind: StagePortKind,
+        role_index: usize,
+        order: usize,
+    ) -> Self {
+        let kind = match kind {
+            StagePortKind::AggregateGroupKey => LayoutPortKind::AggregateGroupKey,
+        };
+        Self {
+            id: id.to_string(),
+            label: label.to_string(),
+            side: LayoutPortSide::Input,
+            kind,
+            order,
+            stage_anchor: LayoutStageAnchor::RoleInput { role_index },
+        }
+    }
+
     fn branch(
         id: &str,
         label: &str,
@@ -635,6 +674,17 @@ fn field_edge(edge: &FieldEdge) -> LayoutEdge {
     }
 }
 
+fn role_edge(edge: &RoleEdge) -> LayoutEdge {
+    LayoutEdge {
+        from_node: edge.from_node,
+        from_port: format!("field:out:{}", edge.from_field),
+        to_node: edge.to_node,
+        to_port: format!("role:in:{}", edge.to_port),
+        kind: LayoutEdgeKind::AggregateGroupKey,
+        path: ConnectorPath::default(),
+    }
+}
+
 fn order_port_side(
     node_index: usize,
     side: LayoutPortSide,
@@ -667,8 +717,9 @@ fn order_port_side(
 fn semantic_port_group(port: &LayoutPort) -> usize {
     match port.kind {
         LayoutPortKind::Node => 0,
-        LayoutPortKind::Field => 1,
-        LayoutPortKind::RouteBranch | LayoutPortKind::CullSideOutput => 2,
+        LayoutPortKind::AggregateGroupKey => 1,
+        LayoutPortKind::Field => 2,
+        LayoutPortKind::RouteBranch | LayoutPortKind::CullSideOutput => 3,
     }
 }
 
@@ -757,8 +808,9 @@ fn edge_kind_order(kind: LayoutEdgeKind) -> usize {
     match kind {
         LayoutEdgeKind::Node => 0,
         LayoutEdgeKind::Field => 1,
-        LayoutEdgeKind::RouteBranch => 2,
-        LayoutEdgeKind::CullSideOutput => 3,
+        LayoutEdgeKind::AggregateGroupKey => 2,
+        LayoutEdgeKind::RouteBranch => 3,
+        LayoutEdgeKind::CullSideOutput => 4,
     }
 }
 
@@ -792,17 +844,24 @@ fn port_anchor(node: &LayoutNode, port_id: &str, side: LayoutPortSide) -> Layout
 
     let y = match port.stage_anchor {
         LayoutStageAnchor::NodeInput | LayoutStageAnchor::NodeOutput => node.y + HEADER_PORT_Y,
+        LayoutStageAnchor::RoleInput { role_index } => {
+            node.y
+                + FIELD_HEADER_HEIGHT
+                + role_index as f32 * FIELD_ROW_HEIGHT
+                + FIELD_ROW_HEIGHT / 2.0
+        }
         LayoutStageAnchor::FieldInput { field_index }
         | LayoutStageAnchor::FieldOutput { field_index } => {
             node.y
                 + FIELD_HEADER_HEIGHT
-                + field_index as f32 * FIELD_ROW_HEIGHT
+                + (input_role_port_count(node) + field_index) as f32 * FIELD_ROW_HEIGHT
                 + FIELD_ROW_HEIGHT / 2.0
         }
         LayoutStageAnchor::BranchOutput { branch_index } => {
             node.y
                 + FIELD_HEADER_HEIGHT
-                + (field_port_count(node) + branch_index) as f32 * FIELD_ROW_HEIGHT
+                + (input_role_port_count(node) + field_port_count(node) + branch_index) as f32
+                    * FIELD_ROW_HEIGHT
                 + FIELD_ROW_HEIGHT / 2.0
         }
     };
@@ -824,6 +883,13 @@ fn field_port_count(node: &LayoutNode) -> usize {
     node.output_ports
         .iter()
         .filter(|port| port.kind == LayoutPortKind::Field)
+        .count()
+}
+
+fn input_role_port_count(node: &LayoutNode) -> usize {
+    node.input_ports
+        .iter()
+        .filter(|port| port.kind == LayoutPortKind::AggregateGroupKey)
         .count()
 }
 
@@ -903,6 +969,43 @@ fn validate_port_aware_input(view: &PipelineView) -> Option<CanvasLayoutFallback
         }
     }
 
+    for (edge_index, edge) in view.role_edges.iter().enumerate() {
+        if edge.from_node >= view.stages.len() {
+            return Some(CanvasLayoutFallback::MissingStage {
+                edge_index,
+                stage_index: edge.from_node,
+            });
+        }
+        if edge.to_node >= view.stages.len() {
+            return Some(CanvasLayoutFallback::MissingStage {
+                edge_index,
+                stage_index: edge.to_node,
+            });
+        }
+        if view.stages[edge.from_node]
+            .field_index(&edge.from_field)
+            .is_none()
+        {
+            return Some(CanvasLayoutFallback::MissingPort {
+                edge_index,
+                stage_index: edge.from_node,
+                side: LayoutPortSide::Output,
+                port_id: format!("field:out:{}", edge.from_field),
+            });
+        }
+        if view.stages[edge.to_node]
+            .role_port_index(ViewStagePortSide::Input, &edge.to_port)
+            .is_none()
+        {
+            return Some(CanvasLayoutFallback::MissingPort {
+                edge_index,
+                stage_index: edge.to_node,
+                side: LayoutPortSide::Input,
+                port_id: format!("role:in:{}", edge.to_port),
+            });
+        }
+    }
+
     None
 }
 
@@ -970,6 +1073,7 @@ fn apply_graph_positions(view: &mut PipelineView, graph: &LayoutGraph) {
 
 fn apply_graph_paths(view: &mut PipelineView, graph: &LayoutGraph) {
     let connection_count = view.connections.len();
+    let field_edge_count = view.field_edges.len();
     let rank_offsets = rank_center_offsets(graph);
     view.connection_paths = graph
         .edges
@@ -981,11 +1085,19 @@ fn apply_graph_paths(view: &mut PipelineView, graph: &LayoutGraph) {
         .edges
         .iter()
         .skip(connection_count)
-        .take(view.field_edges.len())
+        .take(field_edge_count)
+        .map(|edge| canvas_path_for_edge(edge, graph, &rank_offsets).unwrap_or_default())
+        .collect();
+    view.role_edge_paths = graph
+        .edges
+        .iter()
+        .skip(connection_count + field_edge_count)
+        .take(view.role_edges.len())
         .map(|edge| canvas_path_for_edge(edge, graph, &rank_offsets).unwrap_or_default())
         .collect();
     debug_assert_eq!(view.connection_paths.len(), view.connections.len());
     debug_assert_eq!(view.field_edge_paths.len(), view.field_edges.len());
+    debug_assert_eq!(view.role_edge_paths.len(), view.role_edges.len());
 }
 
 fn canvas_path_for_edge(
@@ -1073,8 +1185,8 @@ fn compact_canvas_path_points<const N: usize>(points: [CanvasPoint; N]) -> Vec<C
 mod tests {
     use super::*;
     use crate::pipeline_view::{
-        Connection, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, PipelineView, RouteBranch,
-        StageKind, StageView,
+        Connection, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, PipelineView, RoleEdge,
+        RouteBranch, StageKind, StagePortKind, StagePortRow, StagePortSide, StageView,
     };
 
     fn stage(id: &str) -> StageView {
@@ -1090,6 +1202,7 @@ mod tests {
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         }
     }
 
@@ -1122,6 +1235,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1157,6 +1272,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1172,6 +1289,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1223,6 +1342,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1265,6 +1386,8 @@ mod tests {
                 kind: FieldEdgeKind::Passthrough,
             }],
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
         let graph = LayoutGraph::from_pipeline_view(&view);
 
@@ -1349,6 +1472,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let graph = LayoutGraph::from_pipeline_view(&view);
@@ -1412,6 +1537,8 @@ mod tests {
                 },
             ],
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let graph = LayoutGraph::from_pipeline_view(&view);
@@ -1496,6 +1623,8 @@ mod tests {
                 },
             ],
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let graph = LayoutGraph::from_pipeline_view(&view);
@@ -1542,6 +1671,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let graph = LayoutGraph::from_pipeline_view(&view);
@@ -1568,6 +1699,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::CurrentBarycenter);
@@ -1586,6 +1719,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
         let current_positions = view
             .stages
@@ -1688,6 +1823,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let result = apply_canvas_layout(view, CanvasLayoutEngine::PortAwareSugiyama);
@@ -1739,6 +1876,8 @@ mod tests {
                 },
             ],
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let result = apply_canvas_layout(view, CanvasLayoutEngine::PortAwareSugiyama);
@@ -1766,6 +1905,65 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_group_key_role_port_is_routed_as_input_port() {
+        let mut source = stage("source");
+        source.fields = vec![field("user_id")];
+        let mut aggregate = stage("aggregate");
+        aggregate.kind = StageKind::Aggregate;
+        aggregate.role_ports = vec![StagePortRow {
+            id: "group_by:user_id".to_string(),
+            label: "user_id".to_string(),
+            role: "group_by".to_string(),
+            kind: StagePortKind::AggregateGroupKey,
+            side: StagePortSide::Input,
+        }];
+        aggregate.fields = vec![field("user_id")];
+        let view = PipelineView {
+            stages: vec![source, aggregate],
+            connections: Vec::new(),
+            connection_paths: Vec::new(),
+            field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
+            role_edges: vec![RoleEdge {
+                from_node: 0,
+                from_field: "user_id".to_string(),
+                to_node: 1,
+                to_port: "group_by:user_id".to_string(),
+                kind: FieldEdgeKind::Derive,
+            }],
+            role_edge_paths: Vec::new(),
+        };
+
+        let graph = LayoutGraph::from_pipeline_view(&view);
+
+        assert_eq!(
+            input_port_ids(&graph.nodes[1]),
+            vec!["node:in", "role:in:group_by:user_id", "field:in:user_id"]
+        );
+        assert_eq!(graph.edges[0].kind, LayoutEdgeKind::AggregateGroupKey);
+        assert_eq!(graph.edges[0].to_port, "role:in:group_by:user_id");
+        assert_eq!(
+            graph.edges[0].path.points.last(),
+            Some(&LayoutPoint {
+                x: NODE_WIDTH + NODE_GAP,
+                y: FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT / 2.0,
+            })
+        );
+
+        let result = apply_canvas_layout(view, CanvasLayoutEngine::PortAwareSugiyama);
+
+        assert_eq!(result.applied, CanvasLayoutEngine::PortAwareSugiyama);
+        assert_eq!(result.view.role_edge_paths.len(), 1);
+        assert_eq!(
+            result.view.role_edge_paths[0].points.last(),
+            Some(&CanvasPoint {
+                x: result.view.stages[1].role_port_anchor_in(0).0,
+                y: result.view.stages[1].role_port_anchor_in(0).1,
+            })
+        );
+    }
+
+    #[test]
     fn port_aware_layout_falls_back_for_missing_branch_anchor() {
         let mut route = stage("route");
         route.kind = StageKind::Route;
@@ -1779,6 +1977,8 @@ mod tests {
             connection_paths: Vec::new(),
             field_edges: Vec::new(),
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::PortAwareSugiyama);
@@ -1811,6 +2011,8 @@ mod tests {
                 kind: FieldEdgeKind::Passthrough,
             }],
             field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
         };
 
         let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::PortAwareSugiyama);

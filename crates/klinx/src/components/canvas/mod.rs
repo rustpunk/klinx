@@ -12,6 +12,21 @@ const FIELD_HOVER_ENTER_DELAY_MS: u64 = 180;
 const FIELD_HOVER_EXIT_DELAY_MS: u64 = 150;
 const FIELD_HOVER_SKIP_DELAY_MS: u64 = 300;
 
+/// A selectable field-lineage endpoint on the canvas.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LineageTarget {
+    Field(usize, String),
+    RolePort(usize, String),
+}
+
+impl LineageTarget {
+    pub fn node(&self) -> usize {
+        match self {
+            LineageTarget::Field(node, _) | LineageTarget::RolePort(node, _) => *node,
+        }
+    }
+}
+
 /// What the pointer is currently over on the canvas, driving the field-lineage
 /// reveal (#72).
 ///
@@ -26,6 +41,9 @@ pub enum HoverTarget {
     /// Pointer over a specific field row — reveal that field's DIRECT (1-hop)
     /// lineage closure (today's behaviour, both edge directions, all kinds).
     Field(usize, String),
+    /// Pointer over a semantic role port row, e.g. an Aggregate `group_by`
+    /// input. Reveal the direct role-edge neighbourhood.
+    RolePort(usize, String),
 }
 
 impl HoverTarget {
@@ -36,7 +54,7 @@ impl HoverTarget {
     pub fn node(&self) -> Option<usize> {
         match self {
             HoverTarget::None => None,
-            HoverTarget::Field(n, _) => Some(*n),
+            HoverTarget::Field(n, _) | HoverTarget::RolePort(n, _) => Some(*n),
         }
     }
 }
@@ -58,8 +76,14 @@ pub struct CanvasHover(
 
 impl CanvasHover {
     pub fn request_field(&mut self, node: usize, field: String) {
-        let target = HoverTarget::Field(node, field);
+        self.request_target(HoverTarget::Field(node, field));
+    }
 
+    pub fn request_role_port(&mut self, node: usize, port: String) {
+        self.request_target(HoverTarget::RolePort(node, port));
+    }
+
+    fn request_target(&mut self, target: HoverTarget) {
         if !matches!(&*self.0.peek(), HoverTarget::None) || *self.3.peek() {
             self.next_generation();
             self.1.set(HoverTarget::None);
@@ -150,4 +174,4 @@ impl CanvasHover {
 /// over the hover in the panel's reveal computation. `FieldRowView` toggles it on
 /// row click; a canvas-background click or a view swap clears it.
 #[derive(Clone, Copy)]
-pub struct PinnedField(pub Signal<Option<(usize, String)>>);
+pub struct PinnedField(pub Signal<Option<LineageTarget>>);

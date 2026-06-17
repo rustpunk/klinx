@@ -4459,6 +4459,87 @@ input:-webkit-autofill:focus {
 /* Field-row list: abuts the fixed-height header with NO margin, so the first
    row starts exactly `FIELD_HEADER_HEIGHT` below the card top. Any margin here
    would shift every row off its `field_row_y(i)` anchor. */
+.klinx-node-role-ports {
+  margin-top: 0;
+  box-shadow: inset 0 -1px 0 var(--klinx-border-medium);
+}
+
+.klinx-node-role-port {
+  position: relative;
+  box-sizing: border-box;
+  height: 22px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  font-family: var(--klinx-font-code);
+  font-size: 11px;
+  color: var(--klinx-bone);
+  background: color-mix(in srgb, var(--klinx-char-raised) 28%, transparent);
+}
+.klinx-node-role-port:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+.klinx-node-role-port--lineage,
+.klinx-node-role-port--lineage:hover {
+  background: rgba(183, 65, 14, 0.14);
+  box-shadow: inset 2px 0 0 var(--klinx-stage-accent);
+}
+.klinx-node-role-port--pinned,
+.klinx-node-role-port--pinned:hover {
+  background: rgba(183, 65, 14, 0.24);
+  box-shadow: inset 0 0 0 1px var(--klinx-stage-accent);
+}
+
+[data-theme="enamel"] .klinx-node-role-port {
+  background: rgba(64, 74, 84, 0.06);
+}
+[data-theme="enamel"] .klinx-node-role-port--lineage,
+[data-theme="enamel"] .klinx-node-role-port--lineage:hover {
+  background: rgba(183, 65, 14, 0.14);
+  box-shadow: inset 2px 0 0 #B7410E;
+}
+[data-theme="enamel"] .klinx-node-role-port--pinned,
+[data-theme="enamel"] .klinx-node-role-port--pinned:hover {
+  background: rgba(183, 65, 14, 0.22);
+  box-shadow: inset 0 0 0 1px #B7410E;
+}
+
+.klinx-node-role-port-role {
+  flex: 0 0 auto;
+  max-width: 62px;
+  color: var(--klinx-stage-accent);
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.klinx-node-role-port-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--klinx-bone);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-theme="enamel"] .klinx-node-role-port-name {
+  color: #25313D;
+}
+
+.klinx-node-role-port-anchor {
+  position: absolute;
+  top: 50%;
+  left: -4px;
+  width: 7px;
+  height: 7px;
+  background: var(--klinx-stage-accent);
+  border: 1px solid var(--klinx-border-medium);
+  transform: translateY(-50%) rotate(45deg);
+}
+
 .klinx-node-fields {
   margin-top: 0;
 }

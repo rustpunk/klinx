@@ -218,6 +218,34 @@ fn output_branches(node: &PipelineNode) -> Vec<RouteBranch> {
     }
 }
 
+pub fn aggregate_group_key_port_id(key: &str) -> String {
+    format!("group_by:{key}")
+}
+
+fn role_ports(node: &PipelineNode) -> Vec<StagePortRow> {
+    match node {
+        PipelineNode::Aggregate { config, .. } => aggregate_group_key_role_ports(&config.group_by),
+        _ => Vec::new(),
+    }
+}
+
+fn aggregate_group_key_role_ports(group_by: &[String]) -> Vec<StagePortRow> {
+    let mut ports = Vec::with_capacity(group_by.len());
+    let mut seen = std::collections::HashSet::new();
+    for key in group_by {
+        if seen.insert(key.as_str()) {
+            ports.push(StagePortRow {
+                id: aggregate_group_key_port_id(key),
+                label: key.clone(),
+                role: "group_by".to_string(),
+                kind: StagePortKind::AggregateGroupKey,
+                side: StagePortSide::Input,
+            });
+        }
+    }
+    ports
+}
+
 /// Index of the branch a `node.port` reference selects in the source's branch
 /// list, or `None` for a bare reference or a source with no branches.
 fn resolve_from_branch(
@@ -276,6 +304,43 @@ pub struct RouteBranch {
     pub is_default: bool,
 }
 
+/// Which side of a stage card a semantic role port attaches to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagePortSide {
+    Input,
+    Output,
+}
+
+/// Semantic, non-column row category rendered inside a stage card.
+///
+/// These are distinct from output-record fields: a role port explains how an
+/// input value is used by the operator (for example an Aggregate grouping key),
+/// while [`FieldRow`] explains fields present on the node's output record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagePortKind {
+    AggregateGroupKey,
+}
+
+/// A named semantic role port rendered as a fixed-height row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagePortRow {
+    pub id: String,
+    pub label: String,
+    pub role: String,
+    pub kind: StagePortKind,
+    pub side: StagePortSide,
+}
+
+/// Lineage from an output field row into a semantic role input port.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoleEdge {
+    pub from_node: usize,
+    pub from_field: String,
+    pub to_node: usize,
+    pub to_port: String,
+    pub kind: FieldEdgeKind,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StageView {
     pub id: String,
@@ -305,6 +370,11 @@ pub struct StageView {
     /// kind: a Route's outputs ARE these ports, but a Cull keeps its main output
     /// — see [`StageView::keeps_node_output_port`].
     pub branches: Vec<RouteBranch>,
+    /// Semantic role rows such as Aggregate `group_by` inputs. These are not
+    /// output fields and are anchored independently, so one producer field can
+    /// connect both to a role input and to a grouped output field without
+    /// drawing duplicate cables into the same row.
+    pub role_ports: Vec<StagePortRow>,
 }
 
 impl StageView {
@@ -337,10 +407,14 @@ impl StageView {
 
     /// World-space vertical center of field row `i` inside this card.
     ///
-    /// Rows stack below the [`FIELD_HEADER_HEIGHT`] header at the fixed
+    /// Input role rows, if any, occupy the first row slots below the
+    /// [`FIELD_HEADER_HEIGHT`] header. Field rows start after them at the fixed
     /// [`FIELD_ROW_HEIGHT`] pitch; the anchor sits at the row's mid-line.
     pub fn field_row_y(&self, i: usize) -> f32 {
-        self.canvas_y + FIELD_HEADER_HEIGHT + i as f32 * FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0
+        self.canvas_y
+            + FIELD_HEADER_HEIGHT
+            + (self.input_role_count() + i) as f32 * FIELD_ROW_HEIGHT
+            + FIELD_ROW_HEIGHT / 2.0
     }
 
     /// World-space coordinate of field row `i`'s LEFT (input) anchor dot.
@@ -359,13 +433,55 @@ impl StageView {
         self.fields.iter().position(|f| f.name == name)
     }
 
+    pub fn role_port_index(&self, side: StagePortSide, id: &str) -> Option<usize> {
+        self.role_ports
+            .iter()
+            .filter(|port| port.side == side)
+            .position(|port| port.id == id)
+    }
+
+    pub fn role_port_anchor_in(&self, i: usize) -> (f32, f32) {
+        (self.canvas_x, self.role_port_row_y(StagePortSide::Input, i))
+    }
+
+    #[allow(dead_code)]
+    pub fn role_port_anchor_out(&self, i: usize) -> (f32, f32) {
+        (
+            self.canvas_x + NODE_WIDTH,
+            self.role_port_row_y(StagePortSide::Output, i),
+        )
+    }
+
+    pub fn role_ports_on(&self, side: StagePortSide) -> impl Iterator<Item = &StagePortRow> {
+        self.role_ports.iter().filter(move |port| port.side == side)
+    }
+
+    fn input_role_count(&self) -> usize {
+        self.role_ports_on(StagePortSide::Input).count()
+    }
+
+    fn output_role_count(&self) -> usize {
+        self.role_ports_on(StagePortSide::Output).count()
+    }
+
+    fn role_port_row_y(&self, side: StagePortSide, i: usize) -> f32 {
+        let row_slot = match side {
+            StagePortSide::Input => i,
+            StagePortSide::Output => self.input_role_count() + self.fields.len() + i,
+        };
+        self.canvas_y
+            + FIELD_HEADER_HEIGHT
+            + row_slot as f32 * FIELD_ROW_HEIGHT
+            + FIELD_ROW_HEIGHT / 2.0
+    }
+
     /// World-space vertical center of branch-port row `i`. Branch ports stack
-    /// BELOW the field rows at the same [`FIELD_ROW_HEIGHT`] pitch, so branch row
-    /// `i` occupies field-row slot `fields.len() + i`.
+    /// BELOW role and field rows at the same [`FIELD_ROW_HEIGHT`] pitch.
     pub fn branch_row_y(&self, i: usize) -> f32 {
         self.canvas_y
             + FIELD_HEADER_HEIGHT
-            + (self.fields.len() + i) as f32 * FIELD_ROW_HEIGHT
+            + (self.input_role_count() + self.fields.len() + self.output_role_count() + i) as f32
+                * FIELD_ROW_HEIGHT
             + FIELD_ROW_HEIGHT / 2.0
     }
 
@@ -380,7 +496,7 @@ impl StageView {
     /// their combined count. A card with neither is exactly [`NODE_HEIGHT`] (the
     /// classic look), so this is safe to use uniformly in bounds/layout math.
     pub fn card_height(&self) -> f32 {
-        let rows = self.fields.len() + self.branches.len();
+        let rows = self.role_ports.len() + self.fields.len() + self.branches.len();
         if rows == 0 {
             NODE_HEIGHT
         } else {
@@ -443,6 +559,11 @@ pub struct PipelineView {
     pub field_edges: Vec<FieldEdge>,
     /// Optional routed paths parallel to [`PipelineView::field_edges`].
     pub field_edge_paths: Vec<CanvasConnectorPath>,
+    /// Field-to-role lineage edges, currently used for Aggregate `group_by`
+    /// input role ports.
+    pub role_edges: Vec<RoleEdge>,
+    /// Optional routed paths parallel to [`PipelineView::role_edges`].
+    pub role_edge_paths: Vec<CanvasConnectorPath>,
 }
 
 /// Axis-aligned bounding box of a node layout in world coordinates.
@@ -715,6 +836,8 @@ fn derive_view_from_nodes_inner(
     // alongside the field rows.
     let node_branches: Vec<Vec<RouteBranch>> =
         nodes.iter().map(|s| output_branches(&s.value)).collect();
+    let node_role_ports: Vec<Vec<StagePortRow>> =
+        nodes.iter().map(|s| role_ports(&s.value)).collect();
 
     // Connections: resolve each consumer's input header reference. These also
     // form the predecessor relation the barycenter layout pass consumes. An edge
@@ -784,7 +907,7 @@ fn derive_view_from_nodes_inner(
     // topological for the column DAG built above (a node references only
     // earlier-declared nodes), so the shared core reads final producer rows in
     // one sweep. `out_fields[i]` is parallel to `nodes`.
-    let (out_fields, field_edges) = match resolved_plan {
+    let (out_fields, field_edges, role_edges) = match resolved_plan {
         Some(plan) => resolved_pipeline_field_lineage(nodes, plan, &predecessors),
         None => pipeline_field_lineage(nodes, &predecessors),
     };
@@ -797,7 +920,10 @@ fn derive_view_from_nodes_inner(
     let heights: Vec<f32> = out_fields
         .iter()
         .zip(&node_branches)
-        .map(|(rows, branches)| row_stack_height(rows.len() + branches.len()))
+        .zip(&node_role_ports)
+        .map(|((rows, branches), role_ports)| {
+            row_stack_height(rows.len() + branches.len() + role_ports.len())
+        })
         .collect();
     let positions = layout_positions(&cols, &predecessors, &heights);
     let stages: Vec<StageView> = nodes
@@ -808,6 +934,7 @@ fn derive_view_from_nodes_inner(
             let mut stage = build_stage_view(&spanned.value, x, y);
             stage.fields = out_fields[i].clone();
             stage.branches = node_branches[i].clone();
+            stage.role_ports = node_role_ports[i].clone();
             stage
         })
         .collect();
@@ -818,6 +945,8 @@ fn derive_view_from_nodes_inner(
         connection_paths: Vec::new(),
         field_edges,
         field_edge_paths: Vec::new(),
+        role_edges,
+        role_edge_paths: Vec::new(),
     }
 }
 
@@ -876,8 +1005,10 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
     // `producer.port` edge can resolve its source-port index, and so layout
     // reserves the ports' height.
     let mut node_branches: Vec<Vec<RouteBranch>> = vec![Vec::new(); total];
+    let mut node_role_ports: Vec<Vec<StagePortRow>> = vec![Vec::new(); total];
     for (bi, spanned) in body.iter().enumerate() {
         node_branches[n_in + bi] = output_branches(&spanned.value);
+        node_role_ports[n_in + bi] = role_ports(&spanned.value);
     }
 
     // Resolve a body input reference to `(unified_index, source_branch_index)`;
@@ -978,7 +1109,7 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
     // order, which is a topological order over `predecessors` (a body node's
     // preds are only input ports or earlier body nodes), so every predecessor's
     // field set is final before its consumer reads it.
-    let (out_fields, field_edges) =
+    let (out_fields, field_edges, role_edges) =
         composition_field_lineage(sig, body, n_in, n_body, &predecessors);
 
     // Per-node card heights drive the stacking so tall field cards in one column
@@ -987,7 +1118,10 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
     let heights: Vec<f32> = out_fields
         .iter()
         .zip(&node_branches)
-        .map(|(rows, branches)| row_stack_height(rows.len() + branches.len()))
+        .zip(&node_role_ports)
+        .map(|((rows, branches), role_ports)| {
+            row_stack_height(rows.len() + branches.len() + role_ports.len())
+        })
         .collect();
     let positions = layout_positions(&cols, &predecessors, &heights);
 
@@ -996,6 +1130,7 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
         let (x, y) = positions[i];
         let mut stage = input_port_stage(port, decl, x, y);
         stage.fields = out_fields[i].clone();
+        stage.role_ports = node_role_ports[i].clone();
         stages.push(stage);
     }
     for (bi, spanned) in body.iter().enumerate() {
@@ -1003,12 +1138,14 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
         let mut stage = build_stage_view(&spanned.value, x, y);
         stage.fields = out_fields[n_in + bi].clone();
         stage.branches = node_branches[n_in + bi].clone();
+        stage.role_ports = node_role_ports[n_in + bi].clone();
         stages.push(stage);
     }
     for (oi, (port, alias)) in sig.outputs.iter().enumerate() {
         let (x, y) = positions[n_in + n_body + oi];
         let mut stage = output_port_stage(port, alias, x, y);
         stage.fields = out_fields[n_in + n_body + oi].clone();
+        stage.role_ports = node_role_ports[n_in + n_body + oi].clone();
         stages.push(stage);
     }
 
@@ -1018,6 +1155,8 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
         connection_paths: Vec::new(),
         field_edges,
         field_edge_paths: Vec::new(),
+        role_edges,
+        role_edge_paths: Vec::new(),
     }
 }
 
@@ -1282,8 +1421,9 @@ fn stamp_passthrough_metadata(
 /// identical for both and lives here.
 ///
 /// Returns `(out_fields, field_edges)` where `out_fields[u]` is the ordered
-/// output record of index `u`. Slots MUST be ordered so every node appears after
-/// its predecessors (topological): both callers pass declaration order, which is
+/// output record of index `u`; `role_edges` names dependencies into semantic
+/// role input ports. Slots MUST be ordered so every node appears after its
+/// predecessors (topological): both callers pass declaration order, which is
 /// topological for the DAGs they build.
 ///
 /// Per-node rules (Phase 1, transforms-precise):
@@ -1315,12 +1455,13 @@ fn compute_field_lineage(
     slots: &[LineageSlot<'_>],
     predecessors: &[Vec<usize>],
     input_aliases: &[std::collections::HashMap<String, usize>],
-) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>, Vec<RoleEdge>) {
     debug_assert_eq!(slots.len(), input_aliases.len());
     let total = slots.len();
     debug_assert_eq!(total, predecessors.len());
     let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
     let mut field_edges: Vec<FieldEdge> = Vec::new();
+    let mut role_edges: Vec<RoleEdge> = Vec::new();
 
     // First pass: seed every origin slot's fixed output record. Origins have no
     // predecessor-derived columns, so seeding them all up front (regardless of
@@ -1419,9 +1560,16 @@ fn compute_field_lineage(
                         {
                             field_edges.push(FieldEdge {
                                 from_node: p,
-                                from_field,
+                                from_field: from_field.clone(),
                                 to_node: idx,
                                 to_field: group_key.clone(),
+                                kind: FieldEdgeKind::Derive,
+                            });
+                            role_edges.push(RoleEdge {
+                                from_node: p,
+                                from_field,
+                                to_node: idx,
+                                to_port: aggregate_group_key_port_id(&group_key),
                                 kind: FieldEdgeKind::Derive,
                             });
                         }
@@ -1648,7 +1796,7 @@ fn compute_field_lineage(
         stamp_passthrough_metadata(&mut out_fields[idx], &col_meta, false);
     }
 
-    (out_fields, field_edges)
+    (out_fields, field_edges, role_edges)
 }
 
 /// Build the composition's classified slot list and run the shared lineage core.
@@ -1672,7 +1820,7 @@ fn composition_field_lineage(
     n_in: usize,
     n_body: usize,
     predecessors: &[Vec<usize>],
-) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>, Vec<RoleEdge>) {
     let total = n_in + n_body + sig.outputs.len();
     let mut slots: Vec<LineageSlot<'_>> = Vec::with_capacity(total);
 
@@ -1733,7 +1881,8 @@ fn composition_field_lineage(
         input_aliases[n_in + bi] = node_input_aliases(&spanned.value, &name_to_idx);
     }
 
-    let (out_fields, mut field_edges) = compute_field_lineage(&slots, predecessors, &input_aliases);
+    let (out_fields, mut field_edges, role_edges) =
+        compute_field_lineage(&slots, predecessors, &input_aliases);
 
     // Producer → output-port field edge, one per output port. The output port
     // surfaces its producer body node's records; on the canvas we draw a single
@@ -1772,7 +1921,7 @@ fn composition_field_lineage(
         });
     }
 
-    (out_fields, field_edges)
+    (out_fields, field_edges, role_edges)
 }
 
 /// Build a pipeline's classified slot list and run the shared lineage core.
@@ -1785,7 +1934,7 @@ fn composition_field_lineage(
 fn pipeline_field_lineage(
     nodes: &[Spanned<PipelineNode>],
     predecessors: &[Vec<usize>],
-) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>, Vec<RoleEdge>) {
     let slots: Vec<LineageSlot<'_>> = nodes
         .iter()
         .map(|spanned| match &spanned.value {
@@ -1830,7 +1979,7 @@ fn resolved_pipeline_field_lineage(
     nodes: &[Spanned<PipelineNode>],
     plan: &clinker_plan::plan::CompiledPlan,
     predecessors: &[Vec<usize>],
-) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>) {
+) -> (Vec<Vec<FieldRow>>, Vec<FieldEdge>, Vec<RoleEdge>) {
     let total = nodes.len();
     let name_to_idx: std::collections::HashMap<String, usize> = nodes
         .iter()
@@ -1844,6 +1993,7 @@ fn resolved_pipeline_field_lineage(
 
     let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
     let mut field_edges: Vec<FieldEdge> = Vec::new();
+    let mut role_edges: Vec<RoleEdge> = Vec::new();
 
     for (idx, spanned) in nodes.iter().enumerate() {
         let node = &spanned.value;
@@ -1899,13 +2049,38 @@ fn resolved_pipeline_field_lineage(
             resolved_row_fields(row, node, &producers_of, &col_meta, &emitted, &copies);
         let output_names: std::collections::HashSet<String> =
             out_fields[idx].iter().map(|row| row.name.clone()).collect();
+        let aggregate_group_keys: std::collections::HashSet<String> = match node {
+            PipelineNode::Aggregate { config, .. } => config.group_by.iter().cloned().collect(),
+            _ => std::collections::HashSet::new(),
+        };
 
         if let Some(_program) = parsed {
             let aliases = &input_aliases[idx];
+            for group_key in &aggregate_group_keys {
+                if !output_names.contains(group_key) {
+                    continue;
+                }
+                for (p, from_field) in resolve_support_anchors(group_key, &producers_of, aliases) {
+                    field_edges.push(FieldEdge {
+                        from_node: p,
+                        from_field: from_field.clone(),
+                        to_node: idx,
+                        to_field: group_key.clone(),
+                        kind: FieldEdgeKind::Derive,
+                    });
+                    role_edges.push(RoleEdge {
+                        from_node: p,
+                        from_field,
+                        to_node: idx,
+                        to_port: aggregate_group_key_port_id(group_key),
+                        kind: FieldEdgeKind::Derive,
+                    });
+                }
+            }
             let mut emitted_so_far: std::collections::HashSet<&str> =
                 std::collections::HashSet::new();
             for (target, support) in &supports {
-                if !output_names.contains(target) {
+                if !output_names.contains(target) || aggregate_group_keys.contains(target) {
                     emitted_so_far.insert(target.as_str());
                     continue;
                 }
@@ -1944,6 +2119,7 @@ fn resolved_pipeline_field_lineage(
             for col in &input_cols {
                 if output_names.contains(col)
                     && !emitted.contains(col)
+                    && !aggregate_group_keys.contains(col)
                     && let Some(producers) = producers_of.get(col)
                 {
                     let kind = carry_kind(col);
@@ -1977,7 +2153,7 @@ fn resolved_pipeline_field_lineage(
         }
     }
 
-    (out_fields, field_edges)
+    (out_fields, field_edges, role_edges)
 }
 
 fn resolved_row_fields(
@@ -2051,6 +2227,7 @@ fn input_port_stage(name: &str, decl: &PortDecl, x: f32, y: f32) -> StageView {
         error_message: None,
         fields: Vec::new(),
         branches: Vec::new(),
+        role_ports: Vec::new(),
     }
 }
 
@@ -2069,6 +2246,7 @@ fn output_port_stage(name: &str, alias: &OutputAlias, x: f32, y: f32) -> StageVi
         error_message: None,
         fields: Vec::new(),
         branches: Vec::new(),
+        role_ports: Vec::new(),
     }
 }
 
@@ -2092,6 +2270,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         },
         PipelineNode::Transform {
             header,
@@ -2110,6 +2289,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 error_message: None,
                 fields: Vec::new(),
                 branches: Vec::new(),
+                role_ports: Vec::new(),
             }
         }
         PipelineNode::Aggregate {
@@ -2134,6 +2314,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 error_message: None,
                 fields: Vec::new(),
                 branches: Vec::new(),
+                role_ports: Vec::new(),
             }
         }
         PipelineNode::Route {
@@ -2164,6 +2345,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 error_message: None,
                 fields: Vec::new(),
                 branches: Vec::new(),
+                role_ports: Vec::new(),
             }
         }
         PipelineNode::Merge { header, .. } => StageView {
@@ -2178,6 +2360,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         },
         PipelineNode::Combine {
             header,
@@ -2196,6 +2379,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 error_message: None,
                 fields: Vec::new(),
                 branches: Vec::new(),
+                role_ports: Vec::new(),
             }
         }
         PipelineNode::Output {
@@ -2213,6 +2397,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         },
         PipelineNode::Composition { header, r#use, .. } => StageView {
             id: header.name.clone(),
@@ -2226,6 +2411,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         },
         // Reshape: per-group synthesis. Subtitle names the partition key (the
         // grouping that every rule observes) and the rule count, the two facts
@@ -2247,6 +2433,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         },
         // Cull: per-group removal. Subtitle mirrors Reshape (partition key + rule
         // count). Schema-preserving, so its passthrough field rows are honest and
@@ -2267,6 +2454,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         },
         // Envelope: frames body records into documents. Subtitle names the
         // framing strategy. Output shape differs from input, so its field rows
@@ -2286,6 +2474,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         },
     }
 }
@@ -2398,6 +2587,7 @@ pub fn derive_partial_pipeline_view(
                     error_message: None,
                     fields: Vec::new(),
                     branches: Vec::new(),
+                    role_ports: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -2413,6 +2603,7 @@ pub fn derive_partial_pipeline_view(
                     error_message: Some(message.clone()),
                     fields: Vec::new(),
                     branches: Vec::new(),
+                    role_ports: Vec::new(),
                 });
             }
         }
@@ -2452,6 +2643,7 @@ pub fn derive_partial_pipeline_view(
                     error_message: None,
                     fields: Vec::new(),
                     branches: Vec::new(),
+                    role_ports: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -2467,6 +2659,7 @@ pub fn derive_partial_pipeline_view(
                     error_message: Some(message.clone()),
                     fields: Vec::new(),
                     branches: Vec::new(),
+                    role_ports: Vec::new(),
                 });
             }
         }
@@ -2496,6 +2689,7 @@ pub fn derive_partial_pipeline_view(
                     error_message: None,
                     fields: Vec::new(),
                     branches: Vec::new(),
+                    role_ports: Vec::new(),
                 });
             }
             PartialItem::Err { index, message } => {
@@ -2511,6 +2705,7 @@ pub fn derive_partial_pipeline_view(
                     error_message: Some(message.clone()),
                     fields: Vec::new(),
                     branches: Vec::new(),
+                    role_ports: Vec::new(),
                 });
             }
         }
@@ -2529,6 +2724,8 @@ pub fn derive_partial_pipeline_view(
         connection_paths: Vec::new(),
         field_edges: Vec::new(),
         field_edge_paths: Vec::new(),
+        role_edges: Vec::new(),
+        role_edge_paths: Vec::new(),
     }
 }
 
@@ -2650,6 +2847,7 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
                 .map(body_row_fields)
                 .unwrap_or_default(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         });
     }
 
@@ -2692,6 +2890,8 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
         connection_paths: Vec::new(),
         field_edges,
         field_edge_paths: Vec::new(),
+        role_edges: Vec::new(),
+        role_edge_paths: Vec::new(),
     }
 }
 
@@ -3963,6 +4163,15 @@ nodes:
             1,
             "group_by user_id and emit user_id should share one aggregate row"
         );
+        assert_eq!(
+            view.stages[i_aggregate]
+                .role_ports
+                .iter()
+                .map(|port| (port.id.as_str(), port.role.as_str(), port.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("group_by:user_id", "group_by", "user_id")],
+            "group_by user_id should render as a distinct aggregate input role port"
+        );
 
         for source in [i_web, i_mobile] {
             assert!(
@@ -3998,6 +4207,96 @@ nodes:
             }],
             "merged user_id should have exactly one downstream edge into the aggregate group key"
         );
+        assert_eq!(
+            view.role_edges,
+            vec![RoleEdge {
+                from_node: i_merge,
+                from_field: "user_id".to_string(),
+                to_node: i_aggregate,
+                to_port: "group_by:user_id".to_string(),
+                kind: FieldEdgeKind::Derive,
+            }],
+            "merged user_id should also feed exactly one group_by role input port"
+        );
+    }
+
+    /// Multiple Aggregate group keys render as separate semantic input ports,
+    /// while each grouped field remains a single normal output row.
+    #[test]
+    fn aggregate_multiple_group_keys_render_distinct_role_ports() {
+        let yaml = r#"
+pipeline:
+  name: invoice_rollup
+nodes:
+  - type: source
+    name: invoices
+    config:
+      name: invoices
+      type: csv
+      path: ./invoices.csv
+      schema:
+        - { name: customer_id, type: string }
+        - { name: invoice_date, type: string }
+        - { name: amount, type: float }
+  - type: aggregate
+    name: daily_totals
+    input: invoices
+    config:
+      group_by: [customer_id, invoice_date]
+      cxl: |
+        emit invoice_count = count(*)
+"#;
+        let config = parse_config(yaml).expect("multi-key aggregate fixture parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_source = stage_idx(&view, "invoices");
+        let i_aggregate = stage_idx(&view, "daily_totals");
+
+        assert_eq!(
+            view.stages[i_aggregate]
+                .role_ports
+                .iter()
+                .map(|port| (port.id.as_str(), port.role.as_str(), port.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("group_by:customer_id", "group_by", "customer_id"),
+                ("group_by:invoice_date", "group_by", "invoice_date")
+            ],
+            "each group key should render as its own aggregate input role port"
+        );
+
+        for field in ["customer_id", "invoice_date"] {
+            assert_eq!(
+                view.stages[i_aggregate]
+                    .fields
+                    .iter()
+                    .filter(|row| row.name == field)
+                    .count(),
+                1,
+                "group key {field} should remain one normal aggregate output row"
+            );
+
+            assert!(
+                view.field_edges.iter().any(|edge| {
+                    edge.from_node == i_source
+                        && edge.from_field == field
+                        && edge.to_node == i_aggregate
+                        && edge.to_field == field
+                        && edge.kind == FieldEdgeKind::Derive
+                }),
+                "group key {field} should have normal field lineage into the output row"
+            );
+            assert!(
+                view.role_edges.iter().any(|edge| {
+                    edge.from_node == i_source
+                        && edge.from_field == field
+                        && edge.to_node == i_aggregate
+                        && edge.to_port == aggregate_group_key_port_id(field)
+                        && edge.kind == FieldEdgeKind::Derive
+                }),
+                "group key {field} should also feed the matching role input port"
+            );
+        }
     }
 
     /// A qualified group key is displayed as the aggregate output key while its
@@ -5558,6 +5857,40 @@ nodes:
         assert_eq!(b.max_y, 100.0 + NODE_HEIGHT);
     }
 
+    #[test]
+    fn input_role_ports_shift_field_anchors_down_one_row() {
+        let mut stage = stage_at(10.0, 20.0);
+        stage.role_ports = vec![StagePortRow {
+            id: "group_by:user_id".to_string(),
+            label: "user_id".to_string(),
+            role: "group_by".to_string(),
+            kind: StagePortKind::AggregateGroupKey,
+            side: StagePortSide::Input,
+        }];
+        stage.fields = vec![FieldRow {
+            name: "user_id".to_string(),
+            kind: FieldKind::PassThrough,
+            ty: None,
+            is_correlation_key: false,
+        }];
+
+        assert_eq!(
+            stage.role_port_anchor_in(0),
+            (10.0, 20.0 + FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT / 2.0)
+        );
+        assert_eq!(
+            stage.field_anchor_in(0),
+            (
+                10.0,
+                20.0 + FIELD_HEADER_HEIGHT + FIELD_ROW_HEIGHT + FIELD_ROW_HEIGHT / 2.0
+            )
+        );
+        assert_eq!(
+            stage.card_height(),
+            FIELD_HEADER_HEIGHT + 2.0 * FIELD_ROW_HEIGHT
+        );
+    }
+
     /// Two field-bearing cards in the SAME column must not overlap: their
     /// world-space y-extents `[canvas_y, canvas_y + card_height)` are disjoint.
     /// Stacking by each card's own `card_height` (not a fixed `NODE_HEIGHT`) is
@@ -5651,6 +5984,7 @@ nodes:
             error_message: None,
             fields: Vec::new(),
             branches: Vec::new(),
+            role_ports: Vec::new(),
         }
     }
 

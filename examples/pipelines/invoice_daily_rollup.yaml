@@ -1,0 +1,41 @@
+pipeline:
+  name: invoice_daily_rollup
+
+nodes:
+  - type: source
+    name: invoices
+    config:
+      name: invoices
+      type: csv
+      path: ./data/invoices.csv
+      options:
+        has_header: true
+      schema:
+        - { name: invoice_id, type: string }
+        - { name: invoice_date, type: string }
+        - { name: customer_id, type: string }
+        - { name: amount, type: float }
+
+  - type: aggregate
+    name: daily_totals
+    description: Sum invoice amounts per customer per invoice date
+    input: invoices
+    config:
+      group_by: [customer_id, invoice_date]
+      cxl: |
+        emit customer_id = customer_id
+        emit invoice_date = invoice_date
+        emit total_amount = sum(amount)
+        emit invoice_count = count(invoice_id)
+
+  - type: output
+    name: daily_rollup
+    input: daily_totals
+    config:
+      name: daily_rollup
+      type: csv
+      path: ./output/invoice_daily_rollup.csv
+      include_unmapped: false
+
+error_handling:
+  strategy: continue
