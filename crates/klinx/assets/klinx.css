@@ -334,6 +334,32 @@
 [data-theme="enamel"] .klinx-inspector-field-value {
   color: #28323A;
 }
+[data-theme="enamel"] .klinx-field-summary-name,
+[data-theme="enamel"] .klinx-field-trace-field {
+  color: #1C2830;
+}
+[data-theme="enamel"] .klinx-field-property,
+[data-theme="enamel"] .klinx-field-warning,
+[data-theme="enamel"] .klinx-field-trace-empty,
+[data-theme="enamel"] .klinx-field-trace-row,
+[data-theme="enamel"] .klinx-field-chip,
+[data-theme="enamel"] .klinx-field-trace-kind,
+[data-theme="enamel"] .klinx-field-trace-hop {
+  background: var(--klinx-plate-field);
+  border-color: #B4BCC4;
+}
+[data-theme="enamel"] .klinx-field-property-value {
+  color: #28323A;
+}
+[data-theme="enamel"] .klinx-field-property-label,
+[data-theme="enamel"] .klinx-field-trace-title {
+  color: #48525C;
+}
+[data-theme="enamel"] .klinx-field-lineage-summary,
+[data-theme="enamel"] .klinx-field-trace-stage,
+[data-theme="enamel"] .klinx-field-trace-empty {
+  color: #3F4D58;
+}
 
 /* Enamel horizontal ruling overlay for canvas (replaces scanlines) */
 [data-theme="enamel"] .klinx-canvas-panel .klinx-canvas-viewport::before {
@@ -5586,6 +5612,305 @@ input:-webkit-autofill:focus {
   border-bottom: 1px solid var(--klinx-border-subtle);
 }
 
+.klinx-field-inspector .klinx-inspector-header {
+  padding: 12px 16px;
+}
+
+.klinx-field-inspector .klinx-inspector-badge {
+  font-size: 12px;
+}
+
+.klinx-field-inspector .klinx-inspector-label {
+  font-size: 15px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.klinx-field-inspector .klinx-section-header {
+  padding: 10px 14px 8px;
+}
+
+.klinx-field-inspector .klinx-diamond {
+  font-size: 12px;
+}
+
+.klinx-field-inspector .klinx-section-title {
+  font-size: 13px;
+}
+
+.klinx-field-summary {
+  padding: 12px 16px 10px;
+}
+
+.klinx-field-summary-name {
+  font-family: var(--klinx-font-code);
+  font-size: 18px;
+  line-height: 24px;
+  color: var(--klinx-bone);
+  overflow-wrap: anywhere;
+}
+
+.klinx-field-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.klinx-field-chip,
+.klinx-field-trace-kind,
+.klinx-field-trace-hop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--klinx-border-subtle);
+  border-radius: 2px;
+  font-family: var(--klinx-font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 15px;
+  text-transform: uppercase;
+  color: var(--klinx-text-floor);
+  background: var(--klinx-char);
+}
+
+.klinx-field-chip[data-kind="declared"] {
+  color: var(--klinx-copper);
+  border-color: rgba(184, 115, 51, 0.45);
+}
+
+.klinx-field-chip[data-kind="emitted"],
+.klinx-field-trace-kind[data-kind="derive"] {
+  color: var(--klinx-verdigris);
+  border-color: rgba(67, 179, 174, 0.45);
+}
+
+.klinx-field-chip[data-kind="passthrough"],
+.klinx-field-trace-kind[data-kind="passthrough"] {
+  color: var(--klinx-iron);
+  border-color: var(--klinx-border-subtle);
+}
+
+.klinx-field-chip[data-kind="ok"] {
+  color: var(--klinx-ok-green);
+  border-color: rgba(122, 182, 72, 0.45);
+}
+
+.klinx-field-chip[data-kind="info"],
+.klinx-field-chip[data-kind="stage"],
+.klinx-field-chip[data-kind="badge"] {
+  color: var(--klinx-verdigris);
+  border-color: rgba(67, 179, 174, 0.45);
+}
+
+.klinx-field-chip[data-kind="warn"] {
+  color: var(--klinx-hazard);
+  border-color: rgba(212, 160, 23, 0.45);
+}
+
+.klinx-field-chip[data-kind="error"] {
+  color: var(--klinx-oxide-red);
+  border-color: rgba(183, 65, 14, 0.55);
+}
+
+.klinx-field-trace-kind[data-kind="access"] {
+  color: var(--klinx-hazard);
+  border-color: rgba(212, 160, 23, 0.45);
+}
+
+.klinx-inspector-chip-row {
+  padding: 10px 16px 4px;
+}
+
+.klinx-field-property-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  padding: 0 16px 14px;
+}
+
+.klinx-field-property {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 10px;
+  background: var(--klinx-char);
+  border: 1px solid var(--klinx-border-subtle);
+  border-radius: 2px;
+}
+
+.klinx-field-property-label {
+  font-family: var(--klinx-font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--klinx-iron);
+}
+
+.klinx-field-property-value {
+  min-width: 0;
+  font-family: var(--klinx-font-code);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--klinx-text);
+  overflow-wrap: anywhere;
+}
+
+.klinx-field-lineage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 16px 4px;
+  font-family: var(--klinx-font-ui);
+  font-size: 13px;
+  color: var(--klinx-text-dim);
+}
+
+.klinx-field-warning,
+.klinx-field-trace-empty {
+  margin: 10px 16px;
+  padding: 10px;
+  border: 1px solid var(--klinx-border-subtle);
+  border-radius: 2px;
+  font-family: var(--klinx-font-ui);
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--klinx-text-dim);
+  background: var(--klinx-char);
+}
+
+.klinx-field-warning {
+  color: var(--klinx-hazard);
+  border-color: rgba(212, 160, 23, 0.38);
+}
+
+.klinx-field-trace-group {
+  padding: 10px 16px 6px;
+}
+
+.klinx-field-trace-title {
+  margin-bottom: 8px;
+  font-family: var(--klinx-font-ui);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--klinx-iron);
+}
+
+.klinx-field-trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.klinx-field-trace-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  background: var(--klinx-char);
+  border: 1px solid var(--klinx-border-subtle);
+  border-left: 2px solid var(--klinx-stage-accent);
+  border-radius: 2px;
+}
+
+.klinx-field-trace-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.klinx-field-trace-stage {
+  font-family: var(--klinx-font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--klinx-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.klinx-field-trace-field {
+  font-family: var(--klinx-font-code);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--klinx-bone);
+  overflow-wrap: anywhere;
+}
+
+.klinx-inspector-empty {
+  margin: 10px 16px 14px;
+  padding: 10px;
+  border: 1px solid var(--klinx-border-subtle);
+  border-radius: 2px;
+  font-family: var(--klinx-font-ui);
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--klinx-text-dim);
+  background: var(--klinx-char);
+}
+
+.klinx-inspector-row-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 16px 14px;
+}
+
+.klinx-inspector-detail-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 8px 10px;
+  border: 1px solid var(--klinx-border-subtle);
+  border-left: 2px solid var(--klinx-border-subtle);
+  border-radius: 2px;
+  background: var(--klinx-char);
+}
+
+.klinx-inspector-detail-row[data-tone="info"] {
+  border-left-color: var(--klinx-verdigris);
+}
+
+.klinx-inspector-detail-row[data-tone="warn"] {
+  border-left-color: var(--klinx-hazard);
+}
+
+.klinx-inspector-detail-row[data-tone="error"] {
+  border-left-color: var(--klinx-oxide-red);
+}
+
+.klinx-inspector-detail-label {
+  font-family: var(--klinx-font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 16px;
+  text-transform: uppercase;
+  color: var(--klinx-iron);
+  overflow-wrap: anywhere;
+}
+
+.klinx-inspector-detail-value {
+  min-width: 0;
+  font-family: var(--klinx-font-code);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--klinx-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ── 13. CXL expression input + diagnostics ────────────────────────────────
    Text input for CXL expressions with real-time parse validation.
    ─────────────────────────────────────────────────────────────────────── */
@@ -5705,6 +6030,33 @@ input:-webkit-autofill:focus {
 .klinx-inspector-yaml-area {
   overflow: auto;
   background: var(--klinx-char);
+}
+
+.klinx-scoped-yaml-editor {
+  align-items: stretch;
+  min-height: 180px;
+}
+
+.klinx-scoped-yaml-textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 180px;
+  resize: vertical;
+  padding: 8px 12px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--klinx-text);
+  font-family: var(--klinx-font-code);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+
+.klinx-scoped-yaml-textarea:focus {
+  box-shadow: inset 0 0 0 1px rgba(67, 179, 174, 0.45);
 }
 
 /* ── 15. Inspector config section (compressible) ───────────────────────────

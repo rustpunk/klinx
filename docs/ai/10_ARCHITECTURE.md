@@ -19,7 +19,7 @@
 4. YAML edits update `yaml_text` with an `EditSource`. `hooks/pipeline_sync.rs` debounces parsing and syncs parsed models back into active tab state.
 5. `sync.rs` routes YAML through pipeline or composition parsing, resolves imports when a workspace root is available, and can produce partial views for invalid YAML.
 6. `pipeline_view.rs` and `pipeline_view/field_lineage.rs` derive canvas-ready models, layout, connections, branch ports, and field lineage. Raw top-level pipeline views use the klinx-side schema/lineage approximation; Resolved top-level views use `CompiledPlan::typed_output_row` as the field row/type source and gate lineage edges to resolved rows. Compiled composition drill-in uses `derive_body_view` over `BoundBody`; body field rows come from `BoundBody::body_rows` and missing rows degrade to node-level body connectors. `pipeline_view/layout_model.rs` provides the pure Rust port-aware layered layout path. The visible canvas requests `CanvasLayoutEngine::PortAwareSugiyama` through the layout-selection wrapper and falls back to the current barycenter view when anchors cannot be validated.
-7. Components consume `AppState` and `TabManagerState` contexts to render canvas, YAML editor, inspector, schemas, search, git, and overlays.
+7. Components consume `AppState` and `TabManagerState` contexts to render canvas, YAML editor, inspector, schemas, search, git, and overlays. The selected-item inspector uses `components/inspector/model.rs` to derive node/field details from the current pipeline view and parsed config before RSX renders them.
 8. `klinx-git` shells out to `git` and `gh` for version-control operations used by version-mode UI and git status hooks.
 
 ## Important Boundaries

@@ -15,7 +15,7 @@ use crate::components::confirm_dialog::{ConfirmAction, ConfirmDialog, PendingCon
 use crate::components::toast::ToastState;
 use crate::components::{
     activity_bar::ActivityBar, canvas::CanvasPanel, command_palette::CommandPalette,
-    file_explorer::FileExplorer, inspector::InspectorPanel, placeholder_page::PlaceholderPage,
+    file_explorer::FileExplorer, inspector::SelectedInspector, placeholder_page::PlaceholderPage,
     run_log::RunLogDrawer, schema_panel::SchemaPanel, schematics::SchematicsPanel,
     search_panel::SearchPanel, status_bar::StatusBar, tab_bar::TabBar,
     template_gallery::TemplateGallery, title_bar::TitleBar, toast::ToastOverlay,
@@ -61,6 +61,7 @@ pub fn AppShell() -> Element {
     let mut visible_errors = use_signal(Vec::new);
     let mut edit_source = use_signal(|| EditSource::None);
     let mut selected_stages = use_signal(std::collections::HashSet::<String>::new);
+    let mut selected_field = use_signal(|| None);
     let schema_warnings = use_signal(Vec::new);
     let mut partial_pipeline = use_signal(|| None);
     let mut composition_view: Signal<Option<crate::pipeline_view::PipelineView>> =
@@ -281,6 +282,7 @@ pub fn AppShell() -> Element {
                 // so this one assignment covers both open and switch (#43).
                 visible_errors.set(new_tab.snapshot.parse_errors.clone());
                 selected_stages.set(new_tab.snapshot.selected_stage.iter().cloned().collect());
+                selected_field.set(None);
 
                 // If tab was loaded from disk (edit_source == None) and has content,
                 // trigger a full re-parse to resolve _import compositions.
@@ -303,6 +305,7 @@ pub fn AppShell() -> Element {
             visible_errors.set(Vec::new());
             edit_source.set(EditSource::None);
             selected_stages.set(std::collections::HashSet::new());
+            selected_field.set(None);
         }
 
         prev_tab_id.set(current_active);
@@ -337,6 +340,7 @@ pub fn AppShell() -> Element {
         pipeline_layout,
         run_log_expanded,
         selected_stages,
+        selected_field,
         yaml_text,
         pipeline,
         partial_pipeline,
@@ -692,7 +696,6 @@ fn PipelineContextLayout() -> Element {
 fn ActiveTabContent() -> Element {
     let state = use_app_state();
     let pipeline_layout = state.pipeline_layout;
-    let selected_stages = state.selected_stages;
 
     // Schematics layout mode: full-pipeline documentation view
     if *pipeline_layout.read() == PipelineLayoutMode::Schematics {
@@ -712,23 +715,7 @@ fn ActiveTabContent() -> Element {
 
             CanvasPanel {}
 
-            // Inspector shows for any selected stage, even when drilled into a composition.
-            // Drilled transforms exist in state.pipeline (expanded during resolution).
-            {
-                let stages = selected_stages.read();
-                if stages.len() == 1 {
-                    let stage_id = stages.iter().next().unwrap().clone();
-                    drop(stages);
-                    rsx! {
-                        InspectorPanel {
-                            key: "{stage_id}",
-                            stage_id: stage_id.clone(),
-                        }
-                    }
-                } else {
-                    rsx! {}
-                }
-            }
+            SelectedInspector {}
 
             YamlSidebar {}
         }

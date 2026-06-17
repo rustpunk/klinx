@@ -34,7 +34,7 @@
 
 ## Component Module With Local Helpers
 
-- **Where:** `components/file_explorer/model.rs`, `components/yaml_sidebar/tokenizer.rs`, `components/inspector/panel.rs`, `components/version_mode/pr_pane.rs`.
+- **Where:** `components/file_explorer/model.rs`, `components/yaml_sidebar/tokenizer.rs`, `components/inspector/model.rs`, `components/version_mode/pr_pane.rs`.
 - **Rationale:** Pure helper logic near UI has targeted unit tests without needing desktop integration tests.
 - **Copy it correctly:** Put testable data transforms in helper functions/modules beside the component.
 - **Common mistakes:** Burying parsing or formatting logic inside RSX blocks.

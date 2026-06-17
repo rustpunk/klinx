@@ -8,11 +8,10 @@ use dioxus::prelude::*;
 use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
 use crate::pipeline_view::{
     CanvasConnectorPath, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow, NODE_WIDTH,
-    RoleEdge, StagePortSide, StageView, derive_body_view, derive_partial_pipeline_view,
-    derive_pipeline_view, derive_resolved_pipeline_view, field_lineage_full, fit_transform,
-    group_endpoints_by_node, layout_bounds, lineage_closure,
+    RoleEdge, StagePortSide, StageView, field_lineage_full, fit_transform, group_endpoints_by_node,
+    layout_bounds, lineage_closure,
 };
-use crate::state::{ChannelViewMode, use_app_state};
+use crate::state::{ChannelViewMode, current_pipeline_view, use_app_state};
 
 use super::connector::{
     Connector, ConnectorEndpoints, ConnectorObstacle, FieldConnector, obstacle_aware_channel_paths,
@@ -667,46 +666,9 @@ pub fn CanvasPanel() -> Element {
     let drag = use_hook(|| Rc::new(RefCell::new(DragState::default())));
 
     let view_mode = *state.channel_view_mode.read();
-    let drill_stack = state.composition_drill_stack.read();
-
-    // A composition document (`*.comp.yaml`) renders its pre-derived body DAG —
-    // it has no pipeline config, channel overlay, or drill stack of its own.
-    let pipeline_view = if let Some(comp_view) = state.composition_view.read().clone() {
-        comp_view
-    } else if let Some(frame) = drill_stack.last() {
-        let compiled_guard = state.compiled_plan.read();
-        match compiled_guard
-            .as_ref()
-            .and_then(|plan| plan.body_of(frame.body_id))
-        {
-            Some(body) => derive_body_view(body),
-            None => crate::pipeline_view::PipelineView::default(),
-        }
-    } else {
-        // Top-level: dispatch on view mode
-        match view_mode {
-            ChannelViewMode::Resolved => {
-                let compiled_guard = state.compiled_plan.read();
-                match compiled_guard.as_ref() {
-                    Some(plan) => derive_resolved_pipeline_view(plan),
-                    None => match &*(state.pipeline).read() {
-                        Some(config) => derive_pipeline_view(config),
-                        None => crate::pipeline_view::PipelineView::default(),
-                    },
-                }
-            }
-            ChannelViewMode::Raw => match &*(state.pipeline).read() {
-                Some(config) => derive_pipeline_view(config),
-                None => match &*(state.partial_pipeline).read() {
-                    Some(partial) => derive_partial_pipeline_view(partial),
-                    None => crate::pipeline_view::PipelineView::default(),
-                },
-            },
-        }
-    };
+    let pipeline_view = current_pipeline_view(state);
     let pipeline_view =
         apply_canvas_layout(pipeline_view, CanvasLayoutEngine::PortAwareSugiyama).view;
-    drop(drill_stack);
     let connections_model = pipeline_view.connections;
     let connection_paths = pipeline_view.connection_paths;
     let field_edges = pipeline_view.field_edges;
@@ -747,7 +709,16 @@ pub fn CanvasPanel() -> Element {
     //  - else empty (the node-level DAG only).
     // Computed before field projection so hidden lineage endpoints can be appended
     // as temporary rows and then resolve to real connector anchors below.
-    let pinned_selection = pinned_field.0.read().clone();
+    let selected_field = state.selected_field.read().clone();
+    let selected_field_target = selected_field.as_ref().and_then(|selected| {
+        raw_stages
+            .iter()
+            .position(|stage| stage.id == selected.stage_id)
+            .map(|node| LineageTarget::Field(node, selected.field_name.clone()))
+    });
+    let pinned_selection = selected_field_target
+        .clone()
+        .or_else(|| pinned_field.0.read().clone());
     let hover_target = hovered_field.0.read().clone();
     let (closure, role_closure): (HashSet<usize>, HashSet<usize>) = match &pinned_selection {
         Some(LineageTarget::Field(node, field)) => {
@@ -830,6 +801,50 @@ pub fn CanvasPanel() -> Element {
     let selected_stage_ids = state.selected_stages.read().clone();
     let visible_stage_ids: HashSet<String> =
         raw_stages.iter().map(|stage| stage.id.clone()).collect();
+
+    {
+        let visible_stage_indices: HashMap<String, usize> = raw_stages
+            .iter()
+            .enumerate()
+            .map(|(index, stage)| (stage.id.clone(), index))
+            .collect();
+        let visible_fields: HashMap<String, HashSet<String>> = raw_stages
+            .iter()
+            .map(|stage| {
+                (
+                    stage.id.clone(),
+                    stage
+                        .fields
+                        .iter()
+                        .map(|field| field.name.clone())
+                        .collect(),
+                )
+            })
+            .collect();
+        use_effect(move || {
+            let selected = state.selected_field.read().clone();
+            let mut pinned = pinned_field;
+            match selected {
+                Some(selection)
+                    if visible_fields
+                        .get(&selection.stage_id)
+                        .is_some_and(|fields| fields.contains(&selection.field_name)) =>
+                {
+                    if let Some(node) = visible_stage_indices.get(&selection.stage_id).copied() {
+                        pinned
+                            .0
+                            .set(Some(LineageTarget::Field(node, selection.field_name)));
+                    }
+                }
+                Some(_) | None => {
+                    if matches!(&*pinned.0.peek(), Some(LineageTarget::Field(_, _))) {
+                        pinned.0.set(None);
+                    }
+                }
+            }
+        });
+    }
+
     let projected: Vec<ProjectedStage> = {
         let display_states = field_display_states.read();
         let display_overrides = node_display_overrides.read();
@@ -969,6 +984,8 @@ pub fn CanvasPanel() -> Element {
         hovered.force_clear();
         let mut pinned = pinned_field;
         pinned.0.set(None);
+        let mut selected_field = state.selected_field;
+        selected_field.set(None);
 
         if node_display_overrides
             .peek()
@@ -1391,6 +1408,8 @@ pub fn CanvasPanel() -> Element {
                 sel.set(std::collections::HashSet::new());
                 let mut pinned = pinned_field;
                 pinned.0.set(None);
+                let mut selected_field = state.selected_field;
+                selected_field.set(None);
             },
 
             // ── Transformed viewport ──────────────────────────────────────
@@ -1445,6 +1464,15 @@ pub fn CanvasPanel() -> Element {
                             {
                                 pinned_field.0.set(None);
                             }
+                            if state
+                                .selected_field
+                                .peek()
+                                .as_ref()
+                                .is_some_and(|field| field.stage_id == query_stage_id)
+                            {
+                                let mut selected_field = state.selected_field;
+                                selected_field.set(None);
+                            }
                             let mut states = field_display_states.write();
                             let entry = states.entry(query_stage_id.clone()).or_default();
                             entry.query = query;
@@ -1472,6 +1500,15 @@ pub fn CanvasPanel() -> Element {
                                 .is_some_and(|target| target.node() == index)
                             {
                                 pinned_field.0.set(None);
+                            }
+                            if state
+                                .selected_field
+                                .peek()
+                                .as_ref()
+                                .is_some_and(|field| field.stage_id == display_stage_id)
+                            {
+                                let mut selected_field = state.selected_field;
+                                selected_field.set(None);
                             }
                             let mut overrides = node_display_overrides.write();
                             match action {

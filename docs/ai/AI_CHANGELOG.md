@@ -158,3 +158,12 @@ When architecture changes, append a dated entry with:
 - The marker propagates through unchanged passthrough rows after the Aggregate, and preview projection prioritizes aggregate-grain rows with source CK rows so the grouped failure grain remains visible on dense nodes.
 - Normal canvas rows still filter hidden `$ck.*` engine fields; `$ck.aggregate.<name>` remains an internal bridge represented by the visible group-key fields and tooltips rather than a normal business column.
 - Verification: `cargo test -p klinx field_lineage`, `cargo test -p klinx pipeline_view`, `cargo test -p klinx components::canvas::panel`, `cargo fmt --all --check`, `git diff --check`, both workspace clippy passes, `cargo build --package klinx`, and a headless screenshot smoke check against the example workspace.
+
+## 2026-06-17: Selected-Item Inspector And Scoped YAML Editing
+
+- `SelectedInspector` replaces the separate node and field inspector surfaces. Field-row clicks now select a field at app-state level, keep its transitive lineage pinned on the canvas, and render field details through the same inspector shell used for selected nodes.
+- `components/inspector/model.rs` derives selected-node and selected-field view models outside RSX from the current pipeline view, parsed config, autodoc, notes, visible parse errors, schema warnings, channel mode, and compiled-plan availability.
+- Node details now focus on explanation/debugging: overview/status, topology, logic, output fields, branch/default ports, Aggregate role ports, CXL reads/writes when autodoc can infer them, contract/channel facts, diagnostics, and explicit unavailable reasons.
+- Field details keep kind/type/badges/transitive upstream/downstream/role-use information and add stage context, annotations, emitted/passthrough/declared explanations, CXL statement mentions when available, and lineage-unavailable reasons.
+- `ScopedYamlEditor` replaces the read-only scoped YAML panel. It derives node ranges from every `PipelineNode` in `config.nodes`, splices node-scoped drafts back into `yaml_text` under `EditSource::Yaml`, and keeps a last-known range so temporary invalid scoped YAML does not erase the inspector.
+- Verification: `cargo test -p klinx inspector`, `cargo test -p klinx sync`, `cargo test -p klinx pipeline_view`, `cargo fmt --all --check`, and `cargo clippy -p klinx -- -D warnings`.
