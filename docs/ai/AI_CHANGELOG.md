@@ -42,6 +42,15 @@ When architecture changes, append a dated entry with:
 - Readiness findings scan fetched comment text; compact mode still truncates emitted comment bodies unless `--full-comments` is passed.
 - Verification: shell syntax check and helper dry-run commands were run during implementation.
 
+## 2026-06-17: Layout Migration Compatibility Boundary
+
+- Added an explicit canvas layout selection wrapper around the existing pipeline view model.
+- `CanvasLayoutEngine::CurrentBarycenter` remains the visible/default layout path; existing `derive_pipeline_view` callers are unchanged.
+- `CanvasLayoutEngine::PortAwareSugiyama` is an opt-in comparison path that applies the port-aware layout model's deterministic node positions while preserving the existing `PipelineView` connection and field-edge data for renderer compatibility.
+- Port-aware requests fall back to the current barycenter view when stage, branch, or field anchors cannot be validated, returning `CanvasLayoutFallback` metadata instead of panicking or partially applying new coordinates.
+- The open migration question is now narrowed to visual QA and the eventual default-switch policy.
+- Verification: `CARGO_TARGET_DIR=<scratch-target> cargo test -p klinx pipeline_view`, `CARGO_TARGET_DIR=<scratch-target> cargo clippy -p klinx -- -D warnings`, `CARGO_TARGET_DIR=<scratch-target> cargo clippy -p klinx --all-targets -- -D warnings`, `cargo fmt --all --check`, and `git diff --check`.
+
 ## 2026-06-16: Milestone Orchestration Workflow
 
 - Added repo-local skill source `.agents/skills/gh-milestone-orchestration` for coordinating a GitHub milestone through planning, queue curation, one-issue implementation agents, review, closeout, and final milestone verification.

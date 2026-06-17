@@ -5,9 +5,106 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use super::{
-    Connection, FIELD_HEADER_HEIGHT, FIELD_ROW_HEIGHT, FieldEdge, HEADER_PORT_Y, NODE_GAP,
-    NODE_WIDTH, PipelineView, STACK_GAP, StageKind, StageView,
+    COLUMN_CENTER_Y, Connection, FIELD_HEADER_HEIGHT, FIELD_ROW_HEIGHT, FieldEdge, HEADER_PORT_Y,
+    LEFT_MARGIN, NODE_GAP, NODE_WIDTH, PipelineView, STACK_GAP, StageKind, StageView,
 };
+
+/// Canvas layout path requested by callers during the renderer migration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CanvasLayoutEngine {
+    /// Existing `layout_positions` geometry and curved connector renderer.
+    #[default]
+    CurrentBarycenter,
+    /// New Rust port-aware layered model. This is opt-in until visual QA proves
+    /// the orthogonal renderer path should become the visible default.
+    PortAwareSugiyama,
+}
+
+/// Result of applying a requested canvas layout path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanvasLayoutResult {
+    pub view: PipelineView,
+    pub requested: CanvasLayoutEngine,
+    pub applied: CanvasLayoutEngine,
+    pub fallback: Option<CanvasLayoutFallback>,
+}
+
+impl CanvasLayoutResult {
+    pub fn used_fallback(&self) -> bool {
+        self.fallback.is_some()
+    }
+}
+
+/// Why the port-aware layout request fell back to the current layout path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CanvasLayoutFallback {
+    UnsupportedInput {
+        reason: &'static str,
+    },
+    MissingStage {
+        edge_index: usize,
+        stage_index: usize,
+    },
+    MissingBranch {
+        edge_index: usize,
+        stage_index: usize,
+        branch_index: usize,
+    },
+    MissingPort {
+        edge_index: usize,
+        stage_index: usize,
+        side: LayoutPortSide,
+        port_id: String,
+    },
+}
+
+pub fn apply_canvas_layout(
+    view: PipelineView,
+    requested: CanvasLayoutEngine,
+) -> CanvasLayoutResult {
+    match requested {
+        CanvasLayoutEngine::CurrentBarycenter => CanvasLayoutResult {
+            view,
+            requested,
+            applied: CanvasLayoutEngine::CurrentBarycenter,
+            fallback: None,
+        },
+        CanvasLayoutEngine::PortAwareSugiyama => apply_port_aware_layout(view, requested),
+    }
+}
+
+fn apply_port_aware_layout(
+    view: PipelineView,
+    requested: CanvasLayoutEngine,
+) -> CanvasLayoutResult {
+    if let Some(fallback) = validate_port_aware_input(&view) {
+        return CanvasLayoutResult {
+            view,
+            requested,
+            applied: CanvasLayoutEngine::CurrentBarycenter,
+            fallback: Some(fallback),
+        };
+    }
+
+    let graph = LayoutGraph::from_pipeline_view(&view);
+    if let Some(fallback) = validate_port_aware_graph(&graph) {
+        return CanvasLayoutResult {
+            view,
+            requested,
+            applied: CanvasLayoutEngine::CurrentBarycenter,
+            fallback: Some(fallback),
+        };
+    }
+
+    let mut migrated = view;
+    apply_graph_positions(&mut migrated, &graph);
+    CanvasLayoutResult {
+        view: migrated,
+        requested,
+        applied: CanvasLayoutEngine::PortAwareSugiyama,
+        fallback: None,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutGraph {
@@ -741,6 +838,152 @@ fn compact_path_points<const N: usize>(points: [LayoutPoint; N]) -> Vec<LayoutPo
     compacted
 }
 
+fn validate_port_aware_input(view: &PipelineView) -> Option<CanvasLayoutFallback> {
+    for (edge_index, connection) in view.connections.iter().enumerate() {
+        if connection.from >= view.stages.len() {
+            return Some(CanvasLayoutFallback::MissingStage {
+                edge_index,
+                stage_index: connection.from,
+            });
+        }
+        if connection.to >= view.stages.len() {
+            return Some(CanvasLayoutFallback::MissingStage {
+                edge_index,
+                stage_index: connection.to,
+            });
+        }
+        if let Some(branch_index) = connection.from_branch {
+            let stage = &view.stages[connection.from];
+            if stage.branches.get(branch_index).is_none() {
+                return Some(CanvasLayoutFallback::MissingBranch {
+                    edge_index,
+                    stage_index: connection.from,
+                    branch_index,
+                });
+            }
+        }
+    }
+
+    for (edge_index, edge) in view.field_edges.iter().enumerate() {
+        if edge.from_node >= view.stages.len() {
+            return Some(CanvasLayoutFallback::MissingStage {
+                edge_index,
+                stage_index: edge.from_node,
+            });
+        }
+        if edge.to_node >= view.stages.len() {
+            return Some(CanvasLayoutFallback::MissingStage {
+                edge_index,
+                stage_index: edge.to_node,
+            });
+        }
+        if view.stages[edge.from_node]
+            .field_index(&edge.from_field)
+            .is_none()
+        {
+            return Some(CanvasLayoutFallback::MissingPort {
+                edge_index,
+                stage_index: edge.from_node,
+                side: LayoutPortSide::Output,
+                port_id: format!("field:out:{}", edge.from_field),
+            });
+        }
+        if view.stages[edge.to_node]
+            .field_index(&edge.to_field)
+            .is_none()
+        {
+            return Some(CanvasLayoutFallback::MissingPort {
+                edge_index,
+                stage_index: edge.to_node,
+                side: LayoutPortSide::Input,
+                port_id: format!("field:in:{}", edge.to_field),
+            });
+        }
+    }
+
+    None
+}
+
+fn validate_port_aware_graph(graph: &LayoutGraph) -> Option<CanvasLayoutFallback> {
+    for (edge_index, edge) in graph.edges.iter().enumerate() {
+        let Some(from) = graph.nodes.get(edge.from_node) else {
+            return Some(CanvasLayoutFallback::MissingStage {
+                edge_index,
+                stage_index: edge.from_node,
+            });
+        };
+        let Some(to) = graph.nodes.get(edge.to_node) else {
+            return Some(CanvasLayoutFallback::MissingStage {
+                edge_index,
+                stage_index: edge.to_node,
+            });
+        };
+        if !has_port(from, LayoutPortSide::Output, &edge.from_port) {
+            return Some(CanvasLayoutFallback::MissingPort {
+                edge_index,
+                stage_index: from.stage_index,
+                side: LayoutPortSide::Output,
+                port_id: edge.from_port.clone(),
+            });
+        }
+        if !has_port(to, LayoutPortSide::Input, &edge.to_port) {
+            return Some(CanvasLayoutFallback::MissingPort {
+                edge_index,
+                stage_index: to.stage_index,
+                side: LayoutPortSide::Input,
+                port_id: edge.to_port.clone(),
+            });
+        }
+        if edge.path.points.len() < 2 {
+            return Some(CanvasLayoutFallback::UnsupportedInput {
+                reason: "connector path has fewer than two points",
+            });
+        }
+    }
+
+    None
+}
+
+fn has_port(node: &LayoutNode, side: LayoutPortSide, port_id: &str) -> bool {
+    let ports = match side {
+        LayoutPortSide::Input => &node.input_ports,
+        LayoutPortSide::Output => &node.output_ports,
+    };
+    ports.iter().any(|port| port.id == port_id)
+}
+
+fn apply_graph_positions(view: &mut PipelineView, graph: &LayoutGraph) {
+    let rank_offsets = rank_center_offsets(graph);
+    for node in &graph.nodes {
+        let y_offset = rank_offsets
+            .get(&node.rank)
+            .copied()
+            .unwrap_or(COLUMN_CENTER_Y);
+        if let Some(stage) = view.stages.get_mut(node.stage_index) {
+            stage.canvas_x = LEFT_MARGIN + node.x;
+            stage.canvas_y = node.y + y_offset;
+        }
+    }
+}
+
+fn rank_center_offsets(graph: &LayoutGraph) -> HashMap<usize, f32> {
+    let mut extents: HashMap<usize, (f32, f32)> = HashMap::new();
+    for node in &graph.nodes {
+        extents
+            .entry(node.rank)
+            .and_modify(|(min_y, max_y)| {
+                *min_y = min_y.min(node.y);
+                *max_y = max_y.max(node.y + node.height);
+            })
+            .or_insert((node.y, node.y + node.height));
+    }
+
+    extents
+        .into_iter()
+        .map(|(rank, (min_y, max_y))| (rank, COLUMN_CENTER_Y - (min_y + max_y) / 2.0))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1212,5 +1455,124 @@ mod tests {
             ]
         );
         assert_eq!(graph.edges[1].kind, LayoutEdgeKind::CullSideOutput);
+    }
+
+    #[test]
+    fn current_layout_request_preserves_existing_view() {
+        let view = PipelineView {
+            stages: vec![stage("a"), stage("b")],
+            connections: vec![Connection::plain(0, 1)],
+            field_edges: Vec::new(),
+        };
+
+        let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::CurrentBarycenter);
+
+        assert_eq!(result.requested, CanvasLayoutEngine::CurrentBarycenter);
+        assert_eq!(result.applied, CanvasLayoutEngine::CurrentBarycenter);
+        assert_eq!(result.fallback, None);
+        assert_eq!(result.view, view);
+    }
+
+    #[test]
+    fn port_aware_layout_preview_preserves_renderer_edges() {
+        let view = PipelineView {
+            stages: vec![stage("a"), stage("b"), stage("c")],
+            connections: vec![Connection::plain(0, 1), Connection::plain(1, 2)],
+            field_edges: Vec::new(),
+        };
+        let current_positions = view
+            .stages
+            .iter()
+            .map(|stage| (stage.canvas_x, stage.canvas_y))
+            .collect::<Vec<_>>();
+
+        let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::PortAwareSugiyama);
+
+        assert_eq!(result.requested, CanvasLayoutEngine::PortAwareSugiyama);
+        assert_eq!(result.applied, CanvasLayoutEngine::PortAwareSugiyama);
+        assert_eq!(result.fallback, None);
+        assert_eq!(result.view.connections, view.connections);
+        assert_eq!(result.view.field_edges, view.field_edges);
+        assert_eq!(
+            result
+                .view
+                .stages
+                .iter()
+                .map(|stage| stage.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        assert_ne!(
+            result
+                .view
+                .stages
+                .iter()
+                .map(|stage| (stage.canvas_x, stage.canvas_y))
+                .collect::<Vec<_>>(),
+            current_positions
+        );
+        assert!(
+            result.view.stages[0].canvas_x < result.view.stages[1].canvas_x
+                && result.view.stages[1].canvas_x < result.view.stages[2].canvas_x
+        );
+    }
+
+    #[test]
+    fn port_aware_layout_falls_back_for_missing_branch_anchor() {
+        let mut route = stage("route");
+        route.kind = StageKind::Route;
+        let view = PipelineView {
+            stages: vec![route, stage("sink")],
+            connections: vec![Connection {
+                from: 0,
+                to: 1,
+                from_branch: Some(0),
+            }],
+            field_edges: Vec::new(),
+        };
+
+        let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::PortAwareSugiyama);
+
+        assert_eq!(result.applied, CanvasLayoutEngine::CurrentBarycenter);
+        assert_eq!(
+            result.fallback,
+            Some(CanvasLayoutFallback::MissingBranch {
+                edge_index: 0,
+                stage_index: 0,
+                branch_index: 0,
+            })
+        );
+        assert_eq!(result.view, view);
+    }
+
+    #[test]
+    fn port_aware_layout_falls_back_for_missing_field_anchor() {
+        let mut sink = stage("sink");
+        sink.fields = vec![field("present")];
+        let view = PipelineView {
+            stages: vec![stage("source"), sink],
+            connections: Vec::new(),
+            field_edges: vec![FieldEdge {
+                from_node: 0,
+                from_field: "missing".to_string(),
+                to_node: 1,
+                to_field: "present".to_string(),
+                kind: FieldEdgeKind::Passthrough,
+            }],
+        };
+
+        let result = apply_canvas_layout(view.clone(), CanvasLayoutEngine::PortAwareSugiyama);
+
+        assert_eq!(result.applied, CanvasLayoutEngine::CurrentBarycenter);
+        assert_eq!(
+            result.fallback,
+            Some(CanvasLayoutFallback::MissingPort {
+                edge_index: 0,
+                stage_index: 0,
+                side: LayoutPortSide::Output,
+                port_id: "field:out:missing".to_string(),
+            })
+        );
+        assert_eq!(result.view, view);
     }
 }

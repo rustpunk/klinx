@@ -49,6 +49,7 @@
 - **Verified:** YAML overlay text must stay byte-aligned with the textarea; update `LINE_HEIGHT` in code if CSS line height changes.
 - **Verified:** Canvas geometry and CSS must stay aligned with `pipeline_view` constants, node card heights, field anchors, and SVG connectors.
 - **Verified:** Field connector colors are CSS-class driven; do not inline strokes casually.
+- **Verified:** The visible canvas default remains `CanvasLayoutEngine::CurrentBarycenter`. The port-aware Sugiyama path is opt-in for migration comparison and must fall back to the current view when stage, branch, or field anchors cannot be validated.
 - **Strong inference:** UI changes need manual/headless desktop visual review when layout or interaction changes.
 
 ## Testing Rules

@@ -17,7 +17,6 @@ pub use field_lineage::{
     FieldEdge, FieldEdgeKind, FieldKind, FieldRow, field_lineage_full, group_endpoints_by_node,
     lineage_closure,
 };
-
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;
 
@@ -4895,6 +4894,7 @@ nodes:
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+    use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
     use clinker_plan::config::parse_config;
 
     /// X coordinate for a given column, matching `layout_positions`.
@@ -5031,6 +5031,83 @@ nodes:
             .map(|s| (s.canvas_x, s.canvas_y))
             .collect();
         assert_eq!(pos1, pos2);
+    }
+
+    #[test]
+    fn explicit_layout_selection_keeps_current_default_and_allows_port_aware_preview() {
+        let yaml = r#"
+pipeline:
+  name: migration_layout
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: x, type: string }
+  - type: transform
+    name: step
+    input: src
+    config:
+      cxl: |
+        emit y = x
+  - type: output
+    name: out
+    input: step
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(yaml).expect("migration layout pipeline parses");
+        let current = derive_pipeline_view(&config);
+
+        let default_result =
+            apply_canvas_layout(derive_pipeline_view(&config), CanvasLayoutEngine::default());
+        assert_eq!(
+            default_result.applied,
+            CanvasLayoutEngine::CurrentBarycenter
+        );
+        assert_eq!(default_result.fallback, None);
+        assert_eq!(default_result.view, current);
+
+        let preview = apply_canvas_layout(
+            derive_pipeline_view(&config),
+            CanvasLayoutEngine::PortAwareSugiyama,
+        );
+        assert_eq!(preview.applied, CanvasLayoutEngine::PortAwareSugiyama);
+        assert_eq!(preview.fallback, None);
+        assert_eq!(preview.view.connections, current.connections);
+        assert_eq!(preview.view.field_edges, current.field_edges);
+        assert_eq!(
+            preview
+                .view
+                .stages
+                .iter()
+                .map(|stage| stage.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src", "step", "out"]
+        );
+        let preview_again = apply_canvas_layout(
+            derive_pipeline_view(&config),
+            CanvasLayoutEngine::PortAwareSugiyama,
+        );
+        assert_eq!(
+            preview_again
+                .view
+                .stages
+                .iter()
+                .map(|stage| (stage.canvas_x, stage.canvas_y))
+                .collect::<Vec<_>>(),
+            preview
+                .view
+                .stages
+                .iter()
+                .map(|stage| (stage.canvas_x, stage.canvas_y))
+                .collect::<Vec<_>>()
+        );
     }
 
     /// `layout_bounds` unions every card rect; empty input yields `None`.
