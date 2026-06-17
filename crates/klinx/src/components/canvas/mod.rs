@@ -8,7 +8,7 @@ pub use panel::CanvasPanel;
 
 use dioxus::prelude::*;
 
-const FIELD_HOVER_ENTER_DELAY_MS: u64 = 110;
+const FIELD_HOVER_ENTER_DELAY_MS: u64 = 180;
 const FIELD_HOVER_EXIT_DELAY_MS: u64 = 150;
 const FIELD_HOVER_SKIP_DELAY_MS: u64 = 300;
 
