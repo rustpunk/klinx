@@ -64,6 +64,14 @@ When architecture changes, append a dated entry with:
 - `docs/ai/30_DESIGN_RULES.md` now records the optional path-vector contract.
 - Verification: `cargo fmt --all --check`, `cargo test -p klinx connector`, `cargo test -p klinx canvas`, `cargo test -p klinx`, `cargo clippy -p klinx -- -D warnings`, `cargo clippy -p klinx --all-targets -- -D warnings`, and `git diff --check`.
 
+## 2026-06-17: Aggregate Raw Field-Lineage Rows
+
+- Raw `pipeline_view` field-lineage derivation now treats Aggregate nodes as grouped output records: de-duplicated `group_by` keys first, then aggregate emit targets.
+- Aggregate group-key rows derive from matching input producer fields, including qualified group keys that resolve to a bare producer field for lineage.
+- Aggregate emit rows derive from CXL expression support fields, but unrelated input fields no longer appear as aggregate passthrough rows.
+- Invalid Aggregate CXL degrades to config-derived group-key rows without inferred field edges.
+- Added `docs/research/2026-06-17-aggregate-field-lineage-ui.md` to record the UI rationale: group keys are first-class output rows and full field-edge rendering remains demand-revealed.
+
 ## 2026-06-16: Milestone Orchestration Workflow
 
 - Added repo-local skill source `.agents/skills/gh-milestone-orchestration` for coordinating a GitHub milestone through planning, queue curation, one-issue implementation agents, review, closeout, and final milestone verification.
@@ -118,3 +126,11 @@ When architecture changes, append a dated entry with:
 - Added a canvas toolbar global field search that highlights matches and temporarily reveals hidden matches without filtering normal node field lists.
 - Per-node field filter and global field search both support `*` and `?` wildcard matching against field names, types, and kind labels.
 - Verification: `cargo build --package klinx`, `cargo test -p klinx wide_schema_projection`, `cargo test -p klinx field_search_accepts_wildcards`, `cargo fmt --all --check`, `cargo clippy -p klinx -- -D warnings`, `cargo test -p klinx pipeline_view`, and `git diff --check`.
+
+## 2026-06-17: Aggregate Group-By Role Ports
+
+- Aggregate `group_by` keys now render as semantic input role rows above the Aggregate output fields. The grouped output record still renders as normal field rows: de-duplicated group keys first, then aggregate emit targets.
+- Added `RoleEdge` and `StagePortRow` plumbing so a producer field can feed `group_by:<field>` and the normal Aggregate output field without drawing duplicate cables into the same row.
+- The canvas hover/pin selection model now supports field endpoints and role-port endpoints; role edges temporarily reveal hidden producer fields and tint the target role row.
+- The port-aware layout model includes Aggregate group-key role ports and exports `PipelineView::role_edge_paths` parallel to `role_edges`.
+- Verification: `cargo fmt --all --check`, `cargo test -p klinx pipeline_view`, `cargo test -p klinx canvas`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check`.

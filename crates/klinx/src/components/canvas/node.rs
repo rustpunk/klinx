@@ -1,9 +1,12 @@
 use dioxus::prelude::*;
 
-use crate::pipeline_view::{FieldKind, HEADER_PORT_Y, NODE_WIDTH, StageKind, StageView};
+use crate::pipeline_view::{
+    FieldKind, HEADER_PORT_Y, NODE_WIDTH, StageKind, StagePortKind, StagePortRow, StagePortSide,
+    StageView,
+};
 use crate::state::{CompositionDrillFrame, use_app_state};
 
-use super::{CanvasHover, PinnedField};
+use super::{CanvasHover, LineageTarget, PinnedField};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct FieldDisplayInfo {
@@ -43,6 +46,7 @@ pub fn CanvasNode(
     on_field_toggle: EventHandler<()>,
     dimmed: bool,
     highlighted_fields: Vec<String>,
+    highlighted_role_ports: Vec<String>,
 ) -> Element {
     let state = use_app_state();
     let kind_attr = stage.kind.kind_attr();
@@ -65,6 +69,7 @@ pub fn CanvasNode(
     // the toggle, so this signal is inert for them.
     let mut collapsed = use_signal(|| false);
     let has_fields = field_display.total_count > 0;
+    let has_input_roles = stage.role_ports_on(StagePortSide::Input).next().is_some();
     // Route and Cull nodes carry extra output ports (rendered as branch ports
     // below the columns): a Route's condition/default branches, or a Cull's
     // `removed_to` side-output.
@@ -72,6 +77,7 @@ pub fn CanvasNode(
     // A Route's outputs ARE its branch ports, so it has no node-level output
     // port; a Cull keeps its node-level main output ALONGSIDE the side-output.
     let keeps_node_out = stage.keeps_node_output_port();
+    let show_input_roles = has_input_roles && !*collapsed.read();
     let show_rows = !stage.fields.is_empty() && !*collapsed.read();
     let show_branches = has_branches && !*collapsed.read();
     let field_tools_visible = field_display.searchable;
@@ -115,6 +121,8 @@ pub fn CanvasNode(
     // (allocation-free) when nothing is hovered or this card has no endpoints.
     let highlighted: std::collections::HashSet<&str> =
         highlighted_fields.iter().map(String::as_str).collect();
+    let highlighted_role_ports: std::collections::HashSet<&str> =
+        highlighted_role_ports.iter().map(String::as_str).collect();
     let temporary: std::collections::HashSet<&str> = field_display
         .temporary_fields
         .iter()
@@ -210,9 +218,9 @@ pub fn CanvasNode(
                     class: "klinx-node-badge",
                     style: "color: var(--klinx-stage-accent);",
                     span { class: "klinx-node-type-badge", "{badge}" }
-                    // Collapse/expand toggle — on any card that carries field rows
-                    // or Route branch ports.
-                    if has_fields || has_branches {
+                    // Collapse/expand toggle — on any card that carries field rows,
+                    // semantic role ports, or Route branch ports.
+                    if has_fields || has_input_roles || has_branches {
                         button {
                             class: "klinx-node-collapse-btn",
                             title: if *collapsed.read() { "Expand fields" } else { "Collapse fields" },
@@ -229,7 +237,12 @@ pub fn CanvasNode(
                                 // later pointer move / click re-establishes.
                                 if !now {
                                     hovered.force_clear_if_node(index);
-                                    if matches!(&*pinned.0.peek(), Some((n, _)) if *n == index) {
+                                    if pinned
+                                        .0
+                                        .peek()
+                                        .as_ref()
+                                        .is_some_and(|target| target.node() == index)
+                                    {
                                         pinned.0.set(None);
                                     }
                                 }
@@ -263,6 +276,24 @@ pub fn CanvasNode(
                             onmousedown: move |e: MouseEvent| e.stop_propagation(),
                             onclick: move |e: MouseEvent| e.stop_propagation(),
                             oninput: move |e: FormEvent| on_field_query.call(e.value()),
+                        }
+                    }
+                }
+            }
+
+            // ── Input role ports (variable height) ───────────────────────────
+            if show_input_roles {
+                div {
+                    class: "klinx-node-role-ports",
+                    onmouseleave: move |_| {
+                        hovered.close_if_node(index);
+                    },
+                    for port in stage.role_ports_on(StagePortSide::Input) {
+                        RolePortRowView {
+                            key: "{port.id}",
+                            node_index: index,
+                            port: port.clone(),
+                            highlighted: highlighted_role_ports.contains(port.id.as_str()),
                         }
                     }
                 }
@@ -416,8 +447,10 @@ fn FieldRowView(
 
     // This row is the pinned (clicked-to-select) anchor when the pin names it.
     // `read` subscribes the row so it restyles when the pin is set/cleared.
-    let is_pinned =
-        matches!(&*pinned.0.read(), Some((n, f)) if *n == node_index && f.as_str() == name);
+    let is_pinned = matches!(
+        &*pinned.0.read(),
+        Some(LineageTarget::Field(n, f)) if *n == node_index && f.as_str() == name
+    );
 
     let kind_attr = match kind {
         FieldKind::Declared => "declared",
@@ -486,12 +519,15 @@ fn FieldRowView(
                 move |e: MouseEvent| {
                     e.stop_propagation();
                     let already = matches!(
-                        &*pinned.0.peek(), Some((n, f)) if *n == node_index && f.as_str() == name
+                        &*pinned.0.peek(),
+                        Some(LineageTarget::Field(n, f)) if *n == node_index && f.as_str() == name
                     );
                     if already {
                         pinned.0.set(None);
                     } else {
-                        pinned.0.set(Some((node_index, name.clone())));
+                        pinned
+                            .0
+                            .set(Some(LineageTarget::Field(node_index, name.clone())));
                     }
                 }
             },
@@ -503,6 +539,68 @@ fn FieldRowView(
                 span { class: "klinx-node-field-type", "{t}" }
             }
             span { class: "klinx-node-field-anchor klinx-node-field-anchor--out" }
+        }
+    }
+}
+
+/// One semantic input role row inside an expanded node card.
+///
+/// Role rows explain how an operator consumes an input field without implying
+/// that the role itself is an output column. Aggregate `group_by` keys use these
+/// rows so the producer field can connect to `group_by.<field>` and separately
+/// to the grouped output field row.
+#[component]
+fn RolePortRowView(node_index: usize, port: StagePortRow, highlighted: bool) -> Element {
+    let mut hovered = use_context::<CanvasHover>();
+    let mut pinned = use_context::<PinnedField>();
+
+    let is_pinned = matches!(
+        &*pinned.0.read(),
+        Some(LineageTarget::RolePort(n, p)) if *n == node_index && p.as_str() == port.id
+    );
+    let kind_attr = match port.kind {
+        StagePortKind::AggregateGroupKey => "aggregate-group-key",
+    };
+    let tip = format!("{}: {}", port.role, port.label);
+
+    let mut row_class = String::from("klinx-node-role-port");
+    if highlighted {
+        row_class.push_str(" klinx-node-role-port--lineage");
+    }
+    if is_pinned {
+        row_class.push_str(" klinx-node-role-port--pinned");
+    }
+
+    rsx! {
+        div {
+            class: "{row_class}",
+            "data-role-kind": kind_attr,
+            title: "{tip}",
+            onmouseenter: {
+                let port_id = port.id.clone();
+                move |_| hovered.request_role_port(node_index, port_id.clone())
+            },
+            onclick: {
+                let port_id = port.id.clone();
+                move |e: MouseEvent| {
+                    e.stop_propagation();
+                    let already = matches!(
+                        &*pinned.0.peek(),
+                        Some(LineageTarget::RolePort(n, p))
+                            if *n == node_index && p.as_str() == port_id
+                    );
+                    if already {
+                        pinned.0.set(None);
+                    } else {
+                        pinned
+                            .0
+                            .set(Some(LineageTarget::RolePort(node_index, port_id.clone())));
+                    }
+                }
+            },
+            span { class: "klinx-node-role-port-anchor klinx-node-role-port-anchor--in" }
+            span { class: "klinx-node-role-port-role", "{port.role}" }
+            span { class: "klinx-node-role-port-name", "{port.label}" }
         }
     }
 }

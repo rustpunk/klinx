@@ -8,9 +8,9 @@ use dioxus::prelude::*;
 use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
 use crate::pipeline_view::{
     CanvasConnectorPath, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow, NODE_WIDTH,
-    StageView, derive_body_view, derive_partial_pipeline_view, derive_pipeline_view,
-    derive_resolved_pipeline_view, field_lineage_full, fit_transform, group_endpoints_by_node,
-    layout_bounds, lineage_closure,
+    RoleEdge, StagePortSide, StageView, derive_body_view, derive_partial_pipeline_view,
+    derive_pipeline_view, derive_resolved_pipeline_view, field_lineage_full, fit_transform,
+    group_endpoints_by_node, layout_bounds, lineage_closure,
 };
 use crate::state::{ChannelViewMode, use_app_state};
 
@@ -18,7 +18,7 @@ use super::connector::{
     Connector, ConnectorEndpoints, ConnectorObstacle, FieldConnector, obstacle_aware_channel_paths,
 };
 use super::node::{CanvasNode, FieldDisplayInfo};
-use super::{CanvasHover, HoverTarget, PinnedField};
+use super::{CanvasHover, HoverTarget, LineageTarget, PinnedField};
 
 /// Resolved world-space endpoints + accent for one field-lineage cable.
 ///
@@ -50,6 +50,24 @@ fn resolve_edge_anchors(
     Some(FieldEdgeAnchors {
         start: from.field_anchor_out(fi),
         end: to.field_anchor_in(ti),
+        kind_attr: from.kind.kind_attr().to_string(),
+        kind: edge.kind,
+        path: path.filter(|path| path.points.len() >= 2).cloned(),
+    })
+}
+
+fn resolve_role_edge_anchors(
+    stages: &[StageView],
+    edge: &RoleEdge,
+    path: Option<&CanvasConnectorPath>,
+) -> Option<FieldEdgeAnchors> {
+    let from = stages.get(edge.from_node)?;
+    let to = stages.get(edge.to_node)?;
+    let fi = from.field_index(&edge.from_field)?;
+    let ti = to.role_port_index(StagePortSide::Input, &edge.to_port)?;
+    Some(FieldEdgeAnchors {
+        start: from.field_anchor_out(fi),
+        end: to.role_port_anchor_in(ti),
         kind_attr: from.kind.kind_attr().to_string(),
         kind: edge.kind,
         path: path.filter(|path| path.points.len() >= 2).cloned(),
@@ -216,6 +234,64 @@ fn field_endpoint_names_by_node(
     fields
 }
 
+fn role_source_field_names_by_node(
+    edges: &[RoleEdge],
+    closure: &HashSet<usize>,
+) -> HashMap<usize, HashSet<String>> {
+    let mut fields = HashMap::<usize, HashSet<String>>::new();
+    for &edge_index in closure {
+        let Some(edge) = edges.get(edge_index) else {
+            continue;
+        };
+        fields
+            .entry(edge.from_node)
+            .or_default()
+            .insert(edge.from_field.clone());
+    }
+    fields
+}
+
+fn role_endpoint_names_by_node(
+    edges: &[RoleEdge],
+    closure: &HashSet<usize>,
+) -> HashMap<usize, HashSet<String>> {
+    let mut ports = HashMap::<usize, HashSet<String>>::new();
+    for &edge_index in closure {
+        let Some(edge) = edges.get(edge_index) else {
+            continue;
+        };
+        ports
+            .entry(edge.to_node)
+            .or_default()
+            .insert(edge.to_port.clone());
+    }
+    ports
+}
+
+fn role_port_closure(edges: &[RoleEdge], node: usize, port: &str) -> HashSet<usize> {
+    edges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, edge)| (edge.to_node == node && edge.to_port == port).then_some(index))
+        .collect()
+}
+
+fn role_edges_from_fields(
+    edges: &[RoleEdge],
+    fields_by_node: &HashMap<usize, HashSet<String>>,
+) -> HashSet<usize> {
+    edges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, edge)| {
+            fields_by_node
+                .get(&edge.from_node)
+                .is_some_and(|fields| fields.contains(&edge.from_field))
+                .then_some(index)
+        })
+        .collect()
+}
+
 fn field_matches_by_node(stages: &[StageView], query: &str) -> HashMap<usize, HashSet<String>> {
     let query = query.trim();
     if query.is_empty() {
@@ -353,6 +429,8 @@ pub fn CanvasPanel() -> Element {
     let connection_paths = pipeline_view.connection_paths;
     let field_edges = pipeline_view.field_edges;
     let field_edge_paths = pipeline_view.field_edge_paths;
+    let role_edges = pipeline_view.role_edges;
+    let role_edge_paths = pipeline_view.role_edge_paths;
     let raw_stages = pipeline_view.stages;
 
     // ── Field-level lineage hover state ──────────────────────────────────────
@@ -389,11 +467,43 @@ pub fn CanvasPanel() -> Element {
     // as temporary rows and then resolve to real connector anchors below.
     let pinned_selection = pinned_field.0.read().clone();
     let hover_target = hovered_field.0.read().clone();
-    let closure: HashSet<usize> = match &pinned_selection {
-        Some((node, field)) => field_lineage_full(&field_edges, *node, field),
+    let (closure, role_closure): (HashSet<usize>, HashSet<usize>) = match &pinned_selection {
+        Some(LineageTarget::Field(node, field)) => {
+            let field_closure = field_lineage_full(&field_edges, *node, field);
+            let mut fields_by_node = field_endpoint_names_by_node(&field_edges, &field_closure);
+            fields_by_node
+                .entry(*node)
+                .or_default()
+                .insert(field.clone());
+            let role_closure = role_edges_from_fields(&role_edges, &fields_by_node);
+            (field_closure, role_closure)
+        }
+        Some(LineageTarget::RolePort(node, port)) => {
+            let role_closure = role_port_closure(&role_edges, *node, port);
+            let mut field_closure = HashSet::new();
+            for role_index in &role_closure {
+                let Some(edge) = role_edges.get(*role_index) else {
+                    continue;
+                };
+                field_closure.extend(field_lineage_full(
+                    &field_edges,
+                    edge.from_node,
+                    &edge.from_field,
+                ));
+            }
+            (field_closure, role_closure)
+        }
         None => match &hover_target {
-            HoverTarget::None => HashSet::new(),
-            HoverTarget::Field(node, field) => lineage_closure(&field_edges, *node, field),
+            HoverTarget::None => (HashSet::new(), HashSet::new()),
+            HoverTarget::Field(node, field) => {
+                let field_closure = lineage_closure(&field_edges, *node, field);
+                let fields_by_node = HashMap::from([(*node, HashSet::from([field.clone()]))]);
+                let role_closure = role_edges_from_fields(&role_edges, &fields_by_node);
+                (field_closure, role_closure)
+            }
+            HoverTarget::RolePort(node, port) => {
+                (HashSet::new(), role_port_closure(&role_edges, *node, port))
+            }
         },
     };
     let spotlight_edges: HashSet<usize> = if pinned_selection.is_some() {
@@ -402,15 +512,33 @@ pub fn CanvasPanel() -> Element {
                 .intersection(&closure)
                 .copied()
                 .collect(),
+            HoverTarget::RolePort(_, _) | HoverTarget::None => HashSet::new(),
+        }
+    } else {
+        HashSet::new()
+    };
+    let spotlight_role_edges: HashSet<usize> = if pinned_selection.is_some() {
+        match &hover_target {
+            HoverTarget::RolePort(node, port) => role_port_closure(&role_edges, *node, port)
+                .intersection(&role_closure)
+                .copied()
+                .collect(),
             HoverTarget::None => HashSet::new(),
+            HoverTarget::Field(_, _) => HashSet::new(),
         }
     } else {
         HashSet::new()
     };
     let lineage_fields_by_node = field_endpoint_names_by_node(&field_edges, &closure);
+    let lineage_role_source_fields_by_node =
+        role_source_field_names_by_node(&role_edges, &role_closure);
     let global_query = global_field_query.read().clone();
     let global_matches_by_node = field_matches_by_node(&raw_stages, &global_query);
     let mut temporary_fields_by_node = lineage_fields_by_node.clone();
+    merge_field_name_sets(
+        &mut temporary_fields_by_node,
+        &lineage_role_source_fields_by_node,
+    );
     merge_field_name_sets(&mut temporary_fields_by_node, &global_matches_by_node);
 
     let projected: Vec<ProjectedStage> = {
@@ -535,6 +663,7 @@ pub fn CanvasPanel() -> Element {
     // An empty closure means no field cables and no dim; global field search only
     // highlights/reveals matching rows and does not recede the node-level DAG.
     let mut active_field_edges: Vec<(usize, FieldEdgeAnchors)> = Vec::new();
+    let mut active_role_edges: Vec<(usize, FieldEdgeAnchors)> = Vec::new();
     let mut participating_nodes: HashSet<usize> = HashSet::new();
     // Resolve each participating edge to drawable anchors in ONE pass, collecting
     // the participating nodes (for the dim exemption) and the resolved edges. Only
@@ -551,6 +680,16 @@ pub fn CanvasPanel() -> Element {
             participating_nodes.insert(edge.to_node);
             active_field_edges.push((ei, anchors));
             resolved_edges.push(edge);
+        }
+    }
+    let mut role_closure_indices: Vec<usize> = role_closure.iter().copied().collect();
+    role_closure_indices.sort_unstable();
+    for ei in role_closure_indices {
+        let edge = &role_edges[ei];
+        if let Some(anchors) = resolve_role_edge_anchors(&stages, edge, role_edge_paths.get(ei)) {
+            participating_nodes.insert(edge.from_node);
+            participating_nodes.insert(edge.to_node);
+            active_role_edges.push((ei, anchors));
         }
     }
     let active_field_endpoints: Vec<ConnectorEndpoints> = active_field_edges
@@ -572,6 +711,25 @@ pub fn CanvasPanel() -> Element {
             anchors.path = Some(path);
         }
     }
+    let active_role_endpoints: Vec<ConnectorEndpoints> = active_role_edges
+        .iter()
+        .map(|(_, anchors)| ConnectorEndpoints {
+            sx: anchors.start.0,
+            sy: anchors.start.1,
+            tx: anchors.end.0,
+            ty: anchors.end.1,
+        })
+        .collect();
+    let active_role_channel_paths =
+        obstacle_aware_channel_paths(&active_role_endpoints, &connector_obstacles);
+    for ((_, anchors), path) in active_role_edges
+        .iter_mut()
+        .zip(active_role_channel_paths.into_iter())
+    {
+        if path.points.len() >= 2 {
+            anchors.path = Some(path);
+        }
+    }
     // Per-node lineage-endpoint field names (#87): node index → the field rows on
     // that card to tint, so a multi-field node shows *which row* is the
     // source/target — not just that the card participates (the whole-node dim
@@ -581,9 +739,22 @@ pub fn CanvasPanel() -> Element {
     // `mut` because each card's names are MOVED out below via `.remove(&index)`
     // (each index is visited once, so this never loses a card's names).
     let mut highlighted_by_node = group_endpoints_by_node(resolved_edges);
+    append_highlights(
+        &mut highlighted_by_node,
+        &lineage_role_source_fields_by_node,
+    );
     append_highlights(&mut highlighted_by_node, &global_matches_by_node);
+    let mut highlighted_role_ports_by_node =
+        role_endpoint_names_by_node(&role_edges, &role_closure)
+            .into_iter()
+            .map(|(node, ports)| {
+                let mut ports = ports.into_iter().collect::<Vec<_>>();
+                ports.sort();
+                (node, ports)
+            })
+            .collect::<HashMap<_, _>>();
     // Any field hovered with a non-empty closure dims the rest of the canvas.
-    let hover_active = !active_field_edges.is_empty();
+    let hover_active = !active_field_edges.is_empty() || !active_role_edges.is_empty();
 
     // ── Transform state (local — only the canvas needs these) ────────────────
     let mut pan_x = use_signal(|| 0.0_f32);
@@ -937,7 +1108,12 @@ pub fn CanvasPanel() -> Element {
                         field_display: display.clone(),
                         on_field_query: move |query: String| {
                             hovered_field.force_clear_if_node(index);
-                            if matches!(&*pinned_field.0.peek(), Some((n, _)) if *n == index) {
+                            if pinned_field
+                                .0
+                                .peek()
+                                .as_ref()
+                                .is_some_and(|target| target.node() == index)
+                            {
                                 pinned_field.0.set(None);
                             }
                             let mut states = field_display_states.write();
@@ -960,6 +1136,7 @@ pub fn CanvasPanel() -> Element {
                         // Dim cards outside the revealed field's lineage closure.
                         dimmed: hover_active && !participating_nodes.contains(&index),
                         highlighted_fields: highlighted_by_node.remove(&index).unwrap_or_default(),
+                        highlighted_role_ports: highlighted_role_ports_by_node.remove(&index).unwrap_or_default(),
                     }
                 }
 
@@ -981,6 +1158,17 @@ pub fn CanvasPanel() -> Element {
                                 kind: anchors.kind,
                                 path: anchors.path,
                                 spotlight: spotlight_edges.contains(&ei),
+                            }
+                        }
+                        for (ei, anchors) in active_role_edges {
+                            FieldConnector {
+                                key: "role-{ei}",
+                                start: anchors.start,
+                                end: anchors.end,
+                                kind_attr: anchors.kind_attr,
+                                kind: anchors.kind,
+                                path: anchors.path,
+                                spotlight: spotlight_role_edges.contains(&ei),
                             }
                         }
                     }
@@ -1035,6 +1223,7 @@ mod tests {
                 })
                 .collect(),
             branches: Vec::<RouteBranch>::new(),
+            role_ports: Vec::new(),
         }
     }
 
