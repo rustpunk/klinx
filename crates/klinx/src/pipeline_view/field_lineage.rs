@@ -68,8 +68,7 @@ pub struct FieldRow {
 /// A 3-way widening of the original `passthrough: bool` split: an identity
 /// carry (`c → c`, value unchanged) is now sub-divided by whether the carried
 /// column *also* feeds a computed/renamed output. The renderer maps each
-/// variant to a distinct stroke colour; [`node_carry_edges`] keeps only the two
-/// carry variants for the node-overview reveal.
+/// variant to a distinct stroke colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldEdgeKind {
     /// Identity carry (`c → c`) whose column is read by no derive — it rides
@@ -417,34 +416,6 @@ pub fn lineage_closure(edges: &[FieldEdge], node: usize, field: &str) -> HashSet
 
 /// The CARRY edges incident to a whole node — its node-scope hover reveal (#72).
 ///
-/// Returns the indices (into `edges`) of every edge whose source OR target node
-/// is `node` AND whose kind is a carry ([`FieldEdgeKind::Passthrough`] or
-/// [`FieldEdgeKind::Access`]) — i.e. every identity (`c → c`) line entering the
-/// node from a predecessor OR leaving it to a successor. Derives are excluded.
-///
-/// WHY carries-only, both directions: hovering a node (off any row) answers
-/// "what flows *through* this node" — the columns that ride in unchanged and
-/// the columns that ride back out. Those are near-horizontal 1:1 lines that
-/// don't fan or cross, so showing all of them at once stays an *overview*
-/// (Dataplex-style highlight), unlike the unreadable full column graph that
-/// including every derive would produce — derives are reserved for the
-/// per-field (row) hover detail. A field-less node yields an empty set, so a
-/// node-scope hover on such a card reveals nothing (the desired no-op).
-pub fn node_carry_edges(edges: &[FieldEdge], node: usize) -> HashSet<usize> {
-    edges
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            // Allowlist the two carry kinds rather than denylisting Derive, so a
-            // future `FieldEdgeKind` variant is conservatively excluded from the
-            // node-overview carry set instead of silently appearing in it.
-            matches!(e.kind, FieldEdgeKind::Passthrough | FieldEdgeKind::Access)
-                && (e.from_node == node || e.to_node == node)
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
 /// The FULL pipeline lineage of one `(node, field)` anchor — its complete
 /// transitive provenance AND impact across the whole pipeline (#75 click).
 ///
@@ -821,41 +792,6 @@ mod tests {
             lineage_closure(&edges, 1, "status"),
             HashSet::from([0, 1, 2]),
             "a passthrough field surfaces its in/out carries plus the derive it feeds"
-        );
-    }
-
-    /// `node_carry_edges` returns every CARRY edge (Passthrough + Access)
-    /// incident to a node in BOTH directions, and excludes derives plus carries
-    /// not incident to the node — the node-scope hover's edge set (#72).
-    #[test]
-    fn node_carry_edges_are_incident_carries_both_directions() {
-        let edge =
-            |fnode: usize, ff: &str, tnode: usize, tf: &str, kind: FieldEdgeKind| FieldEdge {
-                from_node: fnode,
-                from_field: ff.to_string(),
-                to_node: tnode,
-                to_field: tf.to_string(),
-                kind,
-            };
-        // Node 1 is the focus: an incoming pure carry, an incoming accessed
-        // carry, an outgoing carry, an incident derive (excluded), and a carry
-        // between two OTHER nodes (excluded — not incident to 1).
-        let edges = vec![
-            edge(0, "a", 1, "a", FieldEdgeKind::Passthrough), // 0: incoming carry
-            edge(0, "k", 1, "k", FieldEdgeKind::Access),      // 1: incoming accessed carry
-            edge(1, "a", 2, "a", FieldEdgeKind::Passthrough), // 2: outgoing carry
-            edge(0, "k", 1, "score", FieldEdgeKind::Derive),  // 3: incident derive — excluded
-            edge(0, "z", 2, "z", FieldEdgeKind::Passthrough), // 4: carry not incident to 1
-        ];
-        assert_eq!(
-            node_carry_edges(&edges, 1),
-            HashSet::from([0, 1, 2]),
-            "incident carries both directions; derive and non-incident carry excluded"
-        );
-        // A node touched by no edge reveals nothing (field-less / isolated node).
-        assert!(
-            node_carry_edges(&edges, 5).is_empty(),
-            "a node with no incident edges reveals nothing"
         );
     }
 

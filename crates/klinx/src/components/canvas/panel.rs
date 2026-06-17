@@ -6,10 +6,9 @@ use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 
 use crate::pipeline_view::{
-    FieldEdge, FieldEdgeKind, FieldRow, NODE_WIDTH, StageView, derive_body_view,
+    FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow, NODE_WIDTH, StageView, derive_body_view,
     derive_partial_pipeline_view, derive_pipeline_view, derive_resolved_pipeline_view,
     field_lineage_full, fit_transform, group_endpoints_by_node, layout_bounds, lineage_closure,
-    node_carry_edges,
 };
 use crate::state::{ChannelViewMode, use_app_state};
 
@@ -61,13 +60,13 @@ const FIT_MARGIN: f32 = 60.0;
 /// fit triggered on the very first frame still produces a sane transform.
 const DEFAULT_VIEWPORT_W: f32 = 1000.0;
 const DEFAULT_VIEWPORT_H: f32 = 700.0;
-/// Default number of field rows rendered per node before the user expands or
+/// Default number of field rows rendered per node before the user loads more or
 /// filters. This bounds card height and per-row connector work for wide schemas.
 const FIELD_ROW_CAP: usize = 24;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct FieldDisplayState {
-    expanded: bool,
+    visible_limit: usize,
     query: String,
 }
 
@@ -77,21 +76,37 @@ struct ProjectedStage {
     display: FieldDisplayInfo,
 }
 
-fn project_stage_fields(stage: &StageView, state: &FieldDisplayState) -> ProjectedStage {
-    let query = state.query.trim().to_ascii_lowercase();
+fn project_stage_fields(
+    stage: &StageView,
+    state: &FieldDisplayState,
+    temporary_fields: &HashSet<String>,
+) -> ProjectedStage {
+    let query = state.query.trim();
+    let visible_limit = state.visible_limit.max(FIELD_ROW_CAP);
     let mut fields: Vec<FieldRow> = stage
         .fields
         .iter()
-        .filter(|field| field_matches_query(field, &query))
+        .filter(|field| field_matches_query(field, query))
         .cloned()
         .collect();
     let matching_count = fields.len();
-    let capped = !state.expanded && matching_count > FIELD_ROW_CAP;
+    let capped = matching_count > visible_limit;
     if capped {
-        fields.truncate(FIELD_ROW_CAP);
+        fields.truncate(visible_limit);
     }
 
     let hidden_count = matching_count.saturating_sub(fields.len());
+    let next_count = hidden_count.min(FIELD_ROW_CAP);
+    let mut visible_names: HashSet<String> =
+        fields.iter().map(|field| field.name.clone()).collect();
+    let mut appended_temporary_fields = Vec::new();
+    for field in &stage.fields {
+        if temporary_fields.contains(&field.name) && !visible_names.contains(&field.name) {
+            visible_names.insert(field.name.clone());
+            appended_temporary_fields.push(field.name.clone());
+            fields.push(field.clone());
+        }
+    }
     let mut projected = stage.clone();
     projected.fields = fields;
 
@@ -99,22 +114,68 @@ fn project_stage_fields(stage: &StageView, state: &FieldDisplayState) -> Project
         stage: projected,
         display: FieldDisplayInfo {
             total_count: stage.fields.len(),
+            matching_count,
             hidden_count,
+            next_count,
+            temporary_fields: appended_temporary_fields,
             query: state.query.clone(),
             searchable: stage.fields.len() > FIELD_ROW_CAP || !query.is_empty(),
-            can_reduce: state.expanded && matching_count > FIELD_ROW_CAP,
+            can_reduce: visible_limit > FIELD_ROW_CAP && matching_count > FIELD_ROW_CAP,
         },
     }
 }
 
 fn field_matches_query(field: &FieldRow, query: &str) -> bool {
+    let query = query.trim();
     query.is_empty()
-        || field.name.to_ascii_lowercase().contains(query)
+        || text_matches_query(&field.name, query)
         || field
             .ty
             .as_ref()
-            .is_some_and(|ty| ty.to_ascii_lowercase().contains(query))
-        || field_kind_label(field).contains(query)
+            .is_some_and(|ty| text_matches_query(ty, query))
+        || text_matches_query(field_kind_label(field), query)
+}
+
+fn text_matches_query(value: &str, query: &str) -> bool {
+    if query.contains('*') || query.contains('?') {
+        wildcard_match(
+            query.to_ascii_lowercase().as_bytes(),
+            value.to_ascii_lowercase().as_bytes(),
+        )
+    } else {
+        value
+            .to_ascii_lowercase()
+            .contains(&query.to_ascii_lowercase())
+    }
+}
+
+fn wildcard_match(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut pi, mut vi) = (0, 0);
+    let mut star = None;
+    let mut match_after_star = 0;
+
+    while vi < value.len() {
+        if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == value[vi]) {
+            pi += 1;
+            vi += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star = Some(pi);
+            match_after_star = vi;
+            pi += 1;
+        } else if let Some(star_index) = star {
+            pi = star_index + 1;
+            match_after_star += 1;
+            vi = match_after_star;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == pattern.len()
 }
 
 fn field_kind_label(field: &FieldRow) -> &'static str {
@@ -122,6 +183,72 @@ fn field_kind_label(field: &FieldRow) -> &'static str {
         crate::pipeline_view::FieldKind::Declared => "declared",
         crate::pipeline_view::FieldKind::Emitted => "emitted",
         crate::pipeline_view::FieldKind::PassThrough => "passthrough",
+    }
+}
+
+fn field_endpoint_names_by_node(
+    edges: &[FieldEdge],
+    closure: &HashSet<usize>,
+) -> HashMap<usize, HashSet<String>> {
+    let mut fields = HashMap::<usize, HashSet<String>>::new();
+    for &edge_index in closure {
+        let Some(edge) = edges.get(edge_index) else {
+            continue;
+        };
+        fields
+            .entry(edge.from_node)
+            .or_default()
+            .insert(edge.from_field.clone());
+        fields
+            .entry(edge.to_node)
+            .or_default()
+            .insert(edge.to_field.clone());
+    }
+    fields
+}
+
+fn field_matches_by_node(stages: &[StageView], query: &str) -> HashMap<usize, HashSet<String>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return HashMap::new();
+    }
+
+    stages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, stage)| {
+            let matches: HashSet<String> = stage
+                .fields
+                .iter()
+                .filter(|field| field_matches_query(field, query))
+                .map(|field| field.name.clone())
+                .collect();
+            (!matches.is_empty()).then_some((index, matches))
+        })
+        .collect()
+}
+
+fn merge_field_name_sets(
+    target: &mut HashMap<usize, HashSet<String>>,
+    source: &HashMap<usize, HashSet<String>>,
+) {
+    for (node, names) in source {
+        target
+            .entry(*node)
+            .or_default()
+            .extend(names.iter().cloned());
+    }
+}
+
+fn append_highlights(
+    target: &mut HashMap<usize, Vec<String>>,
+    source: &HashMap<usize, HashSet<String>>,
+) {
+    for (node, names) in source {
+        let entry = target.entry(*node).or_default();
+        entry.extend(names.iter().cloned());
+        entry.sort();
+        entry.dedup();
     }
 }
 
@@ -158,6 +285,7 @@ struct DragState {
 pub fn CanvasPanel() -> Element {
     let state = use_app_state();
     let mut field_display_states = use_signal(HashMap::<String, FieldDisplayState>::new);
+    let mut global_field_query = use_signal(String::new);
 
     let view_mode = *state.channel_view_mode.read();
     let drill_stack = state.composition_drill_stack.read();
@@ -200,13 +328,61 @@ pub fn CanvasPanel() -> Element {
     drop(drill_stack);
     let field_edges = pipeline_view.field_edges;
     let raw_stages = pipeline_view.stages;
+
+    // ── Field-level lineage hover state ──────────────────────────────────────
+    // The current pointer [`HoverTarget`], provided as a canvas-scoped context so
+    // field rows can request lineage reveals. DEFAULT (`None`) draws node-level
+    // connectors only; a cold `Field` hover waits briefly before revealing one
+    // field's 1-hop closure, while warm row-to-row movement is immediate. It
+    // never reveals the whole field-edge set at once (#72).
+    //
+    // D2 (Phase 2, perf): an applied hover writes this signal, re-rendering the
+    // whole canvas. The cold-entry delay suppresses quick sweep-through flashes,
+    // while the warm state keeps intentional row scanning responsive; a future
+    // pass can scope the highlight to affected cards.
+    let mut hovered_field = use_context_provider(|| {
+        CanvasHover(
+            Signal::new(HoverTarget::None),
+            Signal::new(HoverTarget::None),
+            Signal::new(0),
+            Signal::new(false),
+        )
+    });
+    // The pinned (clicked-to-select) column (#75) — sticky across pointer moves,
+    // takes precedence over the hover in the reveal computation below. Cleared by
+    // a canvas-background click and by the view-swap effect.
+    let mut pinned_field = use_context_provider(|| PinnedField(Signal::new(None)));
+
+    // The participating field-edge indices for the active reveal. A PIN (#75) wins
+    // over the hover (#72) — a clicked column stays revealed across pointer moves:
+    //  - pinned `(node, f)` → that column's FULL transitive pipeline lineage
+    //    (`field_lineage_full`: every up- and down-stream edge), the click reveal.
+    //  - else `Field(node, f)` → that field's DIRECT (1-hop) neighbourhood (hover).
+    //  - else empty (the node-level DAG only).
+    // Computed before field projection so hidden lineage endpoints can be appended
+    // as temporary rows and then resolve to real connector anchors below.
+    let closure: HashSet<usize> = match &*pinned_field.0.read() {
+        Some((node, field)) => field_lineage_full(&field_edges, *node, field),
+        None => match &*hovered_field.0.read() {
+            HoverTarget::None => HashSet::new(),
+            HoverTarget::Field(node, field) => lineage_closure(&field_edges, *node, field),
+        },
+    };
+    let lineage_fields_by_node = field_endpoint_names_by_node(&field_edges, &closure);
+    let global_query = global_field_query.read().clone();
+    let global_matches_by_node = field_matches_by_node(&raw_stages, &global_query);
+    let mut temporary_fields_by_node = lineage_fields_by_node.clone();
+    merge_field_name_sets(&mut temporary_fields_by_node, &global_matches_by_node);
+
     let projected: Vec<ProjectedStage> = {
         let display_states = field_display_states.read();
         raw_stages
             .iter()
-            .map(|stage| {
+            .enumerate()
+            .map(|(index, stage)| {
                 let state = display_states.get(&stage.id).cloned().unwrap_or_default();
-                project_stage_fields(stage, &state)
+                let temporary_fields = temporary_fields_by_node.remove(&index).unwrap_or_default();
+                project_stage_fields(stage, &state, &temporary_fields)
             })
             .collect()
     };
@@ -222,23 +398,6 @@ pub fn CanvasPanel() -> Element {
         .iter()
         .map(|c| (stages[c.from].clone(), stages[c.to].clone(), c.from_branch))
         .collect();
-
-    // ── Field-level lineage hover state ──────────────────────────────────────
-    // The current pointer [`HoverTarget`] (None / Node / Field), provided as a
-    // canvas-scoped context so each `CanvasNode` card and field row can set it.
-    // DEFAULT (`None`) draws node-level connectors only; a `Node` hover reveals
-    // that node's carries; a `Field` hover reveals one field's 1-hop closure —
-    // never the whole field-edge set at once (#72).
-    //
-    // D2 (Phase 2, perf): a hover writes this signal, re-rendering the whole
-    // canvas. A node hover's active set is larger than a field's but still bounded
-    // by one node's carry count, an O(edges) filter. Acceptable for Phase-1's
-    // small graphs; a future pass can scope the highlight to affected cards.
-    let mut hovered_field = use_context_provider(|| CanvasHover(Signal::new(HoverTarget::None)));
-    // The pinned (clicked-to-select) column (#75) — sticky across pointer moves,
-    // takes precedence over the hover in the reveal computation below. Cleared by
-    // a canvas-background click and by the view-swap effect.
-    let mut pinned_field = use_context_provider(|| PinnedField(Signal::new(None)));
 
     // D1: clear a stale hover when the active view swaps. A hovered
     // `(node_idx, field)` is only meaningful against the CURRENT view's
@@ -284,31 +443,15 @@ pub fn CanvasPanel() -> Element {
         );
 
         let mut hovered = hovered_field;
-        hovered.0.set(HoverTarget::None);
+        hovered.force_clear();
         let mut pinned = pinned_field;
         pinned.0.set(None);
     });
 
-    // The participating field-edge indices for the active reveal. A PIN (#75) wins
-    // over the hover (#72) — a clicked column stays revealed across pointer moves:
-    //  - pinned `(node, f)` → that column's FULL transitive pipeline lineage
-    //    (`field_lineage_full`: every up- and down-stream edge), the click reveal.
-    //  - else `Field(node, f)` → that field's DIRECT (1-hop) neighbourhood (hover).
-    //  - else `Node(node)`     → that node's CARRY edges (Passthrough + Access,
-    //    both directions, no derives) — the node-overview hover.
-    //  - else empty (the node-level DAG only).
-    // Computed each render as a pure function of the (reactive) pin/hover signals
-    // and the derived `field_edges`; an empty set means no field cables and no dim.
+    // An empty closure means no field cables and no dim; global field search only
+    // highlights/reveals matching rows and does not recede the node-level DAG.
     let mut active_field_edges: Vec<(usize, FieldEdgeAnchors)> = Vec::new();
     let mut participating_nodes: HashSet<usize> = HashSet::new();
-    let closure: HashSet<usize> = match &*pinned_field.0.read() {
-        Some((node, field)) => field_lineage_full(&field_edges, *node, field),
-        None => match &*hovered_field.0.read() {
-            HoverTarget::None => HashSet::new(),
-            HoverTarget::Field(node, field) => lineage_closure(&field_edges, *node, field),
-            HoverTarget::Node(node) => node_carry_edges(&field_edges, *node),
-        },
-    };
     // Resolve each participating edge to drawable anchors in ONE pass, collecting
     // the participating nodes (for the dim exemption) and the resolved edges. Only
     // edges whose anchors RESOLVE feed the highlight/dim/cable sets, so all three
@@ -333,6 +476,7 @@ pub fn CanvasPanel() -> Element {
     // `mut` because each card's names are MOVED out below via `.remove(&index)`
     // (each index is visited once, so this never loses a card's names).
     let mut highlighted_by_node = group_endpoints_by_node(resolved_edges);
+    append_highlights(&mut highlighted_by_node, &global_matches_by_node);
     // Any field hovered with a non-empty closure dims the rest of the canvas.
     let hover_active = !active_field_edges.is_empty();
 
@@ -484,7 +628,16 @@ pub fn CanvasPanel() -> Element {
         // would be clipped if the overlay were sized by the fixed header height.
         let max_y = stages
             .iter()
-            .map(|s| s.canvas_y + s.card_height())
+            .zip(field_displays.iter())
+            .map(|(s, display)| {
+                let footer_height =
+                    if !s.fields.is_empty() && (display.hidden_count > 0 || display.can_reduce) {
+                        FIELD_ROW_HEIGHT
+                    } else {
+                        0.0
+                    };
+                s.canvas_y + s.card_height() + footer_height
+            })
             .fold(0.0_f32, f32::max);
         let min_y = stages.iter().map(|s| s.canvas_y).fold(f32::MAX, f32::min);
         // Ensure SVG covers negative-Y nodes (secondary inputs above the chain).
@@ -589,6 +742,20 @@ pub fn CanvasPanel() -> Element {
                     onclick: move |_| fit_to_view(pan_x, pan_y, zoom),
                     span { class: "klinx-view-toggle-label", "RESET" }
                 }
+
+                div {
+                    class: "klinx-global-field-search",
+                    input {
+                        class: "klinx-global-field-search-input",
+                        r#type: "search",
+                        value: "{global_query}",
+                        placeholder: "find fields",
+                        title: "Find fields across visible canvas nodes. Supports * and ? wildcards.",
+                        oninput: move |e: FormEvent| {
+                            global_field_query.set(e.value());
+                        },
+                    }
+                }
             }
 
             div {
@@ -678,35 +845,34 @@ pub fn CanvasPanel() -> Element {
                     // (#87). `remove` MOVES the Vec out (each index is visited once,
                     // so this never loses a card's names), avoiding a clone and any
                     // per-node scan of a global set. A non-endpoint card gets a
-                    // fresh empty Vec — cheap, and unchanged across renders so
+                    // fresh empty Vec: cheap, and unchanged across renders so
                     // CanvasNode's PartialEq memoization holds.
                     CanvasNode {
                         key: "{stage.id}",
                         stage,
                         index,
-                        field_display: display,
+                        field_display: display.clone(),
                         on_field_query: move |query: String| {
-                            if hovered_field.0.peek().node() == Some(index) {
-                                hovered_field.0.set(HoverTarget::None);
-                            }
+                            hovered_field.force_clear_if_node(index);
                             if matches!(&*pinned_field.0.peek(), Some((n, _)) if *n == index) {
                                 pinned_field.0.set(None);
                             }
                             let mut states = field_display_states.write();
                             let entry = states.entry(query_stage_id.clone()).or_default();
                             entry.query = query;
-                            entry.expanded = false;
+                            entry.visible_limit = FIELD_ROW_CAP;
                         },
                         on_field_toggle: move |_| {
-                            if hovered_field.0.peek().node() == Some(index) {
-                                hovered_field.0.set(HoverTarget::None);
-                            }
-                            if matches!(&*pinned_field.0.peek(), Some((n, _)) if *n == index) {
-                                pinned_field.0.set(None);
-                            }
                             let mut states = field_display_states.write();
                             let entry = states.entry(expand_stage_id.clone()).or_default();
-                            entry.expanded = !entry.expanded;
+                            if display.hidden_count > 0 {
+                                entry.visible_limit = entry
+                                    .visible_limit
+                                    .max(FIELD_ROW_CAP)
+                                    .saturating_add(FIELD_ROW_CAP);
+                            } else if display.can_reduce {
+                                entry.visible_limit = FIELD_ROW_CAP;
+                            }
                         },
                         // Dim cards outside the revealed field's lineage closure.
                         dimmed: hover_active && !participating_nodes.contains(&index),
@@ -721,9 +887,14 @@ pub fn CanvasPanel() -> Element {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::pipeline_view::{FieldKind, FieldRow, RouteBranch, StageKind, StageView};
 
-    use super::{FIELD_ROW_CAP, FieldDisplayState, project_stage_fields};
+    use super::{
+        FIELD_ROW_CAP, FieldDisplayState, field_matches_by_node, project_stage_fields,
+        text_matches_query,
+    };
 
     fn wide_stage(count: usize) -> StageView {
         StageView {
@@ -755,11 +926,14 @@ mod tests {
     #[test]
     fn wide_schema_projection_caps_default_rows() {
         let stage = wide_stage(120);
-        let projected = project_stage_fields(&stage, &FieldDisplayState::default());
+        let projected =
+            project_stage_fields(&stage, &FieldDisplayState::default(), &HashSet::new());
 
         assert_eq!(projected.stage.fields.len(), FIELD_ROW_CAP);
         assert_eq!(projected.display.total_count, 120);
+        assert_eq!(projected.display.matching_count, 120);
         assert_eq!(projected.display.hidden_count, 120 - FIELD_ROW_CAP);
+        assert_eq!(projected.display.next_count, FIELD_ROW_CAP);
         assert!(projected.display.searchable);
         assert_eq!(
             projected.stage.card_height(),
@@ -775,28 +949,91 @@ mod tests {
         let filtered = project_stage_fields(
             &stage,
             &FieldDisplayState {
-                expanded: false,
+                visible_limit: FIELD_ROW_CAP,
                 query: "customer".to_string(),
             },
+            &HashSet::new(),
         );
 
         assert_eq!(filtered.stage.fields.len(), 1);
         assert_eq!(filtered.stage.fields[0].name, "field_099");
+        assert_eq!(filtered.display.matching_count, 1);
         assert_eq!(filtered.display.hidden_count, 0);
+        assert_eq!(filtered.display.next_count, 0);
         assert_eq!(filtered.stage.field_index("field_099"), Some(0));
+
+        let paged = project_stage_fields(
+            &stage,
+            &FieldDisplayState {
+                visible_limit: FIELD_ROW_CAP * 2,
+                query: String::new(),
+            },
+            &HashSet::new(),
+        );
+
+        assert_eq!(paged.stage.fields.len(), FIELD_ROW_CAP * 2);
+        assert_eq!(paged.display.hidden_count, 120 - FIELD_ROW_CAP * 2);
+        assert_eq!(paged.display.next_count, FIELD_ROW_CAP);
+        assert!(paged.display.can_reduce);
+        assert_eq!(paged.stage.fields[FIELD_ROW_CAP].name, "field_024");
+        assert_eq!(paged.stage.field_index("field_099"), None);
+
+        let fully_visible = project_stage_fields(
+            &stage,
+            &FieldDisplayState {
+                visible_limit: 120,
+                query: String::new(),
+            },
+            &HashSet::new(),
+        );
+
+        assert_eq!(fully_visible.stage.fields.len(), 120);
+        assert_eq!(fully_visible.display.hidden_count, 0);
+        assert_eq!(fully_visible.display.next_count, 0);
+        assert!(fully_visible.display.can_reduce);
+        assert_eq!(fully_visible.stage.field_index("field_099"), Some(99));
+    }
+
+    #[test]
+    fn wide_schema_projection_appends_temporary_hidden_fields() {
+        let stage = wide_stage(120);
+        let temporary = HashSet::from(["field_099".to_string(), "field_010".to_string()]);
+        let projected = project_stage_fields(&stage, &FieldDisplayState::default(), &temporary);
+
+        assert_eq!(projected.stage.fields.len(), FIELD_ROW_CAP + 1);
+        assert_eq!(
+            projected
+                .stage
+                .fields
+                .last()
+                .map(|field| field.name.as_str()),
+            Some("field_099")
+        );
+        assert_eq!(projected.display.temporary_fields, vec!["field_099"]);
+        assert_eq!(projected.display.hidden_count, 120 - FIELD_ROW_CAP);
 
         let expanded = project_stage_fields(
             &stage,
             &FieldDisplayState {
-                expanded: true,
+                visible_limit: 120,
                 query: String::new(),
             },
+            &temporary,
         );
-
         assert_eq!(expanded.stage.fields.len(), 120);
-        assert_eq!(expanded.display.hidden_count, 0);
-        assert!(expanded.display.can_reduce);
-        assert_eq!(expanded.stage.field_index("field_099"), Some(99));
+        assert!(expanded.display.temporary_fields.is_empty());
+    }
+
+    #[test]
+    fn field_search_accepts_wildcards() {
+        assert!(text_matches_query("customer_id", "cust*"));
+        assert!(text_matches_query("customer_id", "*_id"));
+        assert!(text_matches_query("field_007", "field_00?"));
+        assert!(!text_matches_query("field_010", "field_00?"));
+
+        let stage = wide_stage(12);
+        let matches = field_matches_by_node(&[stage], "field_00?");
+        assert_eq!(matches.get(&0).map(HashSet::len), Some(10));
     }
 
     trait StageViewTestExt {

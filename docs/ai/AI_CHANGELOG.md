@@ -75,7 +75,24 @@ When architecture changes, append a dated entry with:
 
 ## 2026-06-16: Wide-Schema Canvas Field Projection
 
-- Canvas nodes now cap wide field lists by default and expose compact per-node filtering/expand controls.
+- Canvas nodes now cap wide field lists by default and expose per-node header filtering plus a footer load-more control.
 - The cap/filter projection is owned by `components/canvas/panel.rs` and applied before connector anchor resolution; `CanvasNode` renders the projected `StageView` it receives, so card height, branch placement, and visible field anchors stay aligned.
 - Changing a node's field filter or cap state clears stale hover/pin lineage state for that node.
+- Correlation-key fields highlight the existing field ports on marked rows; unmarked rows reserve no leading gutter and short field names stay visually clean.
 - Verification: `cargo test -p klinx wide_schema_projection`, `cargo test -p klinx pipeline_view`, `cargo fmt --all --check`, `cargo clippy -p klinx -- -D warnings`, `cargo clippy -p klinx --all-targets -- -D warnings`, `cargo build --package klinx`, and headless canvas screenshot capture.
+
+## 2026-06-16: Delayed Field Hover Reveal
+
+- Canvas field lineage hover now uses a short cold-entry dwell before applying the first row hover, with a pending target and generation token so quick pointer sweeps do not flash lineage cables for every row crossed.
+- Once a field reveal is active or recently warm, row-to-row field movement applies immediately; leaving the field area schedules a short delayed close and then a brief warm skip window.
+- Plain node chrome hover no longer reveals field-level carry edges; only actual field-row hover or a pinned field can show field connectors.
+- Removed the old node-carry hover helper from `pipeline_view::field_lineage` because the UI no longer exposes a node-scope field reveal.
+- Verification: `cargo fmt --all --check`, `cargo build --package klinx`, `cargo test -p klinx wide_schema_projection`, `cargo clippy -p klinx -- -D warnings`, `cargo test -p klinx pipeline_view`, `cargo clippy -p klinx --all-targets -- -D warnings`, and `git diff --check`.
+
+## 2026-06-16: Temporary Hidden Field Reveal And Global Field Search
+
+- Field projection now accepts transient field names from active lineage hover/pin and global field search, appending only currently hidden matching rows at the bottom of their node without changing the node's normal cap/filter state.
+- Hidden lineage endpoints become real temporary rows before connector anchor resolution, so hover/pin cables can resolve to visible field ports; if load-more makes the field normally visible, the temporary marker naturally disappears.
+- Added a canvas toolbar global field search that highlights matches and temporarily reveals hidden matches without filtering normal node field lists.
+- Per-node field filter and global field search both support `*` and `?` wildcard matching against field names, types, and kind labels.
+- Verification: `cargo build --package klinx`, `cargo test -p klinx wide_schema_projection`, `cargo test -p klinx field_search_accepts_wildcards`, `cargo fmt --all --check`, `cargo clippy -p klinx -- -D warnings`, `cargo test -p klinx pipeline_view`, and `git diff --check`.

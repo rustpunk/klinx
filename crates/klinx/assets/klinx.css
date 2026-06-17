@@ -284,6 +284,44 @@
   color: #5A6B78;
 }
 
+[data-theme="enamel"] .klinx-node-field-search {
+  background: #F4F7FA;
+  border-color: #7C8A96;
+  color: #1C2830;
+}
+[data-theme="enamel"] .klinx-node-field-search:focus {
+  border-color: #1F7A74;
+  box-shadow: 0 0 0 1px #1F7A74;
+}
+[data-theme="enamel"] .klinx-node-field-search::placeholder {
+  color: #3F4D58;
+}
+[data-theme="enamel"] .klinx-global-field-search-input {
+  background: #F4F7FA;
+  border-color: #7C8A96;
+  color: #1C2830;
+}
+[data-theme="enamel"] .klinx-global-field-search-input:focus {
+  border-color: #1F7A74;
+  box-shadow: 0 0 0 1px #1F7A74;
+}
+[data-theme="enamel"] .klinx-global-field-search-input::placeholder {
+  color: #3F4D58;
+}
+[data-theme="enamel"] .klinx-node-field-footer {
+  background: #D8DEE4;
+  border-top-color: #A0A8B0;
+}
+[data-theme="enamel"] .klinx-node-more-btn {
+  color: #0D6762;
+}
+[data-theme="enamel"] .klinx-node-more-btn:hover {
+  color: #084A46;
+}
+[data-theme="enamel"] .klinx-node-field-footer-count {
+  color: #3F4D58;
+}
+
 /* Enamel inspector — light plate fields inside dark panel shell */
 [data-theme="enamel"] .klinx-inspector-field,
 [data-theme="enamel"] .klinx-inspector-section-body {
@@ -1275,6 +1313,36 @@ input:-webkit-autofill:focus {
   background: var(--klinx-char-surface);
   border-color: var(--klinx-border-strong);
   color: var(--klinx-bone);
+}
+
+.klinx-global-field-search {
+  flex: 0 1 220px;
+  min-width: 120px;
+  margin-left: 4px;
+}
+
+.klinx-global-field-search-input {
+  width: 100%;
+  height: 24px;
+  box-sizing: border-box;
+  border: 1px solid var(--klinx-border-medium);
+  border-radius: 2px;
+  background: var(--klinx-char);
+  color: var(--klinx-bone);
+  font-family: var(--klinx-font-code);
+  font-size: 11px;
+  line-height: 22px;
+  padding: 0 8px;
+}
+
+.klinx-global-field-search-input:focus {
+  outline: none;
+  border-color: var(--klinx-verdigris);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--klinx-verdigris) 45%, transparent);
+}
+
+.klinx-global-field-search-input::placeholder {
+  color: var(--klinx-text-floor);
 }
 
 .klinx-view-toggle:focus-visible {
@@ -4160,10 +4228,19 @@ input:-webkit-autofill:focus {
    long subtitle so the header can never grow and de-sync the geometry. Keep this
    in lockstep with `FIELD_HEADER_HEIGHT` and the 3px border in pipeline_view.rs. */
 .klinx-node-header {
+  position: relative;
   box-sizing: border-box;
   height: 89px;
   overflow: hidden;
   padding: 10px 12px;
+}
+
+.klinx-node-header--with-field-tools {
+  padding: 8px 12px 26px;
+}
+
+.klinx-node-header--with-field-tools .klinx-node-subtitle {
+  display: none;
 }
 
 .klinx-node:hover {
@@ -4291,10 +4368,19 @@ input:-webkit-autofill:focus {
   color: var(--klinx-bone);
 }
 
+.klinx-node-field-tools {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .klinx-node-field-search {
-  flex: 1 1 42px;
-  min-width: 34px;
-  max-width: 58px;
+  flex: 1 1 auto;
+  min-width: 0;
   height: 16px;
   box-sizing: border-box;
   border: 1px solid var(--klinx-border-medium);
@@ -4315,24 +4401,23 @@ input:-webkit-autofill:focus {
 }
 
 .klinx-node-more-btn {
-  flex: 0 0 auto;
-  max-width: 64px;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
-  background: none;
-  border: 1px solid var(--klinx-border-medium);
-  border-radius: 2px;
-  padding: 0 4px;
+  background: transparent;
+  border: 0;
+  padding: 0;
   cursor: pointer;
-  color: var(--klinx-iron);
+  color: var(--klinx-verdigris);
   font-family: var(--klinx-font-code);
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 20px;
 }
 .klinx-node-more-btn:hover {
-  border-color: var(--klinx-verdigris);
   color: var(--klinx-bone);
 }
 
@@ -4364,6 +4449,29 @@ input:-webkit-autofill:focus {
   margin-top: 0;
 }
 
+.klinx-node-field-footer {
+  box-sizing: border-box;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-top: 1px solid var(--klinx-border-subtle);
+  font-family: var(--klinx-font-code);
+  background: color-mix(in srgb, var(--klinx-char-raised) 34%, transparent);
+}
+
+.klinx-node-field-footer-count {
+  flex: 0 0 auto;
+  max-width: 70px;
+  color: var(--klinx-text-floor);
+  font-size: 9px;
+  line-height: 20px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Each row is EXACTLY FIELD_ROW_HEIGHT (22px) tall via border-box so its
    mid-line sits at `field_row_y(i)` in world space; `overflow:hidden` keeps a
    long field name from growing the row and de-syncing every row below it. Keep
@@ -4377,13 +4485,23 @@ input:-webkit-autofill:focus {
   overflow: hidden;
   display: flex;
   align-items: center;
-  padding: 0 12px;
+  padding: 0 10px;
   font-family: var(--klinx-font-code);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--klinx-bone);
 }
 .klinx-node-field:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+
+.klinx-node-field--temporary {
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: inset 0 1px 0 var(--klinx-border-subtle);
+}
+
+[data-theme="enamel"] .klinx-node-field--temporary {
+  background: rgba(31, 122, 116, 0.06);
+  box-shadow: inset 0 1px 0 #A0A8B0;
 }
 
 /* Lineage-endpoint cell tint (#87) — on a field-lineage hover reveal, the
@@ -4432,31 +4550,7 @@ input:-webkit-autofill:focus {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* Correlation-key marker (#88) — a calm, always-on LEADING slot before the
-   field name for source columns that drive a correlation key. The slot has a
-   FIXED width whether or not it carries a glyph, so marked and unmarked rows
-   align identically (no reflow / layout jitter). It never sets a background,
-   so it cannot collide with the lineage hover tint (#87) or the trailing
-   `.klinx-node-field-type` label. */
-.klinx-node-field-ck {
-  flex: 0 0 auto;
-  width: 13px;
-  margin-right: 4px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* A desaturated brass tone (the engine's "key" association), dimmed so the
-     marker stays low visual weight at rest. The SHAPE (the key glyph), not the
-     color, carries the meaning — color only reinforces (WCAG 1.4.1). */
-  color: color-mix(in srgb, var(--klinx-phosphor) 70%, var(--klinx-iron));
-}
-/* The glyph is monochrome (`currentColor`) and static — no motion or glow at
-   rest keeps it non-distracting. */
-.klinx-node-field-ck-glyph {
-  display: block;
-  opacity: 0.85;
+  font-weight: 500;
 }
 
 /* Inline datatype suffix on a field row — secondary to the name: muted and a bit
@@ -4464,7 +4558,7 @@ input:-webkit-autofill:focus {
    sits just before the out-anchor. */
 .klinx-node-field-type {
   flex: 0 0 auto;
-  margin-left: 8px;
+  margin-left: 6px;
   max-width: 45%;
   color: var(--klinx-text-floor);
   font-size: 10px;
@@ -4499,6 +4593,32 @@ input:-webkit-autofill:focus {
   border: 1px solid var(--klinx-border-medium);
   transform: translateY(-50%);
 }
+
+/* Correlation-key cue (#88): mark the existing field ports instead of inserting
+   extra text into short schema rows. The port fill + ring keep the marker
+   discoverable without taking horizontal space or changing row height. */
+.klinx-node-field--correlation-key .klinx-node-field-anchor {
+  background: var(--klinx-phosphor);
+  border-color: color-mix(in srgb, var(--klinx-phosphor) 40%, var(--klinx-bone));
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--klinx-phosphor) 24%, transparent),
+    0 0 7px color-mix(in srgb, var(--klinx-phosphor) 40%, transparent);
+}
+
+[data-theme="enamel"] .klinx-node-field--correlation-key .klinx-node-field-anchor {
+  background: #F2A000;
+  border-color: #5A3200;
+  box-shadow:
+    0 0 0 2px #6D3F00,
+    0 0 0 4px rgba(242, 160, 0, 0.34),
+    0 0 8px rgba(90, 50, 0, 0.42);
+}
+
+[data-theme="enamel"] .klinx-node-field--correlation-key .klinx-node-field-name {
+  color: #6D3F00;
+  font-weight: 700;
+}
+
 .klinx-node-field-anchor--in {
   left: -4px;
 }
