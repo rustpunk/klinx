@@ -1398,6 +1398,11 @@ fn compute_field_lineage(
                         .iter()
                         .map(|row| row.name.as_str())
                         .collect();
+                    let group_key_names: std::collections::HashSet<&str> = out_fields[idx]
+                        .iter()
+                        .filter(|row| matches!(row.kind, FieldKind::PassThrough))
+                        .map(|row| row.name.as_str())
+                        .collect();
 
                     // Group keys are output fields on the grouped record. They
                     // derive from the matching input field(s), but the rest of
@@ -1426,8 +1431,9 @@ fn compute_field_lineage(
                     let mut emitted_so_far: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
                     for (target, support) in &supports {
-                        if !output_names.contains(target.as_str()) {
-                            emitted_so_far.insert(target.as_str());
+                        if !output_names.contains(target.as_str())
+                            || group_key_names.contains(target.as_str())
+                        {
                             continue;
                         }
                         for member in support {
@@ -3897,6 +3903,100 @@ nodes:
                 .iter()
                 .any(|edge| edge.to_node == i_totals && edge.to_field == "status"),
             "unrelated source fields should not create aggregate passthrough edges"
+        );
+    }
+
+    /// A Merge may carry the same field from multiple upstream producers, but an
+    /// Aggregate consuming that merged row still has one immediate input row.
+    /// When `group_by` and `emit` both name that key, the Aggregate keeps one
+    /// output row and one incoming edge to it.
+    #[test]
+    fn aggregate_group_key_duplicate_emit_has_one_immediate_input_edge() {
+        let yaml = r#"
+pipeline:
+  name: merge_then_aggregate
+nodes:
+  - type: source
+    name: src_web
+    config:
+      name: src_web
+      type: csv
+      path: ./web.csv
+      schema:
+        - { name: user_id, type: string }
+        - { name: event_ts, type: date_time }
+  - type: source
+    name: src_mobile
+    config:
+      name: src_mobile
+      type: csv
+      path: ./mobile.csv
+      schema:
+        - { name: user_id, type: string }
+        - { name: event_ts, type: date_time }
+  - type: merge
+    name: all_logins
+    inputs: [src_web, src_mobile]
+  - type: aggregate
+    name: user_sessions
+    input: all_logins
+    config:
+      group_by: [user_id]
+      cxl: |
+        emit user_id = user_id
+        emit logins = count(*)
+"#;
+        let config = parse_config(yaml).expect("merge aggregate fixture parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_web = stage_idx(&view, "src_web");
+        let i_mobile = stage_idx(&view, "src_mobile");
+        let i_merge = stage_idx(&view, "all_logins");
+        let i_aggregate = stage_idx(&view, "user_sessions");
+
+        assert_eq!(
+            view.stages[i_aggregate]
+                .fields
+                .iter()
+                .filter(|row| row.name == "user_id")
+                .count(),
+            1,
+            "group_by user_id and emit user_id should share one aggregate row"
+        );
+
+        for source in [i_web, i_mobile] {
+            assert!(
+                view.field_edges.iter().any(|edge| {
+                    edge.from_node == source
+                        && edge.from_field == "user_id"
+                        && edge.to_node == i_merge
+                        && edge.to_field == "user_id"
+                        && edge.kind == FieldEdgeKind::Passthrough
+                }),
+                "each source user_id should feed the merge row"
+            );
+        }
+
+        let outgoing_user_id_edges: Vec<&FieldEdge> = view
+            .field_edges
+            .iter()
+            .filter(|edge| {
+                edge.from_node == i_merge
+                    && edge.from_field == "user_id"
+                    && edge.to_node == i_aggregate
+                    && edge.to_field == "user_id"
+            })
+            .collect();
+        assert_eq!(
+            outgoing_user_id_edges,
+            vec![&FieldEdge {
+                from_node: i_merge,
+                from_field: "user_id".to_string(),
+                to_node: i_aggregate,
+                to_field: "user_id".to_string(),
+                kind: FieldEdgeKind::Derive,
+            }],
+            "merged user_id should have exactly one downstream edge into the aggregate group key"
         );
     }
 
