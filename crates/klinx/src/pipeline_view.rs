@@ -4752,6 +4752,75 @@ nodes:
         }
     }
 
+    /// #150: a field fanned out inside `emit each` derives from the iterated
+    /// source column. `emit each x in items { emit y = x.v }` must produce a
+    /// derive edge `items -> y`, and no spurious carry/derive for `items` beyond
+    /// it (the array column is consumed by the fan-out, not passed through).
+    #[test]
+    fn emit_each_source_binding_produces_derive_edge() {
+        let yaml = r#"
+pipeline:
+  name: fan_out
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: items, type: array }
+  - type: transform
+    name: t
+    input: src
+    config:
+      cxl: |
+        emit each x in items {
+          emit y = x.v
+        }
+  - type: output
+    name: out
+    input: t
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(yaml).expect("fan-out fixture parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "src");
+        let i_t = stage_idx(&view, "t");
+
+        let derive_items_y = FieldEdge {
+            from_node: i_src,
+            from_field: "items".to_string(),
+            to_node: i_t,
+            to_field: "y".to_string(),
+            kind: FieldEdgeKind::Derive,
+        };
+        assert!(
+            view.field_edges.contains(&derive_items_y),
+            "emit-each body field derives from the iterated source column: {:?}",
+            view.field_edges,
+        );
+
+        // `items` derives exactly the one fanned-out field — no spurious derive
+        // to any other column. (Its identity passthrough carry, unchanged by
+        // #150, is a separate, legitimate edge.)
+        let items_derives: Vec<_> = view
+            .field_edges
+            .iter()
+            .filter(|e| {
+                e.from_node == i_src && e.from_field == "items" && e.kind == FieldEdgeKind::Derive
+            })
+            .collect();
+        assert_eq!(
+            items_derives,
+            vec![&derive_items_y],
+            "the iterated source column derives only the fanned-out field",
+        );
+    }
+
     /// #96: top-level pipeline field lineage is not only populated from Source
     /// schemas; it also feeds the same hover and click-to-pin reveal helpers the
     /// canvas uses. Hover stays local to the adjacent field edge, while a pinned
