@@ -780,9 +780,12 @@ pub fn CanvasPanel() -> Element {
     // Dual value/influence ribbon toggles (#152). Two INDEPENDENT booleans gating
     // which of the two ribbons the active overlay draws: the solid DIRECT "value
     // lineage" and the ghosted INDIRECT "influence halo" (the #147 edge nature).
-    // Canvas-local (like `hop_cap`) because they are transient view controls, not
-    // tab-persisted state; both default ON so a fresh selection lights the whole
-    // path. They gate only the DRAWN cables — the dim/focus closure is untouched.
+    // Both default ON so a fresh selection lights the whole path. Unlike `hop_cap`
+    // (a per-graph bound the view-swap effect RESETS), these are view PREFERENCES —
+    // like the reveal MODE, they intentionally PERSIST across graph/tab swaps, so the
+    // view-swap effect leaves them alone; a hidden ribbon stays hidden until the user
+    // re-enables it. They gate only the DRAWN cables — the dim/focus closure (and so
+    // which cards dim) is untouched.
     let mut show_value_ribbon = use_signal(|| true);
     let mut show_influence_ribbon = use_signal(|| true);
 
@@ -1846,7 +1849,7 @@ pub fn CanvasPanel() -> Element {
                         width: "{svg_w}",
                         height: "{svg_h}",
                         for (ei, anchors) in active_field_edges
-                            .iter()
+                            .into_iter()
                             .filter(|(_, anchors)| {
                                 ribbon_edge_visible(
                                     anchors.kind.nature(),
@@ -1859,15 +1862,15 @@ pub fn CanvasPanel() -> Element {
                                 key: "field-{ei}",
                                 start: anchors.start,
                                 end: anchors.end,
-                                kind_attr: anchors.kind_attr.clone(),
+                                kind_attr: anchors.kind_attr,
                                 kind: anchors.kind,
                                 precision: anchors.precision,
-                                path: anchors.path.clone(),
-                                spotlight: spotlight_edges.contains(ei),
+                                path: anchors.path,
+                                spotlight: spotlight_edges.contains(&ei),
                             }
                         }
                         for (ei, anchors) in active_role_edges
-                            .iter()
+                            .into_iter()
                             .filter(|(_, anchors)| {
                                 ribbon_edge_visible(
                                     anchors.kind.nature(),
@@ -1880,11 +1883,11 @@ pub fn CanvasPanel() -> Element {
                                 key: "role-{ei}",
                                 start: anchors.start,
                                 end: anchors.end,
-                                kind_attr: anchors.kind_attr.clone(),
+                                kind_attr: anchors.kind_attr,
                                 kind: anchors.kind,
                                 precision: anchors.precision,
-                                path: anchors.path.clone(),
-                                spotlight: spotlight_role_edges.contains(ei),
+                                path: anchors.path,
+                                spotlight: spotlight_role_edges.contains(&ei),
                             }
                         }
                     }
@@ -2812,14 +2815,32 @@ mod tests {
             !off_path.is_empty(),
             "the fixture must have at least one off-path card to dim"
         );
-        // Each off-path card dims; each in-path card stays bright. The gate the
-        // panel applies is exactly `!participating.contains(node)`.
+        // The dim set (off-path) is exactly the complement of the bright
+        // (participating) set the panel's `dimmed: !participating.contains(node)`
+        // gate applies in focus mode: disjoint, covering, and — proven above — both
+        // non-empty. A regression that dimmed an in-path card or lit an off-path one
+        // would break this partition.
+        assert!(
+            off_path.iter().all(|n| !participating.contains(n)),
+            "no card may be both on-path (bright) and off-path (dimmed)"
+        );
+        assert_eq!(
+            off_path.len() + participating.len(),
+            view.stages.len(),
+            "every card is exactly one of on-path (bright) or off-path (dimmed)"
+        );
+        // Every bright card is genuinely incident to a revealed cable (not lit by
+        // accident), and every dimmed card is genuinely absent from the overlay — so
+        // the partition tracks real path incidence, not a blanket dim/bright.
         for node in 0..view.stages.len() {
-            let dimmed = !participating.contains(&node);
+            let incident_to_overlay = overlay.iter().any(|(ei, _)| {
+                let edge = &view.field_edges[*ei];
+                edge.from_node == node || edge.to_node == node
+            });
             assert_eq!(
-                dimmed,
-                !participating.contains(&node),
-                "card {node} dim state must follow path membership"
+                participating.contains(&node),
+                incident_to_overlay,
+                "card {node}: bright iff it is incident to a revealed lineage cable"
             );
         }
     }

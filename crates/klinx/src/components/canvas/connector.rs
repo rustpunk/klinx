@@ -1252,19 +1252,26 @@ fn field_edge_kind_class(kind: FieldEdgeKind) -> &'static str {
 /// halo"). Both modifiers are gated on [`FieldEdgeKind::nature`], the single
 /// value/influence source of truth.
 ///
-/// Precision-aware (#148): an `Approximate` edge additionally carries
-/// `--approximate` so a coarse over-approximation reads as hatched/ghosted
-/// regardless of its kind hue (`Exact` edges stay clean; `Unknown` lives on the
-/// row, never an edge, so it is unreachable here). `spotlight` adds the
-/// local-focus modifier.
+/// Precision-aware (#148): an `Approximate` DIRECT (value) edge additionally
+/// carries `--approximate` so a coarse over-approximation (a CXL-less fan-in carry
+/// or an `emit each` derive) reads as hatched on top of the value ribbon, distinct
+/// from a faithful `Exact` carry. The marker is VALUE-ribbon only: every INDIRECT
+/// edge is `Approximate` by construction (see [`FieldEdge::influence`]), so the
+/// `--indirect` influence halo already conveys "not a faithful value carry" — adding
+/// `--approximate` there would be redundant AND, being declared later with equal
+/// specificity, would override the halo's dash/opacity. `Exact` edges stay clean;
+/// `Unknown` lives on the row, never an edge, so it is unreachable here. `spotlight`
+/// adds the local-focus modifier.
 fn field_edge_classes(kind: FieldEdgeKind, precision: Precision, spotlight: bool) -> String {
     let mut classes = format!("klinx-field-edge {}", field_edge_kind_class(kind));
     match kind.nature() {
-        EdgeNature::Direct => classes.push_str(" klinx-field-edge--value"),
+        EdgeNature::Direct => {
+            classes.push_str(" klinx-field-edge--value");
+            if precision == Precision::Approximate {
+                classes.push_str(" klinx-field-edge--approximate");
+            }
+        }
         EdgeNature::Indirect => classes.push_str(" klinx-field-edge--indirect"),
-    }
-    if precision == Precision::Approximate {
-        classes.push_str(" klinx-field-edge--approximate");
     }
     if spotlight {
         classes.push_str(" klinx-field-edge--spotlight");
@@ -2083,8 +2090,11 @@ mod tests {
                 .contains("klinx-field-edge--value"),
             "a Derive edge is DIRECT and must read as a solid value ribbon"
         );
-        // Precision is orthogonal to nature (#148): `--approximate` rides on top of
-        // whichever ribbon applies, and only for the Approximate tier.
+        // The approximate hatch is a VALUE-ribbon marker only (#152): it distinguishes
+        // an Approximate DIRECT carry/derive from an Exact one. It must NOT ride on an
+        // INDIRECT edge — every influence edge is Approximate by construction, so the
+        // `--indirect` halo already conveys it, and emitting `--approximate` there
+        // would override the halo's dash/opacity in the cascade.
         assert!(
             field_edge_classes(FieldEdgeKind::Derive, Precision::Approximate, false)
                 .contains("klinx-field-edge--approximate"),
@@ -2095,6 +2105,22 @@ mod tests {
                 .contains("klinx-field-edge--approximate"),
             "an Exact edge must NOT carry the approximate modifier"
         );
+        // Regression guard for the cascade bug: an INDIRECT edge (always Approximate)
+        // must read as the influence halo only — never the approximate hatch.
+        for kind in [
+            FieldEdgeKind::Filter,
+            FieldEdgeKind::GroupBy,
+            FieldEdgeKind::JoinKey,
+            FieldEdgeKind::Conditional,
+        ] {
+            let classes = field_edge_classes(kind, Precision::Approximate, false);
+            assert!(
+                classes.contains("klinx-field-edge--indirect")
+                    && !classes.contains("klinx-field-edge--approximate"),
+                "{kind:?}: an INDIRECT influence edge must carry --indirect only, not \
+                 --approximate (which would override the halo), got {classes:?}"
+            );
+        }
         // The spotlight modifier is additive and independent of nature/precision.
         assert!(
             field_edge_classes(FieldEdgeKind::JoinKey, Precision::Exact, true)

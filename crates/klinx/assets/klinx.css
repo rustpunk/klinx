@@ -4993,14 +4993,15 @@ input:-webkit-autofill:focus {
   stroke-dasharray: none;
 }
 
-/* Precision-aware ribbon (#148/#152). An `Approximate` edge — a sound but coarse
-   over-approximation (an influence edge, a CXL-less fan-in carry, or an
-   `emit each` derive) — is hatched with a tight dash and slightly ghosted so a
-   reader can tell a faithful (`Exact`) value carry from an approximate one
-   WITHOUT opening the Inspector. Applies on top of the value/influence ribbon, so
-   an approximate DIRECT derive still reads as a value ribbon, only hatched. The
-   `Unknown` tier lives on the row (no edge to annotate), so it never reaches a
-   cable. */
+/* Precision-aware ribbon (#148/#152). An `Approximate` DIRECT (value) edge — a
+   sound but coarse over-approximation (a CXL-less fan-in carry or an `emit each`
+   derive) — is hatched with a tight dash and slightly ghosted so a reader can tell
+   a faithful (`Exact`) value carry from an approximate one WITHOUT opening the
+   Inspector. The marker is emitted only on the value ribbon: every INDIRECT edge is
+   `Approximate` by construction and already ghosted by `--indirect`, so this rule
+   never lands on an influence cable (and so cannot override the halo's dash/opacity
+   — see `field_edge_classes`). The `Unknown` tier lives on the row (no edge to
+   annotate), so it never reaches a cable. */
 .klinx-field-edge--approximate {
   opacity: 0.7;
 }
