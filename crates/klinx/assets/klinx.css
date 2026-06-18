@@ -5820,6 +5820,16 @@ input:-webkit-autofill:focus {
   border-radius: 2px;
 }
 
+/* A trace hop that navigates the canvas to its field on click (#151). */
+.klinx-field-trace-row--selectable {
+  cursor: pointer;
+}
+
+.klinx-field-trace-row--selectable:hover {
+  border-color: var(--klinx-stage-accent);
+  background: rgba(255, 255, 255, 0.04);
+}
+
 .klinx-field-trace-main {
   min-width: 0;
   display: flex;
