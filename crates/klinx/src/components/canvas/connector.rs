@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use dioxus::prelude::*;
 
-use crate::pipeline_view::{CanvasConnectorPath, CanvasPoint, FieldEdgeKind, StageView};
+use crate::pipeline_view::{
+    CanvasConnectorPath, CanvasPoint, EdgeNature, FieldEdgeKind, StageView,
+};
 
 const CHANNEL_LANE_SPACING: f32 = 14.0;
 const CHANNEL_NODE_MARGIN: f32 = 18.0;
@@ -1228,12 +1230,23 @@ pub fn FieldConnector(props: FieldConnectorProps) -> Element {
     let (tx, ty) = props.end;
     // Each relationship kind reads as a distinct hue: a pure pass-through is the
     // quietest, an accessed carry a warm highlight, a derive the active accent.
-    let mut extra_class = match props.kind {
-        FieldEdgeKind::Passthrough => "klinx-field-edge klinx-field-edge--passthrough",
-        FieldEdgeKind::Access => "klinx-field-edge klinx-field-edge--access",
-        FieldEdgeKind::Derive => "klinx-field-edge klinx-field-edge--derive",
+    // The four INDIRECT influence kinds (#147) additionally carry the
+    // `--indirect` modifier — sourced from [`FieldEdgeKind::nature`] so the
+    // value/influence split has a single source of truth — which the CSS renders
+    // ghosted/dashed so influence reads differently from value.
+    let kind_class = match props.kind {
+        FieldEdgeKind::Passthrough => "klinx-field-edge--passthrough",
+        FieldEdgeKind::Access => "klinx-field-edge--access",
+        FieldEdgeKind::Derive => "klinx-field-edge--derive",
+        FieldEdgeKind::Filter => "klinx-field-edge--filter",
+        FieldEdgeKind::GroupBy => "klinx-field-edge--groupby",
+        FieldEdgeKind::JoinKey => "klinx-field-edge--joinkey",
+        FieldEdgeKind::Conditional => "klinx-field-edge--conditional",
+    };
+    let mut extra_class = format!("klinx-field-edge {kind_class}");
+    if props.kind.nature() == EdgeNature::Indirect {
+        extra_class.push_str(" klinx-field-edge--indirect");
     }
-    .to_string();
     if props.spotlight {
         extra_class.push_str(" klinx-field-edge--spotlight");
     }

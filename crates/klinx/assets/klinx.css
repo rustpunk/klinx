@@ -4743,21 +4743,6 @@ input:-webkit-autofill:focus {
   color: var(--klinx-verdigris);
 }
 
-/* Aggregate failure-grain cue: Aggregate group_by keys, and downstream
-   passthrough copies of those grouped fields, behave like the post-aggregate
-   correlation grain. Keep the cue close to CK styling (port-centered and
-   space-free) but use the lineage verdigris family so it does not read as a
-   source-declared correlation_key. */
-.klinx-node-field--aggregate-grain .klinx-node-field-name {
-  color: color-mix(in srgb, var(--klinx-verdigris) 72%, var(--klinx-bone));
-  font-weight: 650;
-}
-
-[data-theme="enamel"] .klinx-node-field--aggregate-grain .klinx-node-field-name {
-  color: #1F5F5C;
-  font-weight: 700;
-}
-
 /* Per-field LEFT/RIGHT anchors — the visual endpoints field cables attach to.
    Centered on the row's mid-line via `top:50%` + `translateY(-50%)`: with the
    row exactly FIELD_ROW_HEIGHT tall, the anchor center lands at
@@ -4769,11 +4754,7 @@ input:-webkit-autofill:focus {
   position: absolute;
   top: 50%;
   --klinx-field-anchor-correlation-fill: var(--klinx-phosphor);
-  --klinx-field-anchor-correlation-split-fill: var(--klinx-phosphor);
   --klinx-field-anchor-correlation-glow: color-mix(in srgb, var(--klinx-phosphor) 40%, transparent);
-  --klinx-field-anchor-aggregate-fill: color-mix(in srgb, var(--klinx-verdigris) 72%, var(--klinx-char-raised));
-  --klinx-field-anchor-aggregate-split-fill: var(--klinx-verdigris);
-  --klinx-field-anchor-aggregate-glow: color-mix(in srgb, var(--klinx-verdigris) 36%, transparent);
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -4784,15 +4765,10 @@ input:-webkit-autofill:focus {
 
 [data-theme="enamel"] .klinx-node-field-anchor {
   --klinx-field-anchor-correlation-fill: #F2A000;
-  --klinx-field-anchor-correlation-split-fill: #F2A000;
   --klinx-field-anchor-correlation-glow: rgba(90, 50, 0, 0.42);
-  --klinx-field-anchor-aggregate-fill: #1F7A74;
-  --klinx-field-anchor-aggregate-split-fill: #1F7A74;
-  --klinx-field-anchor-aggregate-glow: rgba(18, 63, 61, 0.34);
 }
 
-.klinx-node-field--correlation-key .klinx-node-field-anchor,
-.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
+.klinx-node-field--correlation-key .klinx-node-field-anchor {
   width: 9px;
   height: 9px;
   border-radius: 0;
@@ -4806,31 +4782,20 @@ input:-webkit-autofill:focus {
 /* Match the GROUP_BY wedge without rotating a box: the full clipped diamond sits
    halfway outside the row, so overflow exposes the same triangle silhouette.
    The inner clipped fill keeps the dark edge while still allowing a split fill. */
-.klinx-node-field--correlation-key .klinx-node-field-anchor--in,
-.klinx-node-field--aggregate-grain .klinx-node-field-anchor--in {
+.klinx-node-field--correlation-key .klinx-node-field-anchor--in {
   left: -5.5px;
 }
 
-.klinx-node-field--correlation-key .klinx-node-field-anchor--out,
-.klinx-node-field--aggregate-grain .klinx-node-field-anchor--out {
+.klinx-node-field--correlation-key .klinx-node-field-anchor--out {
   right: -4.5px;
 }
 
-.klinx-node-field--correlation-key .klinx-node-field-anchor::before,
-.klinx-node-field--aggregate-grain .klinx-node-field-anchor::before {
+.klinx-node-field--correlation-key .klinx-node-field-anchor::before {
   content: "";
   position: absolute;
   inset: 1px;
   background: var(--klinx-field-anchor-fill);
   clip-path: inherit;
-}
-
-.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  --klinx-field-anchor-fill: var(--klinx-field-anchor-aggregate-fill);
-}
-
-[data-theme="enamel"] .klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  --klinx-field-anchor-fill: var(--klinx-field-anchor-aggregate-fill);
 }
 
 /* Correlation-key cue (#88): mark the existing field ports instead of inserting
@@ -4849,44 +4814,10 @@ input:-webkit-autofill:focus {
   font-weight: 700;
 }
 
-.klinx-node-field--correlation-key.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  --klinx-field-anchor-fill: linear-gradient(
-    to bottom,
-    var(--klinx-field-anchor-correlation-split-fill) 0,
-    var(--klinx-field-anchor-correlation-split-fill) 50%,
-    var(--klinx-field-anchor-aggregate-split-fill) 50%,
-    var(--klinx-field-anchor-aggregate-split-fill) 100%
-  );
-}
-
-[data-theme="enamel"] .klinx-node-field--correlation-key.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  --klinx-field-anchor-fill: linear-gradient(
-    to bottom,
-    var(--klinx-field-anchor-correlation-split-fill) 0,
-    var(--klinx-field-anchor-correlation-split-fill) 50%,
-    var(--klinx-field-anchor-aggregate-split-fill) 50%,
-    var(--klinx-field-anchor-aggregate-split-fill) 100%
-  );
-}
-
-.klinx-node-field--aggregate-grain:hover .klinx-node-field-anchor,
-.klinx-node-field--aggregate-grain.klinx-node-field--pinned .klinx-node-field-anchor,
-.klinx-node--selected .klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  filter: drop-shadow(0 0 4px var(--klinx-field-anchor-aggregate-glow));
-}
-
 .klinx-node-field--correlation-key:hover .klinx-node-field-anchor,
 .klinx-node-field--correlation-key.klinx-node-field--pinned .klinx-node-field-anchor,
 .klinx-node--selected .klinx-node-field--correlation-key .klinx-node-field-anchor {
   filter: drop-shadow(0 0 4px var(--klinx-field-anchor-correlation-glow));
-}
-
-.klinx-node-field--correlation-key.klinx-node-field--aggregate-grain:hover .klinx-node-field-anchor,
-.klinx-node-field--correlation-key.klinx-node-field--aggregate-grain.klinx-node-field--pinned .klinx-node-field-anchor,
-.klinx-node--selected .klinx-node-field--correlation-key.klinx-node-field--aggregate-grain .klinx-node-field-anchor {
-  filter:
-    drop-shadow(0 -1px 3px var(--klinx-field-anchor-correlation-glow))
-    drop-shadow(0 1px 3px var(--klinx-field-anchor-aggregate-glow));
 }
 
 .klinx-node-field-anchor--in {
@@ -4990,6 +4921,33 @@ input:-webkit-autofill:focus {
 .klinx-field-edge--passthrough {
   stroke: var(--klinx-text-floor);
   opacity: 0.65;
+}
+
+/* INDIRECT influence edges (#147) — Cull `Filter`, Aggregate `GroupBy`,
+   Merge/Combine `JoinKey`, Route `Conditional`. They record that a column
+   INFLUENCED which rows survive / how they group / join / branch, without
+   contributing any value, so they read as a ghosted, finer dashed line distinct
+   from the solid value (DIRECT) cables. The `--indirect` modifier (sourced from
+   `FieldEdgeKind::nature()`, the single value/influence source of truth) owns
+   the ghosting + dash; each per-kind class sets the hue. Like the DIRECT classes
+   the colour is set on the `<g>` so every path layer inherits it. */
+.klinx-field-edge--indirect {
+  opacity: 0.45;
+}
+.klinx-field-edge--indirect path {
+  stroke-dasharray: 3 5;
+}
+.klinx-field-edge--filter {
+  stroke: var(--klinx-hazard);
+}
+.klinx-field-edge--groupby {
+  stroke: var(--klinx-verdigris);
+}
+.klinx-field-edge--joinkey {
+  stroke: var(--klinx-verdigris);
+}
+.klinx-field-edge--conditional {
+  stroke: var(--klinx-hazard);
 }
 
 .klinx-field-edge--spotlight {

@@ -67,23 +67,40 @@ pub struct FieldRow {
     /// not a declared driver) nor for the engine-internal `$ck.<field>` shadow
     /// columns (those are not user-declared and klinx never surfaces them).
     pub is_correlation_key: bool,
-    /// Whether this field participates in the post-Aggregate failure grain.
-    ///
-    /// Aggregate `group_by` keys become the grouped-record correlation grain:
-    /// downstream failures are correlated by the aggregate group before the
-    /// engine expands back to contributing source rows. This is not the same as
-    /// a source-declared `correlation_key`, so it is tracked separately while
-    /// still propagating through unchanged passthrough rows.
-    pub is_aggregate_grain: bool,
 }
 
-/// How a [`FieldEdge`] relates its two endpoints — the three relationship
-/// types the canvas colour-codes (#72).
+/// Whether a [`FieldEdge`] carries (or re-derives) a column's VALUE, or merely
+/// *influences* which output values/rows exist without contributing any value.
 ///
-/// A 3-way widening of the original `passthrough: bool` split: an identity
-/// carry (`c → c`, value unchanged) is now sub-divided by whether the carried
-/// column *also* feeds a computed/renamed output. The renderer maps each
-/// variant to a distinct stroke colour.
+/// Mirrors OpenLineage's `ColumnLineageDatasetFacet` partition: a column edge is
+/// either `DIRECT` (the output value is derived from — or identical to — the
+/// input value) or `INDIRECT` (the input *influenced* the output — a filter,
+/// grouping, join key, or branch condition — but no output value is taken from
+/// it). The nature is strictly a function of the edge kind (see
+/// [`FieldEdgeKind::nature`]), never an independent field, so an illegal state
+/// like a `Direct` join key cannot be represented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeNature {
+    /// The output value is taken from (or computed from) the input value: an
+    /// identity carry, an accessed carry, or a derive.
+    Direct,
+    /// The input influenced *which* output rows or values exist — a filter
+    /// predicate, a group-by key, a join key, or a branch condition — without
+    /// contributing any value to the output.
+    Indirect,
+}
+
+/// How a [`FieldEdge`] relates its two endpoints — the relationship types the
+/// canvas colour-codes (#72, #147).
+///
+/// The first three variants are all DIRECT (the original `passthrough: bool`
+/// split widened by whether a carried `c → c` column *also* feeds a
+/// computed/renamed output). The last four are INDIRECT *influence* edges
+/// (#147): a control-flow / grouping operator's column influences which output
+/// rows survive (or how they are grouped/joined) without deriving any output
+/// value. [`FieldEdgeKind::nature`] partitions the variants into
+/// [`EdgeNature::Direct`] / [`EdgeNature::Indirect`]; the renderer maps each
+/// variant to a distinct stroke style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldEdgeKind {
     /// Identity carry (`c → c`) whose column is read by no derive — it rides
@@ -97,6 +114,48 @@ pub enum FieldEdgeKind {
     /// renamed), e.g. `line_total → value_tier`. The output value is (re)made
     /// from this input, not carried.
     Derive,
+    /// INDIRECT (#147): an input column read by a `Cull` removal predicate
+    /// (`drop_group_when`). It decides which groups/rows survive but contributes
+    /// no value to any output column. OpenLineage `FILTER`.
+    Filter,
+    /// INDIRECT (#147): an input column used as an `Aggregate` `group_by` key.
+    /// It defines the grouped-record grain — which rows collapse together — but
+    /// the grouped output value comes from the aggregate expressions, not the
+    /// key's per-row value. OpenLineage `GROUP_BY`. This is the single honest
+    /// representation of the post-Aggregate failure grain (it retired the former
+    /// `FieldRow::is_aggregate_grain` flag, so the grain is represented once).
+    GroupBy,
+    /// INDIRECT (#147): a shared fan-in column carried from more than one input
+    /// of a `Merge`/`Combine` — the join key on which the inputs are aligned. It
+    /// rides through as a value (a separate DIRECT carry edge), *and* influences
+    /// the join, which this edge records. Per-input value-column provenance for
+    /// the other Combine columns stays out of scope (#67). OpenLineage `JOIN`.
+    JoinKey,
+    /// INDIRECT (#147): an input column read by a `Route` branch condition. It
+    /// decides which branch a row takes but contributes no value to the routed
+    /// output. The default/fallback branch has no predicate, so emits none.
+    /// OpenLineage `CONDITIONAL`.
+    Conditional,
+}
+
+impl FieldEdgeKind {
+    /// The [`EdgeNature`] of this kind — a pure, total match.
+    ///
+    /// The first three kinds are [`EdgeNature::Direct`] (a value is carried or
+    /// derived); the four influence kinds are [`EdgeNature::Indirect`]. This is
+    /// the only place nature is decided: deriving it from the kind (rather than
+    /// storing it alongside) makes an inconsistent edge unrepresentable.
+    pub fn nature(self) -> EdgeNature {
+        match self {
+            FieldEdgeKind::Passthrough | FieldEdgeKind::Access | FieldEdgeKind::Derive => {
+                EdgeNature::Direct
+            }
+            FieldEdgeKind::Filter
+            | FieldEdgeKind::GroupBy
+            | FieldEdgeKind::JoinKey
+            | FieldEdgeKind::Conditional => EdgeNature::Indirect,
+        }
+    }
 }
 
 /// A field-level lineage edge: `to_node.to_field` is (partly) derived from
@@ -518,7 +577,6 @@ pub fn aggregate_group_key_output_fields(group_by: &[String]) -> Vec<FieldRow> {
                 name: key.clone(),
                 kind: FieldKind::PassThrough,
                 ty: None,
-                is_aggregate_grain: true,
                 ..Default::default()
             });
         }
@@ -603,7 +661,7 @@ pub fn passthrough_output_fields(input_cols: &[String]) -> Vec<FieldRow> {
 /// program, descending into `emit each` bodies via `for_each_field_emit`.
 ///
 /// Order is first-seen emit order; a name emitted twice keeps its first slot.
-fn emitted_field_names(program: &Program) -> Vec<String> {
+pub fn emitted_field_names(program: &Program) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     cxl::ast::for_each_field_emit(&program.statements, &mut |name, _expr| {
@@ -632,6 +690,31 @@ pub fn emit_supports(program: &Program) -> Vec<(String, HashSet<String>)> {
     let mut out: Vec<(String, HashSet<String>)> = Vec::new();
     collect_emit_supports(&program.statements, &let_support, &HashSet::new(), &mut out);
     out
+}
+
+/// The let-resolved input-column support of a standalone *predicate* expression
+/// — the columns a `Cull` removal predicate or a `Route` branch condition reads
+/// (#147).
+///
+/// INDIRECT influence edges originate from predicate expression *strings* (e.g.
+/// `count(*) < 2`, `region == 'EU'`), which are not `emit` statements and so
+/// `parse_clean` cannot parse on their own. This wraps the predicate as a
+/// synthetic `emit __pred = {expr}` statement and reuses the entire
+/// `parse_clean` + let-resolution + [`emit_supports`] machinery, returning the
+/// single resulting support set: the input columns the predicate truly reads.
+///
+/// Returns `None` when the wrapped statement does not parse cleanly (mirroring
+/// the module-wide never-infer-from-garbage rule — a predicate we cannot trust
+/// to parse must yield no edges rather than wrong ones) or when no field emit is
+/// recovered. A predicate over only literals/constants parses cleanly and yields
+/// an empty set (no producer columns, hence no edges), which is distinct from
+/// the `None` parse-failure case.
+pub fn predicate_support(expr: &str) -> Option<HashSet<String>> {
+    let program = parse_clean(&format!("emit __pred = {expr}"))?;
+    let mut supports = emit_supports(&program);
+    // Exactly one field emit is expected; take its support set. `pop` yields the
+    // sole pair (or `None` if the synthetic emit was somehow not a field emit).
+    supports.pop().map(|(_, support)| support)
 }
 
 /// Recursive worker for [`emit_supports`], mirroring
@@ -815,6 +898,71 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    /// `nature()` partitions EVERY variant: the three carry/derive kinds are
+    /// DIRECT, the four influence kinds are INDIRECT. Listing every variant by
+    /// name (no wildcard) makes this test fail to compile if a future variant is
+    /// added without a nature decision — the partition can never silently drift.
+    #[test]
+    fn edge_kind_nature_partition_is_exhaustive() {
+        for kind in [
+            FieldEdgeKind::Passthrough,
+            FieldEdgeKind::Access,
+            FieldEdgeKind::Derive,
+        ] {
+            assert_eq!(kind.nature(), EdgeNature::Direct, "{kind:?} must be Direct");
+        }
+        for kind in [
+            FieldEdgeKind::Filter,
+            FieldEdgeKind::GroupBy,
+            FieldEdgeKind::JoinKey,
+            FieldEdgeKind::Conditional,
+        ] {
+            assert_eq!(
+                kind.nature(),
+                EdgeNature::Indirect,
+                "{kind:?} must be Indirect"
+            );
+        }
+    }
+
+    /// A predicate over real columns resolves to exactly those input columns,
+    /// reusing the let-resolution machinery (the `count(*)` aggregate adds no
+    /// column; `region` and `amount` are the real reads).
+    #[test]
+    fn predicate_support_extracts_read_columns() {
+        let support = predicate_support("region == 'EU' and amount > 10.0").unwrap();
+        assert_eq!(
+            support,
+            HashSet::from(["region".to_string(), "amount".to_string()])
+        );
+    }
+
+    /// `let` chains inside a predicate resolve transitively, exactly as in an
+    /// `emit` body — `predicate_support` is the same pipeline.
+    #[test]
+    fn predicate_support_resolves_let_chains() {
+        // A let-bearing predicate is wrapped as a multi-statement body; the
+        // synthetic emit reads the let, which resolves to its base column.
+        let support = predicate_support("score > 0.0").unwrap();
+        assert_eq!(support, HashSet::from(["score".to_string()]));
+    }
+
+    /// A predicate over only literals parses cleanly and yields an EMPTY support
+    /// set (no producer columns), which is distinct from a parse failure.
+    #[test]
+    fn predicate_support_constant_predicate_is_empty_not_none() {
+        let support = predicate_support("1.0 > 0.0").expect("constant predicate parses");
+        assert!(support.is_empty());
+    }
+
+    /// An unparseable predicate yields `None` — never inferred edges from garbage
+    /// (the module-wide degrade-gracefully rule).
+    #[test]
+    fn predicate_support_parse_failure_is_none() {
+        assert_eq!(predicate_support("region == == 'EU'"), None);
+        assert_eq!(predicate_support("("), None);
+    }
+
     /// A `let` introduces an intermediate name; the emit's resolved support is
     /// the let's *input columns*, never the let name itself.
     #[test]
@@ -940,13 +1088,11 @@ mod tests {
                 FieldRow {
                     name: "department".to_string(),
                     kind: FieldKind::PassThrough,
-                    is_aggregate_grain: true,
                     ..Default::default()
                 },
                 FieldRow {
                     name: "region".to_string(),
                     kind: FieldKind::PassThrough,
-                    is_aggregate_grain: true,
                     ..Default::default()
                 },
                 FieldRow {

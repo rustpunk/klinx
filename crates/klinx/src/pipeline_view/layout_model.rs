@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::{
     COLUMN_CENTER_Y, CanvasConnectorPath, CanvasPoint, Connection, FIELD_HEADER_HEIGHT,
-    FIELD_ROW_HEIGHT, FieldEdge, HEADER_PORT_Y, LEFT_MARGIN, NODE_GAP, NODE_WIDTH, PipelineView,
-    RoleEdge, STACK_GAP, StageKind, StagePortKind, StagePortSide as ViewStagePortSide, StageView,
+    FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, HEADER_PORT_Y, LEFT_MARGIN, NODE_GAP, NODE_WIDTH,
+    PipelineView, RoleEdge, STACK_GAP, StageKind, StagePortKind,
+    StagePortSide as ViewStagePortSide, StageView,
 };
 
 /// Canvas layout path requested by callers during the renderer migration.
@@ -182,6 +183,15 @@ pub struct LayoutEdge {
 pub enum LayoutEdgeKind {
     Node,
     Field,
+    /// An INDIRECT influence field edge (#147) — a `Cull` `Filter`, `Route`
+    /// `Conditional`, or `Merge`/`Combine` `JoinKey`. It is rendered as a
+    /// revealed-on-selection overlay, so it gets a routed path but **zero**
+    /// rank/order weight: an influence overlay must not pull the structural
+    /// layout (which the DIRECT topology already determines) toward itself.
+    /// (`Aggregate` `GroupBy` stays an ordinary [`LayoutEdgeKind::Field`]: it
+    /// replaced the former group-key `Derive` edge one-for-one, so it keeps that
+    /// edge's prior layout weight and does not shift any tuned layout.)
+    IndirectField,
     AggregateGroupKey,
     RouteBranch,
     CullSideOutput,
@@ -1042,12 +1052,24 @@ fn connection_edge(connection: &Connection, stages: &[StageView]) -> LayoutEdge 
 }
 
 fn field_edge(edge: &FieldEdge) -> LayoutEdge {
+    // An INDIRECT influence edge becomes a zero-weight overlay edge so it routes
+    // a cable without distorting the structural layout; `GroupBy` (which replaced
+    // the group-key `Derive`) stays an ordinary weighted field edge (#147).
+    let kind = match edge.kind {
+        FieldEdgeKind::Filter | FieldEdgeKind::JoinKey | FieldEdgeKind::Conditional => {
+            LayoutEdgeKind::IndirectField
+        }
+        FieldEdgeKind::Passthrough
+        | FieldEdgeKind::Access
+        | FieldEdgeKind::Derive
+        | FieldEdgeKind::GroupBy => LayoutEdgeKind::Field,
+    };
     LayoutEdge {
         from_node: edge.from_node,
         from_port: format!("field:out:{}", edge.from_field),
         to_node: edge.to_node,
         to_port: format!("field:in:{}", edge.to_field),
-        kind: LayoutEdgeKind::Field,
+        kind,
         path: ConnectorPath::default(),
     }
 }
@@ -1103,6 +1125,10 @@ fn edge_rank_weight(kind: LayoutEdgeKind) -> usize {
         LayoutEdgeKind::RouteBranch | LayoutEdgeKind::CullSideOutput => 48,
         LayoutEdgeKind::AggregateGroupKey => 24,
         LayoutEdgeKind::Field => 16,
+        // INDIRECT influence overlays carry no structural weight (#147): they are
+        // revealed on selection and must not pull node ranks/ordering, which the
+        // DIRECT topology already fixes.
+        LayoutEdgeKind::IndirectField => 0,
     }
 }
 
@@ -1252,6 +1278,8 @@ fn edge_kind_order(kind: LayoutEdgeKind) -> usize {
     match kind {
         LayoutEdgeKind::Node => 0,
         LayoutEdgeKind::Field => 1,
+        // INDIRECT overlays route in the same lane band as ordinary field edges.
+        LayoutEdgeKind::IndirectField => 1,
         LayoutEdgeKind::AggregateGroupKey => 2,
         LayoutEdgeKind::RouteBranch => 3,
         LayoutEdgeKind::CullSideOutput => 4,
@@ -1670,7 +1698,6 @@ mod tests {
             kind: FieldKind::Declared,
             ty: None,
             is_correlation_key: false,
-            is_aggregate_grain: false,
         }
     }
 

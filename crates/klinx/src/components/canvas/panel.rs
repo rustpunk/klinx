@@ -129,6 +129,11 @@ impl GraphDisplayProfile {
 struct FieldRankSignals {
     produced_or_derived_by_node: HashMap<usize, HashSet<String>>,
     operator_relevant_by_node: HashMap<usize, HashSet<String>>,
+    /// Per-node field names that are an endpoint of a `GroupBy` influence edge
+    /// (#147) — the Aggregate group-by grain. Replaces the retired
+    /// `FieldRow::is_aggregate_grain` flag for preview ranking and search, so the
+    /// grain is represented exactly once (the edge) and read from it here.
+    aggregate_grain_by_node: HashMap<usize, HashSet<String>>,
 }
 
 fn build_field_rank_signals(
@@ -138,6 +143,18 @@ fn build_field_rank_signals(
 ) -> FieldRankSignals {
     let mut signals = FieldRankSignals::default();
     for edge in field_edges {
+        if edge.kind == FieldEdgeKind::GroupBy {
+            signals
+                .aggregate_grain_by_node
+                .entry(edge.from_node)
+                .or_default()
+                .insert(edge.from_field.clone());
+            signals
+                .aggregate_grain_by_node
+                .entry(edge.to_node)
+                .or_default()
+                .insert(edge.to_field.clone());
+        }
         if matches!(edge.kind, FieldEdgeKind::Derive | FieldEdgeKind::Access) {
             signals
                 .produced_or_derived_by_node
@@ -292,11 +309,18 @@ fn project_stage_fields(
     } else {
         state.visible_limit.max(default_limit)
     };
+    let grain_fields = context
+        .rank_signals
+        .aggregate_grain_by_node
+        .get(&context.stage_index);
     let matching_fields: Vec<(usize, &FieldRow)> = stage
         .fields
         .iter()
         .enumerate()
-        .filter(|(_, field)| field_matches_query(field, query))
+        .filter(|(_, field)| {
+            let is_grain = grain_fields.is_some_and(|fields| fields.contains(&field.name));
+            field_matches_query(field, query, is_grain)
+        })
         .collect();
     let matching_count = matching_fields.len();
     let mut fields = visible_fields_for_mode(
@@ -390,7 +414,11 @@ fn preview_rank(
     field: &FieldRow,
     rank_signals: &FieldRankSignals,
 ) -> u8 {
-    if field.is_correlation_key || field.is_aggregate_grain {
+    let is_aggregate_grain = rank_signals
+        .aggregate_grain_by_node
+        .get(&stage_index)
+        .is_some_and(|fields| fields.contains(&field.name));
+    if field.is_correlation_key || is_aggregate_grain {
         return 1;
     }
     if matches!(field.kind, crate::pipeline_view::FieldKind::Emitted)
@@ -415,7 +443,11 @@ fn preview_rank(
     5
 }
 
-fn field_matches_query(field: &FieldRow, query: &str) -> bool {
+/// Whether a field matches the search `query`. `is_aggregate_grain` is supplied
+/// by the caller from the per-node `GroupBy`-edge grain set (#147), since the
+/// grain is no longer a `FieldRow` flag; it keeps the "aggregate failure grain"
+/// search term working without re-introducing the retired flag.
+fn field_matches_query(field: &FieldRow, query: &str, is_aggregate_grain: bool) -> bool {
     let query = query.trim();
     query.is_empty()
         || text_matches_query(&field.name, query)
@@ -425,7 +457,7 @@ fn field_matches_query(field: &FieldRow, query: &str) -> bool {
             .is_some_and(|ty| text_matches_query(ty, query))
         || text_matches_query(field_kind_label(field), query)
         || (field.is_correlation_key && text_matches_query("source correlation key", query))
-        || (field.is_aggregate_grain && text_matches_query("aggregate failure grain", query))
+        || (is_aggregate_grain && text_matches_query("aggregate failure grain", query))
 }
 
 fn text_matches_query(value: &str, query: &str) -> bool {
@@ -557,7 +589,11 @@ fn role_edges_from_fields(
         .collect()
 }
 
-fn field_matches_by_node(stages: &[StageView], query: &str) -> HashMap<usize, HashSet<String>> {
+fn field_matches_by_node(
+    stages: &[StageView],
+    query: &str,
+    aggregate_grain_by_node: &HashMap<usize, HashSet<String>>,
+) -> HashMap<usize, HashSet<String>> {
     let query = query.trim();
     if query.is_empty() {
         return HashMap::new();
@@ -567,10 +603,14 @@ fn field_matches_by_node(stages: &[StageView], query: &str) -> HashMap<usize, Ha
         .iter()
         .enumerate()
         .filter_map(|(index, stage)| {
+            let grain_fields = aggregate_grain_by_node.get(&index);
             let matches: HashSet<String> = stage
                 .fields
                 .iter()
-                .filter(|field| field_matches_query(field, query))
+                .filter(|field| {
+                    let is_grain = grain_fields.is_some_and(|fields| fields.contains(&field.name));
+                    field_matches_query(field, query, is_grain)
+                })
                 .map(|field| field.name.clone())
                 .collect();
             (!matches.is_empty()).then_some((index, matches))
@@ -785,8 +825,16 @@ pub fn CanvasPanel() -> Element {
     let lineage_fields_by_node = field_endpoint_names_by_node(&field_edges, &closure);
     let lineage_role_source_fields_by_node =
         role_source_field_names_by_node(&role_edges, &role_closure);
+    // Built before search so the "aggregate failure grain" search term can read
+    // the per-node `GroupBy`-edge grain set (#147 — the grain is no longer a row
+    // flag).
+    let rank_signals = build_field_rank_signals(&raw_stages, &field_edges, &role_edges);
     let global_query = global_field_query.read().clone();
-    let global_matches_by_node = field_matches_by_node(&raw_stages, &global_query);
+    let global_matches_by_node = field_matches_by_node(
+        &raw_stages,
+        &global_query,
+        &rank_signals.aggregate_grain_by_node,
+    );
     let mut temporary_fields_by_node = lineage_fields_by_node.clone();
     merge_field_name_sets(
         &mut temporary_fields_by_node,
@@ -794,7 +842,6 @@ pub fn CanvasPanel() -> Element {
     );
     merge_field_name_sets(&mut temporary_fields_by_node, &global_matches_by_node);
 
-    let rank_signals = build_field_rank_signals(&raw_stages, &field_edges, &role_edges);
     let display_profile = GraphDisplayProfile::from_stages(&raw_stages);
     let zoom_for_auto = *zoom.read();
     let global_display_mode = *global_node_display_mode.read();
@@ -1623,7 +1670,6 @@ mod tests {
                     },
                     ty: Some(if i == 99 { "customer_id" } else { "int" }.to_string()),
                     is_correlation_key: false,
-                    is_aggregate_grain: false,
                 })
                 .collect(),
             branches: Vec::<RouteBranch>::new(),
@@ -1857,14 +1903,27 @@ mod tests {
         let field = FieldRow {
             name: "invoice_date".to_string(),
             kind: FieldKind::PassThrough,
-            is_aggregate_grain: true,
             ..Default::default()
         };
+        // The grain is no longer a row flag (#147); it is read from the per-node
+        // `GroupBy`-edge grain set on the rank signals.
+        let mut signals = FieldRankSignals::default();
+        signals
+            .aggregate_grain_by_node
+            .entry(0)
+            .or_default()
+            .insert("invoice_date".to_string());
 
         assert_eq!(
-            preview_rank(0, &stage, &field, &FieldRankSignals::default()),
+            preview_rank(0, &stage, &field, &signals),
             1,
             "aggregate failure-grain rows should stay visible like source CK rows"
+        );
+        // A field NOT in the grain set is not prioritized to rank 1 by grain.
+        assert_ne!(
+            preview_rank(0, &stage, &field, &FieldRankSignals::default()),
+            1,
+            "without a GroupBy edge the row is not treated as grain"
         );
     }
 
@@ -1986,7 +2045,8 @@ mod tests {
         assert!(!text_matches_query("field_010", "field_00?"));
 
         let stage = wide_stage(12);
-        let matches = field_matches_by_node(&[stage], "field_00?");
+        let matches =
+            field_matches_by_node(&[stage], "field_00?", &std::collections::HashMap::new());
         assert_eq!(matches.get(&0).map(HashSet::len), Some(10));
     }
 
@@ -2003,6 +2063,45 @@ mod tests {
             block.contains("filter:"),
             "dimmed cards should recede visually without changing alpha"
         );
+    }
+
+    /// #147: INDIRECT influence edges read as ghosted, dashed cables distinct from
+    /// the solid DIRECT value cables — the `--indirect` modifier (driven by
+    /// `FieldEdgeKind::nature()`) ghosts (lower opacity) and the inner path is
+    /// dashed.
+    #[test]
+    fn indirect_field_edge_css_is_ghosted_and_dashed() {
+        let css = include_str!("../../../assets/klinx.css");
+
+        let modifier = css_rule_block(css, ".klinx-field-edge--indirect {")
+            .expect("indirect field-edge CSS rule");
+        assert!(
+            modifier.contains("opacity:"),
+            "INDIRECT edges should be ghosted via reduced opacity, got {modifier:?}"
+        );
+
+        let dash = css_rule_block(css, ".klinx-field-edge--indirect path")
+            .expect("indirect field-edge path dash rule");
+        assert!(
+            dash.contains("stroke-dasharray:"),
+            "INDIRECT edge paths should be dashed, got {dash:?}"
+        );
+
+        // Each INDIRECT subtype keeps its own hue class so a reader can tell a
+        // Filter from a JoinKey on inspection.
+        for selector in [
+            ".klinx-field-edge--filter {",
+            ".klinx-field-edge--groupby {",
+            ".klinx-field-edge--joinkey {",
+            ".klinx-field-edge--conditional {",
+        ] {
+            let block = css_rule_block(css, selector)
+                .unwrap_or_else(|| panic!("missing INDIRECT subtype CSS rule {selector}"));
+            assert!(
+                block.contains("stroke:"),
+                "{selector} should set a stroke hue, got {block:?}"
+            );
+        }
     }
 
     fn css_rule_block<'a>(css: &'a str, selector: &str) -> Option<&'a str> {

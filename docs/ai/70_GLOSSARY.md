@@ -15,7 +15,11 @@
 | `PipelineView` | Canvas-ready view model for stages and connections | `pipeline_view.rs`, canvas | `StageView`, `Connection` | High |
 | `StageView` | Renderable node/card data for a pipeline stage | `pipeline_view.rs`, canvas node | `StageKind` | High |
 | Field lineage | Inferred relationships between fields through pipeline stages | `pipeline_view/field_lineage.rs`, canvas | `FieldEdge`, CXL | High |
-| `FieldEdgeKind` | Classification of field lineage edges | `pipeline_view/field_lineage.rs` | carry, derive, project | High |
+| `FieldEdgeKind` | Classification of a field lineage edge: DIRECT (`Passthrough`/`Access`/`Derive`) or INDIRECT (`Filter`/`GroupBy`/`JoinKey`/`Conditional`) | `pipeline_view/field_lineage.rs` | DIRECT, INDIRECT, `EdgeNature` | High |
+| DIRECT edge | A field edge whose output VALUE is carried from or (re)derived from the input — `Passthrough`/`Access`/`Derive`. Rendered solid. | `pipeline_view/field_lineage.rs`, canvas | `EdgeNature::Direct` | High |
+| INDIRECT edge | A field edge where the input only *influenced* which output rows/values exist (a filter, group-by, join key, or branch condition) without contributing a value — `Filter`/`GroupBy`/`JoinKey`/`Conditional` (#147). Rendered ghosted/dashed, collapsed until a field is selected. Mirrors OpenLineage INDIRECT subtypes. | `pipeline_view/field_lineage.rs`, canvas | `EdgeNature::Indirect`, OpenLineage | High |
+| `EdgeNature` | DIRECT vs INDIRECT axis, derived purely from `FieldEdgeKind::nature()` (never stored, so illegal states like a Direct join key are unrepresentable) | `pipeline_view/field_lineage.rs` | `FieldEdgeKind` | High |
+| Aggregate grain | The post-Aggregate grouped-record correlation grain. Represented exactly once as the `GroupBy` INDIRECT edge from each group-key driver column (#147 retired the former `FieldRow::is_aggregate_grain` flag). | `pipeline_view.rs`, `components/inspector/model.rs` | `GroupBy`, INDIRECT | High |
 | Composition | Reusable Clinker pipeline fragment detected by `_compose:` | `sync.rs`, examples/compositions | drill-in, ports | High |
 | Channel | Workspace override layer for tenant/environment-specific config | `workspace.rs`, examples/channels | raw/resolved mode | Medium-High |
 | Provenance | History of config override layers shown in inspector | `main.rs` docs, inspector provenance | channel override | Medium |
