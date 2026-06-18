@@ -1698,6 +1698,7 @@ mod tests {
             kind: FieldKind::Declared,
             ty: None,
             is_correlation_key: false,
+            ..Default::default()
         }
     }
 
@@ -2083,6 +2084,7 @@ nodes:
                 to_node: 1,
                 to_field: "field_119".to_string(),
                 kind: FieldEdgeKind::Passthrough,
+                ..Default::default()
             }],
             field_edge_paths: Vec::new(),
             role_edges: Vec::new(),
@@ -2226,6 +2228,7 @@ nodes:
                     to_node: 1,
                     to_field: "omega".to_string(),
                     kind: FieldEdgeKind::Passthrough,
+                    ..Default::default()
                 },
                 FieldEdge {
                     from_node: 0,
@@ -2233,6 +2236,7 @@ nodes:
                     to_node: 1,
                     to_field: "alpha".to_string(),
                     kind: FieldEdgeKind::Passthrough,
+                    ..Default::default()
                 },
             ],
             field_edge_paths: Vec::new(),
@@ -2312,6 +2316,7 @@ nodes:
                     to_node: 1,
                     to_field: "zeta".to_string(),
                     kind: FieldEdgeKind::Passthrough,
+                    ..Default::default()
                 },
                 FieldEdge {
                     from_node: 0,
@@ -2319,6 +2324,7 @@ nodes:
                     to_node: 1,
                     to_field: "alpha".to_string(),
                     kind: FieldEdgeKind::Passthrough,
+                    ..Default::default()
                 },
             ],
             field_edge_paths: Vec::new(),
@@ -2565,6 +2571,7 @@ nodes:
                     to_node: 1,
                     to_field: "id".to_string(),
                     kind: FieldEdgeKind::Passthrough,
+                    ..Default::default()
                 },
                 FieldEdge {
                     from_node: 0,
@@ -2572,6 +2579,7 @@ nodes:
                     to_node: 1,
                     to_field: "total".to_string(),
                     kind: FieldEdgeKind::Derive,
+                    ..Default::default()
                 },
             ],
             field_edge_paths: Vec::new(),
@@ -2742,6 +2750,7 @@ nodes:
                 to_node: 1,
                 to_field: "present".to_string(),
                 kind: FieldEdgeKind::Passthrough,
+                ..Default::default()
             }],
             field_edge_paths: Vec::new(),
             role_edges: Vec::new(),
@@ -2779,6 +2788,7 @@ nodes:
                 to_node: 1,
                 to_field: "k".to_string(),
                 kind,
+                ..Default::default()
             })
             .kind
         };

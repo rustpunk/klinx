@@ -67,6 +67,20 @@ pub struct FieldRow {
     /// not a declared driver) nor for the engine-internal `$ck.<field>` shadow
     /// columns (those are not user-declared and klinx never surfaces them).
     pub is_correlation_key: bool,
+    /// The row's lineage precision tier (#148): the *worst* of the precisions of
+    /// the lineage edges incident to it, or [`Precision::Unknown`] when the node's
+    /// CXL failed [`parse_clean`] so its edges were suppressed entirely (there is
+    /// no edge to annotate, so the degradation lives on the row). `Default` is
+    /// [`Precision::Exact`] — a clean row with no degraded incident edge — which
+    /// keeps test literals eliding the field via `..Default::default()`.
+    pub lineage_precision: Precision,
+    /// Plain-language reason for `lineage_precision`, surfaced by the Inspector's
+    /// per-field precision badge. A `&'static str` (every assigned reason is a fixed
+    /// literal, sourced from the row's producing [`FieldEdge::precision_reason`] or
+    /// the parse-fail marker), so the row carries no per-field allocation. Empty
+    /// (`""`) for the un-degraded `Exact` default and whenever a row folds back to
+    /// `Exact`, so `Exact` always means "no degraded reason".
+    pub precision_reason: &'static str,
 }
 
 /// Whether a [`FieldEdge`] carries (or re-derives) a column's VALUE, or merely
@@ -101,10 +115,16 @@ pub enum EdgeNature {
 /// value. [`FieldEdgeKind::nature`] partitions the variants into
 /// [`EdgeNature::Direct`] / [`EdgeNature::Indirect`]; the renderer maps each
 /// variant to a distinct stroke style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum FieldEdgeKind {
     /// Identity carry (`c → c`) whose column is read by no derive — it rides
     /// through the node untouched and unreferenced.
+    ///
+    /// The `Default` variant so [`FieldEdge`] can derive `Default`: a pure
+    /// identity carry is the natural zero edge, letting test literals elide the
+    /// rarely-varied `kind`/`precision`/`precision_reason` fields via
+    /// `..Default::default()`.
+    #[default]
     Passthrough,
     /// Identity carry (`c → c`) whose column ALSO appears in some computed or
     /// renamed emit's support on the consumer: carried *and* accessed. The
@@ -163,6 +183,78 @@ impl FieldEdgeKind {
     }
 }
 
+/// How trustworthy a lineage row or edge is — its graded *precision* tier (#148).
+///
+/// Provenance theory proves minimal column lineage is undecidable, so every
+/// system over-approximates; the differentiator klinx pursues is to *show* where
+/// precision degrades rather than silently dropping joins/filters the way dbt and
+/// Databricks do. Precision is genuinely orthogonal to [`FieldEdgeKind`] (a
+/// `Derive` edge may be `Exact` or `Approximate` depending on whether its support
+/// resolved cleanly), so it is its own enum carried alongside `kind`, never folded
+/// into it. The accompanying `precision_reason` string explains *why* a row/edge
+/// landed in its tier in plain language for the Inspector badge.
+///
+/// `Default` is `Exact` so [`FieldEdge`] and [`FieldRow`] can derive `Default`:
+/// the un-degraded carry is the natural zero, which lets test literals elide the
+/// field via `..Default::default()`.
+///
+/// The variants are declared in ASCENDING degradation order (`Exact` <
+/// `Approximate` < `Unknown`), so the derived `Ord` makes `max` select the worst
+/// (least precise) tier — the ordering is a compiler-enforced declaration-order
+/// invariant, not a hand-maintained rank table. See [`Precision::worst`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Precision {
+    /// The lineage is faithful: an identity passthrough/access carry, or a
+    /// clean-CXL `Derive` whose entire support resolved to real producer columns
+    /// with no `emit each` fan-out. The drawn edge is exactly the dependency.
+    #[default]
+    Exact,
+    /// The lineage is a sound over-approximation: an INDIRECT influence edge
+    /// (filter/group-by/join-key/conditional — it influences which rows exist,
+    /// not a value), a conservative CXL-less Merge/Combine fan-in carry, or a
+    /// `Derive` whose value is fanned out by `emit each` (per-element provenance
+    /// is lost). The edge is real but coarser than the true value dependency.
+    Approximate,
+    /// The lineage could not be computed: the node's CXL failed [`parse_clean`],
+    /// so its edges were suppressed (a garbled AST yields wrong edges, worse than
+    /// none). `Unknown` therefore lives on the [`FieldRow`] — there is no edge to
+    /// annotate — and signals "we genuinely don't know this field's provenance".
+    Unknown,
+}
+
+impl Precision {
+    /// Combine two tiers, keeping the *worse* (less trustworthy) one.
+    ///
+    /// The order is `Unknown` > `Approximate` > `Exact`: a row incident to any
+    /// degraded edge inherits that degradation. A thin `max` over the derived
+    /// declaration-order `Ord`. Used to fold a row's precision from its producing
+    /// edges and to pick the worst edge when a trace hop is reachable by several.
+    pub fn worst(self, other: Precision) -> Precision {
+        self.max(other)
+    }
+
+    /// The human-facing tier label for the Inspector badge text.
+    pub fn precision_label(self) -> &'static str {
+        match self {
+            Precision::Exact => "exact",
+            Precision::Approximate => "approximate",
+            Precision::Unknown => "unknown",
+        }
+    }
+
+    /// The `data-precision` attribute slug — a single CSS-safe token. Kept
+    /// distinct from [`Precision::precision_label`] (even though they coincide
+    /// today) so a future multi-word label cannot leak whitespace into the
+    /// attribute; the slug-safe test guards that contract.
+    pub fn precision_attr(self) -> &'static str {
+        match self {
+            Precision::Exact => "exact",
+            Precision::Approximate => "approximate",
+            Precision::Unknown => "unknown",
+        }
+    }
+}
+
 /// A field-level lineage edge: `to_node.to_field` is (partly) derived from
 /// `from_node.from_field`.
 ///
@@ -170,13 +262,165 @@ impl FieldEdgeKind {
 /// (`Passthrough`) or also-accessed (`Access`) — from a derivation (`Derive`).
 /// The canvas renders the three differently so a reader can tell a
 /// rename/compute from a carry, and a referenced carry from an inert one.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `precision` ([`Precision`], #148) grades how faithful the edge is, with
+/// `precision_reason` explaining why; both are derived at construction from the
+/// edge's kind and support resolution. Precision is deliberately NOT part of edge
+/// identity: see the hand-written [`PartialEq`] below.
+#[derive(Clone, Debug, Default)]
 pub struct FieldEdge {
     pub from_node: usize,
     pub from_field: String,
     pub to_node: usize,
     pub to_field: String,
     pub kind: FieldEdgeKind,
+    /// How faithful this edge is (#148). Orthogonal to `kind`; excluded from
+    /// [`PartialEq`] / dedup identity so a value carry and its precision annotation
+    /// never split one edge into two.
+    pub precision: Precision,
+    /// Plain-language reason for the `precision` tier, surfaced by the Inspector
+    /// badge. A `&'static str` because every constructor assigns a fixed literal
+    /// and it is excluded from identity/dedup — so no per-edge `String` allocation
+    /// is paid on the hot lineage path. Defaults to `""` for the `Default` edge.
+    pub precision_reason: &'static str,
+}
+
+/// Identity equality over the 5-tuple `(from_node, from_field, to_node, to_field,
+/// kind)` ONLY — `precision`/`precision_reason` are deliberately excluded.
+///
+/// Two reasons (#148): (1) it keeps `==` and `.contains` in lock-step with the
+/// `EdgeAccumulator` dedup key (the same 5-tuple), so an edge that dedups as a
+/// duplicate also compares equal; (2) precision is a derived annotation, not part
+/// of *what dependency exists*, so two otherwise-identical edges are the same edge
+/// regardless of their reason strings. A given identity is always built from the
+/// same construction context, so its precision is deterministic anyway.
+impl PartialEq for FieldEdge {
+    fn eq(&self, other: &Self) -> bool {
+        self.from_node == other.from_node
+            && self.from_field == other.from_field
+            && self.to_node == other.to_node
+            && self.to_field == other.to_field
+            && self.kind == other.kind
+    }
+}
+
+impl FieldEdge {
+    /// Construct a DIRECT carry edge (`Passthrough`/`Access`), classified
+    /// [`Precision::Exact`] — an identity carry reproduces the value verbatim, so
+    /// its lineage is faithful (#148). `kind` MUST be a DIRECT carry kind; the
+    /// reason names which carry it is.
+    pub fn carry(
+        from_node: usize,
+        from_field: String,
+        to_node: usize,
+        to_field: String,
+        kind: FieldEdgeKind,
+    ) -> FieldEdge {
+        debug_assert!(
+            matches!(kind, FieldEdgeKind::Passthrough | FieldEdgeKind::Access),
+            "FieldEdge::carry expects a DIRECT carry kind, got {kind:?}"
+        );
+        let reason = match kind {
+            FieldEdgeKind::Access => "accessed identity carry",
+            _ => "identity passthrough",
+        };
+        FieldEdge {
+            from_node,
+            from_field,
+            to_node,
+            to_field,
+            kind,
+            precision: Precision::Exact,
+            precision_reason: reason,
+        }
+    }
+
+    /// Construct a DIRECT `Derive` edge whose precision depends on how its support
+    /// resolved (#148): [`Precision::Exact`] for a clean-CXL derive whose value is
+    /// a straight-line function of resolved producer columns, or
+    /// [`Precision::Approximate`] when the derive is fanned out by an `emit each`
+    /// (its per-element provenance is lost — the edge is real but coarser).
+    pub fn derive(
+        from_node: usize,
+        from_field: String,
+        to_node: usize,
+        to_field: String,
+        fanned: bool,
+    ) -> FieldEdge {
+        let (precision, reason) = if fanned {
+            (
+                Precision::Approximate,
+                "emit each fan-out loses per-element provenance",
+            )
+        } else {
+            (Precision::Exact, "derived from fully-resolved CXL support")
+        };
+        FieldEdge {
+            from_node,
+            from_field,
+            to_node,
+            to_field,
+            kind: FieldEdgeKind::Derive,
+            precision,
+            precision_reason: reason,
+        }
+    }
+
+    /// Construct an INDIRECT influence edge (`Filter`/`GroupBy`/`JoinKey`/
+    /// `Conditional`), always [`Precision::Approximate`] (#148): an influence edge
+    /// states which rows exist or how they group/join, a sound over-approximation
+    /// of a value dependency rather than an exact one. `kind` MUST be INDIRECT.
+    pub fn influence(
+        from_node: usize,
+        from_field: String,
+        to_node: usize,
+        to_field: String,
+        kind: FieldEdgeKind,
+    ) -> FieldEdge {
+        debug_assert_eq!(
+            kind.nature(),
+            EdgeNature::Indirect,
+            "FieldEdge::influence expects an INDIRECT kind, got {kind:?}"
+        );
+        let reason = match kind {
+            FieldEdgeKind::Filter => "INDIRECT filter predicate influence",
+            FieldEdgeKind::GroupBy => "INDIRECT group-by grain influence",
+            FieldEdgeKind::JoinKey => "INDIRECT join-key influence",
+            FieldEdgeKind::Conditional => "INDIRECT branch-condition influence",
+            _ => "INDIRECT influence edge",
+        };
+        FieldEdge {
+            from_node,
+            from_field,
+            to_node,
+            to_field,
+            kind,
+            precision: Precision::Approximate,
+            precision_reason: reason,
+        }
+    }
+
+    /// Construct a conservative CXL-less fan-in carry — a Merge join key carried
+    /// from several inputs with no CXL to attribute it — classified
+    /// [`Precision::Approximate`] (#148): the column genuinely arrives from each
+    /// input, but without CXL we cannot confirm it rides through unchanged, so the
+    /// carry is an honest over-approximation rather than an exact passthrough.
+    pub fn conservative_fan_in(
+        from_node: usize,
+        from_field: String,
+        to_node: usize,
+        to_field: String,
+    ) -> FieldEdge {
+        FieldEdge {
+            from_node,
+            from_field,
+            to_node,
+            to_field,
+            kind: FieldEdgeKind::Passthrough,
+            precision: Precision::Approximate,
+            precision_reason: "conservative CXL-less fan-in carry",
+        }
+    }
 }
 
 /// Resolve the let-expanded input-column support of a single `emit`
@@ -697,6 +941,55 @@ pub fn emit_supports(program: &Program) -> Vec<(String, HashSet<String>)> {
     out
 }
 
+/// The set of `emit` targets produced *inside* an `emit each` / `explode outer`
+/// fan-out body (#148 precision).
+///
+/// A fanned-out field's value is computed per iterated element, so its provenance
+/// is genuinely coarser than a straight-line emit: the upstream→field derive is
+/// real but the per-element correspondence is lost. Edges into such a target are
+/// therefore classified [`Precision::Approximate`]. Membership is recorded
+/// regardless of whether the iterated source resolves to any column — the fan-out
+/// itself is the source of imprecision, not the source's column support — so a
+/// `$pipeline.items` source (empty support) still marks its body emits fanned.
+///
+/// The set is keyed by field NAME, not by emit statement, and that is deliberate
+/// (#148 S1): a field emitted BOTH inside a fan-out body AND by a straight-line
+/// emit on the same node is reported fanned, degrading every derive edge into that
+/// field to Approximate — even the straight-line one. Its final value is the union
+/// of both emits, so part of its provenance IS fan-derived; marking the whole
+/// field Approximate errs toward over-approximation, the SAFE direction (we never
+/// claim Exact for a field whose value is partly per-element). Statement-scoped
+/// degradation would need to thread emit-statement identity through `emit_supports`
+/// and the edge builder and to define a precision for a column whose value mixes
+/// fanned and non-fanned emits — not worth the plumbing for the safe-direction
+/// gain. See `emit_each_fanned_targets_is_conservative_per_field` for the locked
+/// behaviour.
+pub fn emit_each_fanned_targets(program: &Program) -> HashSet<String> {
+    let mut fanned = HashSet::new();
+    collect_fanned_targets(&program.statements, false, &mut fanned);
+    fanned
+}
+
+/// Recursive worker for [`emit_each_fanned_targets`]: collect every field-emit
+/// target reached while `inside` an `emit each` / `explode outer` body.
+fn collect_fanned_targets(stmts: &[Statement], inside: bool, fanned: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Statement::Emit {
+                name,
+                target: EmitTarget::Field,
+                ..
+            } if inside => {
+                fanned.insert(name.to_string());
+            }
+            Statement::EmitEach { body, .. } | Statement::ExplodeOuter { body, .. } => {
+                collect_fanned_targets(body, true, fanned);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The input-column support of a standalone *predicate* expression — the columns
 /// a `Cull` removal predicate, a `Route` branch condition, or a `Combine`
 /// `where_expr` join predicate reads (#147).
@@ -1199,6 +1492,7 @@ mod tests {
                 to_node: 1,
                 to_field: "b".to_string(),
                 kind: FieldEdgeKind::Derive,
+                ..Default::default()
             },
             FieldEdge {
                 from_node: 1,
@@ -1206,6 +1500,7 @@ mod tests {
                 to_node: 2,
                 to_field: "c".to_string(),
                 kind: FieldEdgeKind::Derive,
+                ..Default::default()
             },
             FieldEdge {
                 from_node: 0,
@@ -1213,6 +1508,7 @@ mod tests {
                 to_node: 1,
                 to_field: "w".to_string(),
                 kind: FieldEdgeKind::Derive,
+                ..Default::default()
             },
         ];
         // Hovering the middle anchor (1.b): edge 0 (its incoming) and edge 1 (its
@@ -1247,6 +1543,7 @@ mod tests {
                 to_node: 1,
                 to_field: "k".to_string(),
                 kind: FieldEdgeKind::Passthrough,
+                ..Default::default()
             },
             FieldEdge {
                 from_node: 0,
@@ -1254,6 +1551,7 @@ mod tests {
                 to_node: 1,
                 to_field: "k".to_string(),
                 kind: FieldEdgeKind::JoinKey,
+                ..Default::default()
             },
             FieldEdge {
                 from_node: 1,
@@ -1261,6 +1559,7 @@ mod tests {
                 to_node: 2,
                 to_field: "kept".to_string(),
                 kind: FieldEdgeKind::Filter,
+                ..Default::default()
             },
         ];
 
@@ -1303,6 +1602,7 @@ mod tests {
             to_node: tnode,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         // Middle node 1 carries `status`, which also feeds a derive (`risk`) on
         // its OWN node — a self-loop on field `status`. Edge 3 is unrelated.
@@ -1369,6 +1669,7 @@ mod tests {
             to_node: tnode,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
             from_node: fnode,
@@ -1376,6 +1677,7 @@ mod tests {
             to_node: tnode,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Passthrough,
+            ..Default::default()
         };
         let edges = vec![
             derive(0, "a", 1, "b"), // 0: t1 computes b from a
@@ -1420,6 +1722,7 @@ mod tests {
             to_node: tnode,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         let carry = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
             from_node: fnode,
@@ -1427,6 +1730,7 @@ mod tests {
             to_node: tnode,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Passthrough,
+            ..Default::default()
         };
         let edges = vec![
             carry(0, "status", 1, "status"), // 0: status rides INTO node 1
@@ -1457,6 +1761,7 @@ mod tests {
             to_node: tnode,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Passthrough,
+            ..Default::default()
         };
         let derive = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
             from_node: fnode,
@@ -1464,6 +1769,7 @@ mod tests {
             to_node: tnode,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         let edges = vec![
             carry(0, "a", 1, "a"),  // 0: a carried 0→1
@@ -1512,6 +1818,7 @@ mod tests {
             to_node: tnode,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Passthrough,
+            ..Default::default()
         };
         // 0.a → 1.a → 0.a: a 2-edge cycle over the (node, field) endpoint graph.
         let edges = vec![carry(0, "a", 1, "a"), carry(1, "a", 0, "a")];
@@ -1611,5 +1918,144 @@ mod tests {
         // Terminates and yields no genuine columns (both members are lets).
         let resolved = resolve_support(&raw, &let_support);
         assert!(resolved.is_empty());
+    }
+
+    /// `Precision::worst` keeps the LESS-precise tier (Unknown > Approximate >
+    /// Exact) and is commutative. The fold uses it to roll a row's precision up
+    /// from its incident edges, so getting the order wrong would silently report a
+    /// degraded field as Exact — the exact failure #148 exists to prevent.
+    #[test]
+    fn precision_worst_keeps_least_precise_tier() {
+        use Precision::{Approximate, Exact, Unknown};
+        assert_eq!(Exact.worst(Approximate), Approximate);
+        assert_eq!(Approximate.worst(Exact), Approximate);
+        assert_eq!(Approximate.worst(Unknown), Unknown);
+        assert_eq!(Unknown.worst(Approximate), Unknown);
+        assert_eq!(Exact.worst(Unknown), Unknown);
+        assert_eq!(Exact.worst(Exact), Exact);
+        // Default is Exact so `FieldRow`/`FieldEdge` derive a clean zero value.
+        assert_eq!(Precision::default(), Exact);
+    }
+
+    /// `precision_attr` feeds the `data-precision` HTML/CSS attribute, so every
+    /// tier's slug must be a single whitespace-free token. Listing every variant by
+    /// name (no wildcard) fails to compile if a tier is added without a slug
+    /// decision — mirroring `edge_kind_attr_is_always_slug_safe`.
+    #[test]
+    fn precision_attr_is_always_slug_safe() {
+        for precision in [Precision::Exact, Precision::Approximate, Precision::Unknown] {
+            let attr = precision.precision_attr();
+            assert!(
+                !attr.is_empty(),
+                "{precision:?} must have a non-empty data-precision slug"
+            );
+            assert!(
+                !attr.chars().any(char::is_whitespace),
+                "{precision:?} data-precision slug must contain no whitespace, got {attr:?}"
+            );
+        }
+    }
+
+    /// A straight-line emit is NOT fanned; only emits inside an `emit each` body
+    /// are. The fan-out membership is what drops a derive edge to Approximate
+    /// (#148), so this locks the boundary the classifier reads.
+    #[test]
+    fn emit_each_fanned_targets_flags_only_fan_out_bodies() {
+        let prog = program("emit y = a + 1.0\nemit each x in items {\n  emit z = x.v\n}\n");
+        let fanned = emit_each_fanned_targets(&prog);
+        assert!(fanned.contains("z"), "the fanned body emit `z` is flagged");
+        assert!(
+            !fanned.contains("y"),
+            "the straight-line emit `y` is NOT flagged: {fanned:?}"
+        );
+    }
+
+    /// An `emit each` whose source resolves to NO column (a system-namespaced
+    /// source) still flags its body emits as fanned (#148): the fan-out itself is
+    /// the source of imprecision, independent of the iterated source's column
+    /// support — distinct from `emit_each_empty_support_source_adds_no_support`,
+    /// which is about derive *edges*, not the precision flag.
+    #[test]
+    fn emit_each_fanned_targets_flags_even_empty_support_source() {
+        let prog = program("emit each x in $pipeline.items {\n  emit y = x.v\n}\n");
+        let fanned = emit_each_fanned_targets(&prog);
+        assert!(
+            fanned.contains("y"),
+            "a fanned emit is flagged regardless of its source's column support: {fanned:?}"
+        );
+    }
+
+    /// #148 S1 (documented conservative behaviour): the fanned set is keyed by field
+    /// NAME, so a field emitted BOTH by a straight-line emit AND inside a fan-out
+    /// body on the same node is reported fanned. This degrades the straight-line
+    /// derive to Approximate too — over-approximation in the SAFE direction (the
+    /// field's value is partly per-element, so we never claim Exact). Locked here so
+    /// a future change to statement-scoped degradation is a deliberate, tested move.
+    #[test]
+    fn emit_each_fanned_targets_is_conservative_per_field() {
+        // `y` is emitted straight-line first, then re-emitted inside an `emit each`.
+        let prog = program("emit y = a + 1.0\nemit each x in items {\n  emit y = x.v\n}\n");
+        let fanned = emit_each_fanned_targets(&prog);
+        assert!(
+            fanned.contains("y"),
+            "a field emitted both straight-line and fanned is conservatively flagged \
+             fanned (per-field, not per-statement): {fanned:?}"
+        );
+    }
+
+    /// The `FieldEdge` constructors classify precision deterministically from the
+    /// edge kind and construction context (#148): a carry is Exact, a non-fanned
+    /// derive is Exact, a fanned derive is Approximate, an INDIRECT influence is
+    /// Approximate, and a conservative CXL-less fan-in is Approximate. This is the
+    /// single classifier both lineage paths funnel through, so it is the place to
+    /// lock the mapping.
+    #[test]
+    fn field_edge_constructors_classify_precision() {
+        let carry = FieldEdge::carry(0, "k".into(), 1, "k".into(), FieldEdgeKind::Passthrough);
+        assert_eq!(carry.precision, Precision::Exact);
+        let access = FieldEdge::carry(0, "k".into(), 1, "k".into(), FieldEdgeKind::Access);
+        assert_eq!(access.precision, Precision::Exact);
+
+        let derive_clean = FieldEdge::derive(0, "a".into(), 1, "y".into(), false);
+        assert_eq!(derive_clean.precision, Precision::Exact);
+        assert_eq!(derive_clean.kind, FieldEdgeKind::Derive);
+        let derive_fanned = FieldEdge::derive(0, "a".into(), 1, "y".into(), true);
+        assert_eq!(derive_fanned.precision, Precision::Approximate);
+
+        for kind in [
+            FieldEdgeKind::Filter,
+            FieldEdgeKind::GroupBy,
+            FieldEdgeKind::JoinKey,
+            FieldEdgeKind::Conditional,
+        ] {
+            let edge = FieldEdge::influence(0, "k".into(), 1, "k".into(), kind);
+            assert_eq!(
+                edge.precision,
+                Precision::Approximate,
+                "{kind:?} influence edge must be Approximate"
+            );
+        }
+
+        let fan_in = FieldEdge::conservative_fan_in(0, "k".into(), 1, "k".into());
+        assert_eq!(fan_in.precision, Precision::Approximate);
+        assert_eq!(fan_in.kind, FieldEdgeKind::Passthrough);
+    }
+
+    /// Precision is EXCLUDED from `FieldEdge` identity (#148): two edges with the
+    /// same 5-tuple but different precision/reason compare EQUAL, so `==` and the
+    /// dedup key stay in lock-step. This guards the hand-written `PartialEq` against
+    /// a future accidental `#[derive(PartialEq)]` that would split one edge in two.
+    #[test]
+    fn field_edge_equality_ignores_precision() {
+        let exact = FieldEdge::derive(0, "a".into(), 1, "y".into(), false);
+        let approx = FieldEdge::derive(0, "a".into(), 1, "y".into(), true);
+        assert_ne!(exact.precision, approx.precision);
+        assert_eq!(
+            exact, approx,
+            "edges with equal identity must compare equal regardless of precision"
+        );
+        // A differing identity field still breaks equality.
+        let other = FieldEdge::derive(0, "a".into(), 1, "z".into(), false);
+        assert_ne!(exact, other);
     }
 }

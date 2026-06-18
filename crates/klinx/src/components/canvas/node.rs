@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 
 use crate::pipeline_view::{
-    FieldKind, HEADER_PORT_Y, NODE_WIDTH, StageKind, StagePortKind, StagePortRow, StagePortSide,
-    StageView,
+    FieldKind, HEADER_PORT_Y, NODE_WIDTH, Precision, StageKind, StagePortKind, StagePortRow,
+    StagePortSide, StageView,
 };
 use crate::state::SelectedField;
 use crate::state::{CompositionDrillFrame, use_app_state};
@@ -176,6 +176,20 @@ pub fn CanvasNode(
     let input_role_has_header = input_role_section == "group-by";
     let has_fields = field_display.total_count > 0;
     let has_input_roles = !input_role_ports.is_empty();
+    // Node-level lineage precision (#148): the WORST tier across the card's field
+    // rows, so a single degraded field marks the whole node. Rendered as a subtle
+    // hatched corner shown ONLY on selection/hover (CSS-gated — see
+    // `.klinx-node-precision-corner`); a node with no degraded field stays Exact
+    // and the corner reads as a faint clean marker rather than a warning. `None`
+    // for a card with NO field rows (no lineage data at all) — suppressing the
+    // corner there avoids implying a precision verdict for a node that has none.
+    // Computed once from the static `stage.fields`, so it adds no signal
+    // subscription and does not defeat the card's `PartialEq` memoization.
+    let node_precision = stage
+        .fields
+        .iter()
+        .map(|field| field.lineage_precision)
+        .reduce(Precision::worst);
     // Route and Cull nodes carry extra output ports (rendered as branch ports
     // below the columns): a Route's condition/default branches, or a Cull's
     // `removed_to` side-output.
@@ -335,6 +349,20 @@ pub fn CanvasNode(
                     selected_field.set(None);
                 }
             },
+
+            // ── Lineage-precision corner affordance (#148) ───────────────────
+            // A subtle hatched top-right corner conveying the node's worst field
+            // precision. Hidden by default and revealed ONLY on selection or hover
+            // via CSS (`.klinx-node--selected`/`.klinx-node:hover`), so it never
+            // adds always-on badge fatigue; `data-precision` drives the hatch hue.
+            // Omitted entirely for a card with no field rows (no lineage data).
+            if let Some(node_precision) = node_precision {
+                div {
+                    class: "klinx-node-precision-corner",
+                    "data-precision": node_precision.precision_attr(),
+                    title: "lineage precision: {node_precision.precision_label()}",
+                }
+            }
 
             // ── Fixed-height header region ───────────────────────────────────
             // Exactly `FIELD_HEADER_HEIGHT` px tall (CSS), so the field-row
