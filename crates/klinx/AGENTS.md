@@ -27,6 +27,7 @@ This crate is the Klinx Dioxus desktop IDE binary. It owns the app shell, worksp
 - `app.rs`: root signals, contexts, layout dispatch, parse debounce.
 - `state.rs`, `tab.rs`, `workspace.rs`: state and persistence models.
 - `sync.rs`, `pipeline_view.rs`, `yaml_patch.rs`, `cxl_bridge.rs`, `autodoc.rs`: pipeline semantics.
+- CXL validation: `cxl_bridge.rs` (parser-only `validate_expr`) and `pipeline_view/field_lineage.rs` both call `cxl::parser::Parser::parse`; `components/inspector/model.rs` surfaces syntax errors as node diagnostics + CXL-section error rows.
 - `components/**`: Dioxus rendering layer.
 - `hooks/**`: side effects for sync, git, schema, channels, and session save.
 

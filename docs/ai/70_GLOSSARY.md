@@ -4,7 +4,7 @@
 | --- | --- | --- | --- | --- |
 | Klinx | Desktop IDE for authoring Clinker YAML pipeline configurations | `README.md`, `main.rs` | Clinker, Dioxus | High |
 | Clinker | External pipeline engine whose crates are git-pinned dependencies | `Cargo.toml`, examples | CXL, pipeline config | High |
-| CXL | Expression language used in transforms/validation/lineage | `cxl_bridge.rs`, `pipeline_view/field_lineage.rs`, `autodoc.rs` | field lineage, transform | High |
+| CXL | Expression language used in transforms/validation/lineage | `cxl_bridge.rs`, `pipeline_view/field_lineage.rs`, `components/inspector/model.rs`, `autodoc.rs` | field lineage, transform | High |
 | Dioxus | Rust UI framework used for the desktop app | `crates/klinx/Cargo.toml`, components | signals, hooks, RSX | High |
 | wry | Native webview runtime used by Dioxus desktop | `README.md`, `main.rs` | WebKitGTK, WebView2 | High |
 | `AppShell` | Root Dioxus component that owns top-level signals | `app.rs` | `AppState`, `TabManagerState` | High |

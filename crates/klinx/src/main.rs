@@ -49,6 +49,7 @@ mod app;
 mod autodoc;
 mod commands;
 mod components;
+mod cxl_bridge;
 mod debug_state;
 mod file_ops;
 mod fs_watcher;
