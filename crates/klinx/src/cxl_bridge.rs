@@ -19,19 +19,9 @@ pub struct CxlValidation {
 /// A single diagnostic message derived from a `ParseError`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CxlDiagnostic {
-    /// Byte offset into the expression string (start of error span).
-    pub start: usize,
-    /// Byte offset into the expression string (end of error span).
-    pub end: usize,
     pub message: String,
-    pub severity: DiagSeverity,
     /// Actionable fix suggestion (may be empty).
     pub how_to_fix: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DiagSeverity {
-    Error,
 }
 
 /// Parse a CXL block and return UI-friendly validation diagnostics.
@@ -53,10 +43,7 @@ pub fn validate_expr(source: &str) -> CxlValidation {
         .errors
         .iter()
         .map(|e| CxlDiagnostic {
-            start: e.span.start as usize,
-            end: e.span.end as usize,
             message: e.message.clone(),
-            severity: DiagSeverity::Error,
             how_to_fix: e.how_to_fix.clone(),
         })
         .collect();

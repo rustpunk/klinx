@@ -170,7 +170,7 @@ When architecture changes, append a dated entry with:
 
 ## 2026-06-17: Re-established Live CXL Syntax Validation In The Inspector
 
-- Restored `crates/klinx/src/cxl_bridge.rs` (the parser-only `validate_expr` adapter over `cxl::parser::Parser::parse`) that #139 deleted, and re-added `mod cxl_bridge;` to `main.rs`. Public API unchanged from the pre-#139 version; the pinned cxl `997ea7d` `ParseError`/`Span` fields (`span.start/end`, `message`, `how_to_fix`) still match, so no field-access adaptation was needed.
+- Restored `crates/klinx/src/cxl_bridge.rs` (the parser-only `validate_expr` adapter over `cxl::parser::Parser::parse`) that #139 deleted, and re-added `mod cxl_bridge;` to `main.rs`. `CxlDiagnostic` was trimmed to the fields the inspector consumes (`message`, `how_to_fix`); the pre-#139 byte-span (`start`/`end`) and single-variant `DiagSeverity` fields were dropped because no caller reads them (they served the deleted `cxl_input` inline span highlighting). The pinned cxl `997ea7d` `ParseError` fields (`message`, `how_to_fix`) match, so no field-access adaptation was needed.
 - `components/inspector/model.rs` now validates a node's `cxl:` block at edit time: `node_diagnostics` emits a `"cxl"` Error diagnostic per parse error (flipping the node status chip off `ok`), and `cxl_section` prepends CXL-section error rows. Messages append ` → {how_to_fix}` when the parser supplies a fix.
 - This re-establishes the invariant regressed by #139: a structurally-valid pipeline whose CXL is malformed (e.g. `emit x =`) is flagged at edit time instead of rendering as `ok` (#141). See the new rule under "YAML And Pipeline Rules" in `30_DESIGN_RULES.md`.
 - Verification: `cargo fmt --all`, `cargo build --package klinx`, `cargo test --package klinx`.
