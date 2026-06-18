@@ -5,7 +5,8 @@ use clinker_plan::config::{PipelineConfig, PipelineNode};
 use crate::autodoc::{CxlStatementKind, generate_stage_doc};
 use crate::notes::parse_notes;
 use crate::pipeline_view::{
-    FieldEdgeKind, FieldKind, PipelineView, Precision, RoleEdge, StagePortSide, StageView,
+    EdgeNature, FieldEdgeKind, FieldKind, PipelineView, Precision, RoleEdge, StagePortSide,
+    StageView,
 };
 use crate::state::{ChannelViewMode, SelectedField};
 
@@ -60,8 +61,16 @@ pub struct FieldInspectorModel {
     pub explanation: String,
     pub annotation: Option<String>,
     pub cxl_mentions: Vec<CxlMentionView>,
-    pub upstream: Vec<TraceEndpointView>,
-    pub downstream: Vec<TraceEndpointView>,
+    /// Upstream lineage as a hop-by-hop TREE rooted at this field (#153). Each
+    /// [`TraceNode`] names the transform + edge kind + precision of the hop that
+    /// reached it; its `children` are the hops one step further upstream. The root
+    /// (the selected field, hop 0) is implicit — the top-level `Vec` is its direct
+    /// hops (hop 1). Replaced the former flat `Vec<TraceEndpointView>` so the panel
+    /// can render parent→child topology instead of a sorted list.
+    pub upstream: Vec<TraceNode>,
+    /// Downstream lineage as a hop-by-hop tree, mirroring [`Self::upstream`] in the
+    /// impact direction (#153).
+    pub downstream: Vec<TraceNode>,
     pub role_usages: Vec<RoleUsageView>,
     /// The field's OWN lineage precision tier (#148) — the producer-side value from
     /// `FieldRow::lineage_precision`, NOT a transitive trace fold — surfaced as the
@@ -203,12 +212,19 @@ pub struct TraceEndpointView {
     pub field_name: String,
     pub edge_kind_label: &'static str,
     pub edge_kind_attr: &'static str,
+    /// Whether the edge taken to reach this hop is a DIRECT value carry/derive or an
+    /// INDIRECT influence (#153). Derived from the edge kind's
+    /// [`FieldEdgeKind::nature`](crate::pipeline_view::FieldEdgeKind::nature) at
+    /// build time so the Inspector's INDIRECT include/exclude toggle can prune
+    /// influence-rooted subtrees from the BUILT tree without re-deriving nature from
+    /// the label slug.
+    pub edge_nature: EdgeNature,
     /// The precision tier of the lineage edge taken to reach this hop (#148),
     /// rendered as the per-hop precision badge alongside `edge_kind_label`. Carried
     /// as the [`Precision`] enum (not a pre-baked slug string) so the panel derives
     /// its label/attr via `precision_label`/`precision_attr` — no lossy
     /// string→enum round-trip. When an endpoint is reachable by several edges the
-    /// WORST (least-precise) edge's precision is kept (see [`trace_endpoints`]), so
+    /// WORST (least-precise) edge's precision is kept (see [`trace_tree`]), so
     /// an Exact carry can never mask a co-incident Approximate influence.
     pub precision: Precision,
     pub hop: usize,
@@ -223,6 +239,59 @@ impl TraceEndpointView {
     pub fn to_selected_field(&self) -> SelectedField {
         SelectedField::new(self.stage_id.clone(), self.field_name.clone())
     }
+}
+
+/// One node in a hop-by-hop lineage trace TREE (#153). The selected field is the
+/// implicit root (hop 0); each node's `endpoint` names the transform, edge kind,
+/// and precision of the single hop that reached it, and `children` are the hops
+/// one step further out (upstream or downstream depending on the trace direction).
+///
+/// Carrying the parent→child topology — rather than the former flat, hop-sorted
+/// `Vec<TraceEndpointView>` — lets the Inspector render an expandable tree that
+/// attributes each hop to the responsible transform, instead of a list that
+/// discards which earlier hop a deeper one descends from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceNode {
+    pub endpoint: TraceEndpointView,
+    /// The CXL statement(s) on this hop's OWN stage that mention this hop's field
+    /// (#153) — the responsible-transform enrichment. Empty when the hop's stage
+    /// has no CXL analysis (Route/Aggregate/Merge) or no statement touches the
+    /// field; in that case the edge kind + precision badge IS the attribution.
+    pub cxl_mentions: Vec<CxlMentionView>,
+    pub children: Vec<TraceNode>,
+}
+
+impl TraceNode {
+    /// Total node count in this subtree, including the node itself (#153). The
+    /// LINEAGE summary counts every traced hop, not just the direct (hop-1) ones,
+    /// so the count matches the former flat list's length.
+    fn count(&self) -> usize {
+        1 + self.children.iter().map(TraceNode::count).sum::<usize>()
+    }
+}
+
+/// Total node count across a forest of trace trees (#153).
+pub fn count_trace_nodes(nodes: &[TraceNode]) -> usize {
+    nodes.iter().map(TraceNode::count).sum()
+}
+
+/// Prune every subtree rooted at an INDIRECT-influence hop from a built trace
+/// forest (#153), the panel-side half of the Inspector's INDIRECT include/exclude
+/// toggle. A node reached by an influence edge is dropped together with its whole
+/// subtree (anything reachable only THROUGH that influence vanishes with it),
+/// mirroring how `trace_tree(.., include_indirect = false)` would never have walked
+/// past it. Filtering the built tree (rather than rebuilding) keeps the model free
+/// of transient UI state.
+pub fn prune_indirect_trace(nodes: &[TraceNode]) -> Vec<TraceNode> {
+    nodes
+        .iter()
+        .filter(|node| node.endpoint.edge_nature != EdgeNature::Indirect)
+        .map(|node| TraceNode {
+            endpoint: node.endpoint.clone(),
+            cxl_mentions: node.cxl_mentions.clone(),
+            children: prune_indirect_trace(&node.children),
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -967,18 +1036,33 @@ fn build_field_detail(
         .iter()
         .find(|field| field.name == selection.field_name)?;
 
-    let upstream = trace_endpoints(
+    // INDIRECT influence hops are always BUILT into the model (#153); the
+    // Inspector's include/exclude toggle prunes them in the panel from the built
+    // tree, so the model stays free of transient UI state.
+    let mut upstream = trace_tree(
         view,
         stage_index,
         &selection.field_name,
         TraceDirection::Upstream,
+        true,
     );
-    let downstream = trace_endpoints(
+    let mut downstream = trace_tree(
         view,
         stage_index,
         &selection.field_name,
         TraceDirection::Downstream,
+        true,
     );
+    // Attach per-hop CXL attribution (#153) where the hop's stage carries CXL
+    // analysis. Walks the assembled trees with `config` in scope, caching each
+    // stage's `generate_stage_doc` so a stage parsed once is reused across all its
+    // hops. A stage with no CXL (Route/Aggregate/Merge) contributes nothing — the
+    // edge kind + precision badge is the attribution there.
+    if let Some(config) = config {
+        let mut cache = StageDocCache::new(config);
+        enrich_trace_cxl(&mut upstream, &mut cache);
+        enrich_trace_cxl(&mut downstream, &mut cache);
+    }
     let role_usages = role_usages(view, stage_index, &selection.field_name);
     let mut badges = Vec::new();
     if field.is_correlation_key {
@@ -1011,6 +1095,8 @@ fn build_field_detail(
     // into Approximate. The PER-HOP badges still show each hop's own edge precision
     // (see `TraceEndpointView::precision`), so the approximation is visible exactly
     // where it occurs without painting the whole upstream cone.
+    let upstream_count = count_trace_nodes(&upstream);
+    let downstream_count = count_trace_nodes(&downstream);
     let lineage_empty = upstream.is_empty() && downstream.is_empty() && role_usages.is_empty();
     let lineage_precision = field.lineage_precision;
     let precision_reason = if lineage_empty {
@@ -1042,8 +1128,8 @@ fn build_field_detail(
                 "lineage",
                 format!(
                     "{} upstream / {} downstream / {} role uses",
-                    upstream.len(),
-                    downstream.len(),
+                    upstream_count,
+                    downstream_count,
                     role_usages.len()
                 ),
             ),
@@ -1098,6 +1184,57 @@ fn cxl_kind_label(kind: &CxlStatementKind) -> &'static str {
     kind.label()
 }
 
+/// Per-stage cache of `generate_stage_doc`'s CXL statements, so the trace-tree
+/// enrichment parses each hop's stage at most once (#153). Several hops of one
+/// trace can land on the same Transform/Aggregate stage; without the cache each
+/// would re-run `generate_stage_doc` (which re-parses the stage's CXL).
+///
+/// The cached value is the stage's classified statements, or `None` for a stage
+/// with no CXL analysis (Route/Aggregate group keys/Merge) — both outcomes are
+/// memoized, so a non-CXL stage is probed once, not once per hop.
+struct StageDocCache<'a> {
+    config: &'a PipelineConfig,
+    by_stage: HashMap<String, Option<Vec<crate::autodoc::CxlStatement>>>,
+}
+
+impl<'a> StageDocCache<'a> {
+    fn new(config: &'a PipelineConfig) -> Self {
+        Self {
+            config,
+            by_stage: HashMap::new(),
+        }
+    }
+
+    /// CXL mentions of `field_name` on `stage_id`, parsing-and-caching the stage's
+    /// doc on first request (#153). Empty when the stage has no CXL analysis or no
+    /// statement touches the field.
+    fn mentions(&mut self, stage_id: &str, field_name: &str) -> Vec<CxlMentionView> {
+        let config = self.config;
+        let statements = self
+            .by_stage
+            .entry(stage_id.to_string())
+            .or_insert_with(|| {
+                generate_stage_doc(config, stage_id)
+                    .and_then(|doc| doc.cxl_analysis)
+                    .map(|analysis| analysis.statements)
+            });
+        match statements {
+            Some(statements) => cxl_mentions_for_field(statements, field_name),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// Attach each trace hop's responsible CXL statement(s) by walking the assembled
+/// tree and reusing the shared [`StageDocCache`] (#153). Recurses into children so
+/// every hop, at any depth, is enriched.
+fn enrich_trace_cxl(nodes: &mut [TraceNode], cache: &mut StageDocCache<'_>) {
+    for node in nodes.iter_mut() {
+        node.cxl_mentions = cache.mentions(&node.endpoint.stage_id, &node.endpoint.field_name);
+        enrich_trace_cxl(&mut node.children, cache);
+    }
+}
+
 /// A `(node_index, field_name)` trace endpoint, borrowing the field name from the
 /// view's edges for the duration of one BFS step.
 type TraceEndpointKey<'a> = (usize, &'a str);
@@ -1106,18 +1243,45 @@ type TraceEndpointKey<'a> = (usize, &'a str);
 /// edges reach the same endpoint, the worst-precision one is kept (#148 M2).
 type TraceHopEdge = (FieldEdgeKind, Precision);
 
-fn trace_endpoints(
+/// A trace hop discovered by the BFS, recorded flat with a back-reference to the
+/// hop it descends from so the spanning tree can be assembled afterward (#153).
+/// `parent` is the index into the flat `Vec<TracedHop>` of the discovering hop, or
+/// `None` for a hop-1 endpoint discovered directly from the selected root.
+struct TracedHop {
+    endpoint: TraceEndpointView,
+    parent: Option<usize>,
+}
+
+/// Walk the field-edge graph from `(start_node, start_field)` and build a
+/// hop-by-hop trace TREE (#153). The selected field is the implicit root (hop 0);
+/// the returned `Vec<TraceNode>` is its direct (hop-1) children, each carrying its
+/// own deeper children.
+///
+/// The BFS dedups endpoints by `(node, field)` globally, so every reachable
+/// endpoint is discovered exactly once — the discovery relation is therefore a
+/// spanning TREE, and recording each endpoint's discovering hop preserves the
+/// parent→child topology the panel renders. (CXL enrichment is attached later in
+/// [`build_field_detail`], where `config` is in scope.)
+///
+/// `include_indirect` controls the Inspector's INDIRECT include/exclude toggle
+/// (#153, the deferred PR3 marker, scoped to this trace): when `false`, edges whose
+/// kind is [`EdgeNature::Indirect`](crate::pipeline_view::EdgeNature::Indirect) are
+/// skipped while walking, so an influence-only hop (and any subtree reached only
+/// through it) never appears. Default callers pass `true` so nothing regresses.
+fn trace_tree(
     view: &PipelineView,
     start_node: usize,
     start_field: &str,
     direction: TraceDirection,
-) -> Vec<TraceEndpointView> {
-    // PR3: add INDIRECT include/exclude toggle here
+    include_indirect: bool,
+) -> Vec<TraceNode> {
     let mut seen = HashSet::from([(start_node, start_field.to_string())]);
-    let mut queue = VecDeque::from([(start_node, start_field.to_string(), 0usize)]);
-    let mut out = Vec::new();
+    // `(node, field, hop, parent_in_hops)` — `parent_in_hops` is the index of the
+    // discovering hop in `hops`, or `None` for the selected root.
+    let mut queue = VecDeque::from([(start_node, start_field.to_string(), 0usize, None::<usize>)]);
+    let mut hops: Vec<TracedHop> = Vec::new();
 
-    while let Some((node, field, hop)) = queue.pop_front() {
+    while let Some((node, field, hop, parent)) = queue.pop_front() {
         // Collect every edge leaving this anchor, grouped by the endpoint it
         // reaches, keeping the WORST (least-precise) edge per endpoint (#148 M2).
         // The BFS dedups endpoints by `(node, field)` only, and one endpoint can be
@@ -1127,6 +1291,12 @@ fn trace_endpoints(
         // badge. Ties on precision keep the first-iterated edge for determinism.
         let mut best_to_endpoint: HashMap<TraceEndpointKey<'_>, TraceHopEdge> = HashMap::new();
         for edge in &view.field_edges {
+            // INDIRECT include/exclude toggle (#153): with the toggle off, an
+            // influence edge is not traversed, so neither it nor any subtree it
+            // uniquely reaches is surfaced. The DIRECT value graph is untouched.
+            if !include_indirect && edge.kind.nature() == EdgeNature::Indirect {
+                continue;
+            }
             let next = match direction {
                 TraceDirection::Upstream if edge.to_node == node && edge.to_field == field => {
                     Some((edge.from_node, edge.from_field.as_str()))
@@ -1152,36 +1322,87 @@ fn trace_endpoints(
                 .or_insert((edge.kind, edge.precision));
         }
 
-        // Emit one hop per newly-seen endpoint, sorted for deterministic order
-        // (the HashMap iteration order is otherwise nondeterministic).
+        // Emit one hop per newly-seen endpoint, sorted for deterministic sibling
+        // order (the HashMap iteration order is otherwise nondeterministic). The
+        // sort key mirrors the former flat list's tie-break — stage label then
+        // field name — so siblings keep a stable, readable order.
         let mut endpoints: Vec<(TraceEndpointKey<'_>, TraceHopEdge)> =
             best_to_endpoint.into_iter().collect();
-        endpoints.sort_by(|a, b| a.0.0.cmp(&b.0.0).then_with(|| a.0.1.cmp(b.0.1)));
+        endpoints.sort_by(|a, b| {
+            let label = |key: &TraceEndpointKey<'_>| {
+                view.stages.get(key.0).map(|stage| stage.label.as_str())
+            };
+            label(&a.0).cmp(&label(&b.0)).then_with(|| a.0.1.cmp(b.0.1))
+        });
         for ((next_node, next_field), (edge_kind, edge_precision)) in endpoints {
             let endpoint = (next_node, next_field.to_string());
             if !seen.insert(endpoint.clone()) {
                 continue;
             }
             if let Some(stage) = view.stages.get(next_node) {
-                out.push(trace_endpoint(
-                    stage,
-                    endpoint.1.clone(),
-                    edge_kind,
-                    edge_precision,
-                    hop + 1,
-                ));
-                queue.push_back((next_node, endpoint.1, hop + 1));
+                let index = hops.len();
+                hops.push(TracedHop {
+                    endpoint: trace_endpoint(
+                        stage,
+                        endpoint.1.clone(),
+                        edge_kind,
+                        edge_precision,
+                        hop + 1,
+                    ),
+                    parent,
+                });
+                queue.push_back((next_node, endpoint.1, hop + 1, Some(index)));
             }
         }
     }
 
-    out.sort_by(|a, b| {
-        a.hop
-            .cmp(&b.hop)
-            .then_with(|| a.stage_label.cmp(&b.stage_label))
-            .then_with(|| a.field_name.cmp(&b.field_name))
-    });
-    out
+    assemble_trace_tree(hops)
+}
+
+/// Fold the flat, BFS-ordered hops into a forest of [`TraceNode`]s (#153). Each
+/// hop's `parent` is the index of an EARLIER hop (BFS discovers a parent before its
+/// children), so a single reverse pass — moving each node into its parent's
+/// `children`, or into the root forest when `parent` is `None` — assembles the tree
+/// without cloning. Sibling order from the per-level sort is preserved.
+fn assemble_trace_tree(hops: Vec<TracedHop>) -> Vec<TraceNode> {
+    let mut nodes: Vec<Option<TraceNode>> = hops
+        .iter()
+        .map(|hop| {
+            Some(TraceNode {
+                endpoint: hop.endpoint.clone(),
+                cxl_mentions: Vec::new(),
+                children: Vec::new(),
+            })
+        })
+        .collect();
+
+    let mut roots = Vec::new();
+    // Walk high→low so a child (always a higher index than its parent) is already
+    // fully built when its parent claims it.
+    for index in (0..hops.len()).rev() {
+        let node = nodes[index].take().expect("each hop is moved exactly once");
+        match hops[index].parent {
+            Some(parent) => nodes[parent]
+                .as_mut()
+                .expect("a parent hop is built before its children are claimed")
+                .children
+                .push(node),
+            None => roots.push(node),
+        }
+    }
+    // The reverse walk pushes siblings in descending index order; restore the
+    // ascending (sorted) sibling order at every level.
+    reverse_sibling_order(&mut roots);
+    roots
+}
+
+/// Restore ascending sibling order after [`assemble_trace_tree`]'s reverse walk
+/// pushed each level's children in descending discovery order (#153).
+fn reverse_sibling_order(nodes: &mut [TraceNode]) {
+    nodes.reverse();
+    for node in nodes.iter_mut() {
+        reverse_sibling_order(&mut node.children);
+    }
 }
 
 fn trace_endpoint(
@@ -1199,6 +1420,7 @@ fn trace_endpoint(
         field_name,
         edge_kind_label: edge_kind_label(edge_kind),
         edge_kind_attr: edge_kind_attr(edge_kind),
+        edge_nature: edge_kind.nature(),
         precision: edge_precision,
         hop,
     }
@@ -1689,7 +1911,11 @@ nodes:
         let emitted = build_field_detail(&view, None, &SelectedField::new("clean", "x2"))
             .expect("field exists");
         assert_eq!(emitted.field_kind_label, "emitted");
+        // The upstream trace is a TREE; `clean.x2` has one direct (hop-1) parent,
+        // `src.x` via the Derive edge, with no deeper hops.
         assert_eq!(emitted.upstream.len(), 1);
+        assert!(emitted.upstream[0].children.is_empty());
+        assert_eq!(emitted.upstream[0].endpoint.hop, 1);
         assert_eq!(emitted.role_usages.len(), 1);
 
         let declared =
@@ -1704,7 +1930,7 @@ nodes:
         // its `to_selected_field()` carries the exact (stage_id, field_name)
         // identity, which `build_field_detail` (what the inspector rebuilds from
         // on selection) resolves back to that same field.
-        let hop = &emitted.upstream[0];
+        let hop = &emitted.upstream[0].endpoint;
         let hop_selection = hop.to_selected_field();
         assert_eq!(hop_selection.stage_id, hop.stage_id);
         assert_eq!(hop_selection.field_name, hop.field_name);
@@ -1826,6 +2052,7 @@ nodes:
             field_name: "x".to_string(),
             edge_kind_label: "derive",
             edge_kind_attr: "derive",
+            edge_nature: EdgeNature::Direct,
             precision: Precision::Exact,
             hop: 1,
         };
@@ -1897,16 +2124,19 @@ nodes:
 
         // Per-hop precision (#148 M2 carries the enum): the two upstream edges land
         // on DISTINCT endpoints (`src.flag` via Filter, `src.kept` via Passthrough),
-        // so both hops emit — the Filter hop is Approximate, the carry hop Exact.
+        // so both hops emit as hop-1 children — the Filter hop is Approximate, the
+        // carry hop Exact.
         let filter_hop = detail
             .upstream
             .iter()
+            .map(|node| &node.endpoint)
             .find(|hop| hop.edge_kind_attr == "filter")
             .expect("a Filter upstream hop");
         assert_eq!(filter_hop.precision, Precision::Approximate);
         let carry_hop = detail
             .upstream
             .iter()
+            .map(|node| &node.endpoint)
             .find(|hop| hop.edge_kind_attr == "passthrough")
             .expect("a passthrough upstream hop");
         assert_eq!(carry_hop.precision, Precision::Exact);
@@ -2004,6 +2234,7 @@ nodes:
         let down_hop = src_detail
             .downstream
             .iter()
+            .map(|node| &node.endpoint)
             .find(|hop| hop.edge_kind_attr == "filter")
             .expect("a downstream Filter hop");
         assert_eq!(
@@ -2057,6 +2288,7 @@ nodes:
         let hops: Vec<_> = detail
             .upstream
             .iter()
+            .map(|node| &node.endpoint)
             .filter(|h| h.field_name == "k")
             .collect();
         assert_eq!(hops.len(), 1, "the colliding endpoint dedups to one hop");
@@ -2064,6 +2296,331 @@ nodes:
             hops[0].precision,
             Precision::Approximate,
             "the hop must surface the worst (Approximate) edge, not the first-iterated Exact carry"
+        );
+    }
+
+    /// #153: a multi-hop upstream trace renders as a TREE — a hop-2 endpoint is a
+    /// CHILD of the hop-1 endpoint it was discovered from, NOT a sibling at the
+    /// root. A flat sorted list would have lost this parent→child topology. Chain:
+    /// `src.x --Derive--> mid.y --Derive--> sink.z`; selecting `sink.z` upstream
+    /// yields one hop-1 child (`mid.y`) whose only child is hop-2 (`src.x`).
+    #[test]
+    fn multi_hop_upstream_trace_preserves_parent_child_topology() {
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "x".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        let mid = stage(
+            "mid",
+            StageKind::Transform,
+            vec![FieldRow {
+                name: "y".to_string(),
+                kind: FieldKind::Emitted,
+                ..Default::default()
+            }],
+        );
+        let sink = stage(
+            "sink",
+            StageKind::Transform,
+            vec![FieldRow {
+                name: "z".to_string(),
+                kind: FieldKind::Emitted,
+                ..Default::default()
+            }],
+        );
+        let view = PipelineView {
+            stages: vec![source, mid, sink],
+            field_edges: vec![
+                FieldEdge::derive(0, "x".into(), 1, "y".into(), false),
+                FieldEdge::derive(1, "y".into(), 2, "z".into(), false),
+            ],
+            ..Default::default()
+        };
+
+        let detail = build_field_detail(&view, None, &SelectedField::new("sink", "z"))
+            .expect("field exists");
+
+        // Hop-1: exactly one direct parent, `mid.y`, at the root of the forest.
+        assert_eq!(detail.upstream.len(), 1, "one direct (hop-1) parent");
+        let hop1 = &detail.upstream[0];
+        assert_eq!(hop1.endpoint.stage_id, "mid");
+        assert_eq!(hop1.endpoint.field_name, "y");
+        assert_eq!(hop1.endpoint.hop, 1);
+
+        // Hop-2 (`src.x`) is a CHILD of hop-1, NOT a second root sibling.
+        assert_eq!(
+            detail.upstream.len(),
+            1,
+            "the hop-2 endpoint must not appear as a root sibling"
+        );
+        assert_eq!(hop1.children.len(), 1, "hop-1 has exactly one deeper hop");
+        let hop2 = &hop1.children[0];
+        assert_eq!(hop2.endpoint.stage_id, "src");
+        assert_eq!(hop2.endpoint.field_name, "x");
+        assert_eq!(hop2.endpoint.hop, 2);
+        assert!(
+            hop2.children.is_empty(),
+            "the chain terminates at the source"
+        );
+
+        // The summary counts EVERY traced node, not just the direct hops.
+        assert_eq!(count_trace_nodes(&detail.upstream), 2);
+    }
+
+    /// #153: a BRANCHING upstream trace keeps each deeper hop under the CORRECT
+    /// hop-1 parent, with siblings in deterministic (stage-label, field-name) order.
+    /// Two hop-1 parents (`midA.a`, `midB.b`) each derive `sink.z`; `midA.a` is in
+    /// turn derived from TWO sources (`srcP.p`, `srcQ.q`). A flat list would lose
+    /// which parent each hop-2 descends from.
+    #[test]
+    fn branching_trace_groups_children_under_their_own_parent() {
+        let stages = vec![
+            stage(
+                "srcP",
+                StageKind::Source,
+                vec![FieldRow {
+                    name: "p".to_string(),
+                    kind: FieldKind::Declared,
+                    ..Default::default()
+                }],
+            ),
+            stage(
+                "srcQ",
+                StageKind::Source,
+                vec![FieldRow {
+                    name: "q".to_string(),
+                    kind: FieldKind::Declared,
+                    ..Default::default()
+                }],
+            ),
+            stage(
+                "midA",
+                StageKind::Transform,
+                vec![FieldRow {
+                    name: "a".to_string(),
+                    kind: FieldKind::Emitted,
+                    ..Default::default()
+                }],
+            ),
+            stage(
+                "midB",
+                StageKind::Transform,
+                vec![FieldRow {
+                    name: "b".to_string(),
+                    kind: FieldKind::Declared,
+                    ..Default::default()
+                }],
+            ),
+            stage(
+                "sink",
+                StageKind::Transform,
+                vec![FieldRow {
+                    name: "z".to_string(),
+                    kind: FieldKind::Emitted,
+                    ..Default::default()
+                }],
+            ),
+        ];
+        let view = PipelineView {
+            stages,
+            field_edges: vec![
+                // sink.z derived from BOTH midA.a and midB.b (two hop-1 parents).
+                FieldEdge::derive(2, "a".into(), 4, "z".into(), false),
+                FieldEdge::derive(3, "b".into(), 4, "z".into(), false),
+                // midA.a derived from TWO sources (two hop-2 children of midA).
+                FieldEdge::derive(0, "p".into(), 2, "a".into(), false),
+                FieldEdge::derive(1, "q".into(), 2, "a".into(), false),
+            ],
+            ..Default::default()
+        };
+
+        let detail = build_field_detail(&view, None, &SelectedField::new("sink", "z"))
+            .expect("field exists");
+
+        // Two hop-1 parents in (stage-label) order: midA before midB.
+        assert_eq!(detail.upstream.len(), 2);
+        assert_eq!(detail.upstream[0].endpoint.stage_id, "midA");
+        assert_eq!(detail.upstream[1].endpoint.stage_id, "midB");
+
+        // midA's TWO hop-2 children land under midA (NOT midB), sorted srcP then srcQ.
+        let mid_a = &detail.upstream[0];
+        assert_eq!(mid_a.children.len(), 2, "midA has both source hops");
+        assert_eq!(mid_a.children[0].endpoint.stage_id, "srcP");
+        assert_eq!(mid_a.children[1].endpoint.stage_id, "srcQ");
+        for child in &mid_a.children {
+            assert_eq!(child.endpoint.hop, 2);
+        }
+
+        // midB has no deeper hop (its `b` is a declared root).
+        assert!(detail.upstream[1].children.is_empty());
+
+        // Every endpoint reached exactly once: 2 hop-1 + 2 hop-2 = 4 nodes.
+        assert_eq!(count_trace_nodes(&detail.upstream), 4);
+    }
+
+    /// #153: each hop names its transform — the edge-kind label and per-hop
+    /// precision are carried on every node — AND a hop on a CXL stage attaches the
+    /// responsible statement(s), while a hop on a non-CXL stage (here a Source)
+    /// attaches none. Built from a real config so `generate_stage_doc` runs.
+    #[test]
+    fn each_hop_names_transform_and_attaches_cxl_only_for_cxl_stages() {
+        // src(source, no CXL) -> clean(transform, `emit y = x + 1`).
+        // Selecting `clean.y` upstream yields one hop-1 node at `src.x`.
+        const PIPELINE: &str = r#"
+pipeline:
+  name: hop_attribution
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: x, type: int }
+  - type: transform
+    name: clean
+    input: src
+    config:
+      cxl: |
+        emit y = x + 1
+  - type: output
+    name: out
+    input: clean
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(PIPELINE).expect("fixture parses");
+        let view = derive_pipeline_view(&config);
+
+        // Downstream of `src.x`: a hop lands on the DERIVED `clean.y`, a CXL stage,
+        // so it carries the `emit y = x + 1` statement that produced it.
+        let src_detail = build_field_detail(&view, Some(&config), &SelectedField::new("src", "x"))
+            .expect("source field exists");
+        let derived_hop = src_detail
+            .downstream
+            .iter()
+            .find(|node| node.endpoint.stage_id == "clean" && node.endpoint.field_name == "y")
+            .expect("a downstream hop onto the derived transform field");
+        // Names its transform: edge kind + precision are present per hop.
+        assert_eq!(derived_hop.endpoint.edge_kind_label, "derive");
+        assert_eq!(derived_hop.endpoint.precision, Precision::Exact);
+        // CXL attribution present for the transform hop.
+        assert!(
+            derived_hop
+                .cxl_mentions
+                .iter()
+                .any(|m| m.expression.contains("x + 1")),
+            "the transform hop attaches its producing CXL statement, got {:?}",
+            derived_hop.cxl_mentions
+        );
+
+        // Upstream of `clean.y`: the hop-1 node lands on `src.x`, a Source — no CXL
+        // analysis — so it attaches NO statement; the edge kind/precision is the
+        // attribution there.
+        let clean_detail =
+            build_field_detail(&view, Some(&config), &SelectedField::new("clean", "y"))
+                .expect("transform field exists");
+        let src_hop = clean_detail
+            .upstream
+            .iter()
+            .find(|node| node.endpoint.stage_id == "src")
+            .expect("an upstream hop onto the source");
+        assert!(
+            src_hop.cxl_mentions.is_empty(),
+            "a non-CXL Source hop attaches no statement, got {:?}",
+            src_hop.cxl_mentions
+        );
+    }
+
+    /// #153: the Inspector's INDIRECT include/exclude toggle. With the toggle ON
+    /// (default), an INDIRECT influence hop is present in the built tree; pruning it
+    /// (`prune_indirect_trace`, the panel's toggle-OFF path) removes that hop AND any
+    /// subtree reachable only through it, while leaving the DIRECT value graph
+    /// intact. Fixture: `src.flag --Filter--> keep.kept` (INDIRECT) coexisting with
+    /// `src.kept --Passthrough--> keep.kept` (DIRECT carry).
+    #[test]
+    fn indirect_toggle_prunes_influence_hops_from_built_tree() {
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![
+                FieldRow {
+                    name: "flag".to_string(),
+                    kind: FieldKind::Declared,
+                    ..Default::default()
+                },
+                FieldRow {
+                    name: "kept".to_string(),
+                    kind: FieldKind::Declared,
+                    ..Default::default()
+                },
+            ],
+        );
+        let keep = stage(
+            "keep",
+            StageKind::Cull,
+            vec![FieldRow {
+                name: "kept".to_string(),
+                kind: FieldKind::PassThrough,
+                ..Default::default()
+            }],
+        );
+        let view = PipelineView {
+            stages: vec![source, keep],
+            field_edges: vec![
+                FieldEdge::influence(0, "flag".into(), 1, "kept".into(), FieldEdgeKind::Filter),
+                FieldEdge::carry(
+                    0,
+                    "kept".into(),
+                    1,
+                    "kept".into(),
+                    FieldEdgeKind::Passthrough,
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let detail = build_field_detail(&view, None, &SelectedField::new("keep", "kept"))
+            .expect("field exists");
+
+        // Default (toggle ON): BOTH hops are present — the DIRECT carry to `src.kept`
+        // AND the INDIRECT Filter influence onto `src.flag`.
+        let kinds: Vec<_> = detail
+            .upstream
+            .iter()
+            .map(|node| node.endpoint.edge_kind_attr)
+            .collect();
+        assert!(
+            kinds.contains(&"filter"),
+            "the INDIRECT Filter hop is included by default, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"passthrough"),
+            "the DIRECT carry hop is always present, got {kinds:?}"
+        );
+
+        // Toggle OFF: the Filter hop (and anything reached only through it) is pruned;
+        // the DIRECT carry survives.
+        let pruned = prune_indirect_trace(&detail.upstream);
+        let pruned_kinds: Vec<_> = pruned
+            .iter()
+            .map(|node| node.endpoint.edge_kind_attr)
+            .collect();
+        assert!(
+            !pruned_kinds.contains(&"filter"),
+            "the INDIRECT Filter hop must be excluded when the toggle is off, got {pruned_kinds:?}"
+        );
+        assert!(
+            pruned_kinds.contains(&"passthrough"),
+            "the DIRECT carry hop must survive the prune, got {pruned_kinds:?}"
         );
     }
 

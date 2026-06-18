@@ -1160,7 +1160,10 @@ pub fn lineage_closure(edges: &[FieldEdge], node: usize, field: &str) -> HashSet
 /// lineage at once is permitted ONLY on explicit click (one column on demand) —
 /// hover stays 1-hop to avoid flooding the canvas.
 pub fn field_lineage_full(edges: &[FieldEdge], node: usize, field: &str) -> HashSet<usize> {
-    // PR3: add INDIRECT include/exclude toggle here
+    // The canvas value/influence toggle is deferred to PR5 (the dual value/influence
+    // ribbon). This walk stays KIND-AGNOSTIC so INDIRECT edges are never permanently
+    // invisible on the canvas; the Inspector trace tree carries its own INDIRECT
+    // include/exclude toggle (#153), scoped to that surface.
     let mut result: HashSet<usize> = HashSet::new();
 
     // Upstream (provenance): follow edges INTO the current endpoint, back to
@@ -1528,9 +1531,9 @@ mod tests {
     /// kept VISIBLE by both reveal walks — selecting either endpoint of an
     /// INDIRECT edge returns that edge from `lineage_closure` (the 1-hop hover)
     /// AND from `field_lineage_full` (the transitive click). The walks are
-    /// deliberately kind-agnostic (the PR3 toggle is deferred), so an INDIRECT
-    /// edge is never permanently invisible. This fails if a future change filters
-    /// either walk by `nature()`.
+    /// deliberately kind-agnostic (the canvas value/influence toggle is deferred to
+    /// PR5's dual value/influence ribbon), so an INDIRECT edge is never permanently
+    /// invisible. This fails if a future change filters either walk by `nature()`.
     #[test]
     fn indirect_edge_endpoints_are_revealed_by_closure_and_full_walk() {
         // A DIRECT carry 0.k -> 1.k, then an INDIRECT JoinKey 0.k -> 1.k (the

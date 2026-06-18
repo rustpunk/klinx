@@ -1,7 +1,9 @@
+use std::collections::HashSet;
+
 use dioxus::prelude::*;
 
 use crate::pipeline_view::Precision;
-use crate::state::{current_pipeline_view, use_app_state};
+use crate::state::{SelectedField, current_pipeline_view, use_app_state};
 
 use super::drawer_bar::{ActiveDrawer, DrawerToggleBar};
 use super::drawer_docs::DrawerDocs;
@@ -10,8 +12,8 @@ use super::drawer_run::DrawerRun;
 use super::model::{
     CxlMentionView, FieldInspectorModel, InspectorBuildContext, InspectorDiagnostic, InspectorFact,
     InspectorRow, InspectorSection, InspectorSelection, MissingInspectorModel, NodeInspectorModel,
-    RoleUsageView, SelectedInspectorModel, StatusChip, StatusTone, TraceEndpointView,
-    build_selected_inspector,
+    RoleUsageView, SelectedInspectorModel, StatusChip, StatusTone, TraceNode,
+    build_selected_inspector, count_trace_nodes, prune_indirect_trace,
 };
 use super::scoped_yaml::ScopedYamlEditor;
 
@@ -304,37 +306,7 @@ fn FieldInspectorBody(field: FieldInspectorModel) -> Element {
 
             CxlMentionsSection { mentions: field.cxl_mentions.clone() }
 
-            div { class: "klinx-inspector-section",
-                SectionHeader { title: "LINEAGE" }
-                div { class: "klinx-field-lineage-summary",
-                    span { "{field.upstream.len()} upstream" }
-                    span { "{field.downstream.len()} downstream" }
-                    span { "{field.role_usages.len()} role uses" }
-                }
-                // A field with no lineage edges shows the preserved empty-state
-                // message; an edged field whose precision is degraded surfaces the
-                // reason as a warning so the over-approximation is visible (#148).
-                if field.lineage_empty {
-                    div { class: "klinx-field-warning", "{field.precision_reason}" }
-                } else if field.lineage_precision != Precision::Exact {
-                    div {
-                        class: "klinx-field-precision-note",
-                        "data-precision": "{field.lineage_precision.precision_attr()}",
-                        "{field.precision_reason}"
-                    }
-                }
-                TraceList {
-                    title: "UPSTREAM",
-                    entries: field.upstream.clone(),
-                    empty: "No upstream fields."
-                }
-                TraceList {
-                    title: "DOWNSTREAM",
-                    entries: field.downstream.clone(),
-                    empty: "No downstream fields."
-                }
-                RoleUsageList { usages: field.role_usages.clone() }
-            }
+            LineageSection { field: field.clone() }
 
             ScopedYamlEditor { stage_id: field.selection.stage_id.clone() }
         }
@@ -512,59 +484,289 @@ fn CxlMentionsSection(mentions: Vec<CxlMentionView>) -> Element {
     }
 }
 
+/// A stable expand-state key for a trace hop: `(stage_id, field_name, hop)` (#153).
+/// Keying expansion by the hop's IDENTITY — not its position in the flattened row
+/// list — keeps a branch's open/closed state stable across re-renders (selecting a
+/// new field, toggling the INDIRECT filter), since the same hop keeps the same key
+/// even as rows shift around it.
+type TraceKey = (String, String, usize);
+
+fn trace_key(node: &TraceNode) -> TraceKey {
+    (
+        node.endpoint.stage_id.clone(),
+        node.endpoint.field_name.clone(),
+        node.endpoint.hop,
+    )
+}
+
+/// One flattened, depth-tagged row of a trace tree, ready to render in document
+/// order (#153). `has_children` drives the caret; `expanded` whether this row's
+/// children follow.
+#[derive(Clone, PartialEq)]
+struct TraceRow {
+    node: TraceNode,
+    depth: usize,
+    has_children: bool,
+    expanded: bool,
+}
+
+/// Flatten a trace forest into visible rows in pre-order (parent before its
+/// children), honoring the collapsed set (#153). A collapsed node still appears as
+/// a row — only its descendants are withheld — so its caret can re-expand it.
+fn flatten_trace(
+    nodes: &[TraceNode],
+    expanded: &HashSet<TraceKey>,
+    depth: usize,
+    out: &mut Vec<TraceRow>,
+) {
+    for node in nodes {
+        let has_children = !node.children.is_empty();
+        let is_expanded = expanded.contains(&trace_key(node));
+        out.push(TraceRow {
+            node: node.clone(),
+            depth,
+            has_children,
+            expanded: is_expanded,
+        });
+        if has_children && is_expanded {
+            flatten_trace(&node.children, expanded, depth + 1, out);
+        }
+    }
+}
+
+/// The default-expanded set for a freshly-built tree: every hop-1 (direct) child
+/// of the selected root, so the first hop is open and deeper hops start collapsed
+/// (#153).
+fn default_expanded(upstream: &[TraceNode], downstream: &[TraceNode]) -> HashSet<TraceKey> {
+    upstream
+        .iter()
+        .chain(downstream.iter())
+        .map(trace_key)
+        .collect()
+}
+
+/// The LINEAGE section: the per-hop trace TREE plus the INDIRECT include/exclude
+/// toggle (#153). Owns the toggle and expand-state signals so the trees rebuild
+/// reactively; the model stays free of UI state — the INDIRECT filter prunes the
+/// already-built tree here.
 #[component]
-fn TraceList(title: &'static str, entries: Vec<TraceEndpointView>, empty: &'static str) -> Element {
-    let state = use_app_state();
+fn LineageSection(field: FieldInspectorModel) -> Element {
+    // INDIRECT include/exclude toggle (#153). Default ON so nothing regresses; when
+    // off, influence-rooted subtrees are pruned from the built tree.
+    let mut include_indirect = use_signal(|| true);
+    // Expand state keyed by hop identity, so toggling one branch (or the INDIRECT
+    // filter) never collapses the others. Re-seeded (hop-1 open, deeper collapsed)
+    // whenever the SELECTED field changes — the component instance persists across
+    // field navigation, so the previous field's keys must be replaced, and seeding
+    // by field identity (not "set is empty") lets a user deliberately collapse every
+    // hop-1 node within a field without it springing back open.
+    let mut expanded = use_signal(HashSet::<TraceKey>::new);
+    let mut seeded_for = use_signal(|| None::<SelectedField>);
+
+    let upstream = use_memo(use_reactive!(|field| {
+        if (include_indirect)() {
+            field.upstream.clone()
+        } else {
+            prune_indirect_trace(&field.upstream)
+        }
+    }));
+    let downstream = use_memo(use_reactive!(|field| {
+        if (include_indirect)() {
+            field.downstream.clone()
+        } else {
+            prune_indirect_trace(&field.downstream)
+        }
+    }));
+
+    {
+        let selection = field.selection.clone();
+        use_effect(use_reactive!(|selection| {
+            if seeded_for.peek().as_ref() != Some(&selection) {
+                let up = upstream.peek();
+                let down = downstream.peek();
+                expanded.set(default_expanded(&up, &down));
+                seeded_for.set(Some(selection));
+            }
+        }));
+    }
+
+    let upstream_count = count_trace_nodes(&upstream.read());
+    let downstream_count = count_trace_nodes(&downstream.read());
+    let indirect_on = include_indirect();
+
+    rsx! {
+        div { class: "klinx-inspector-section",
+            div { class: "klinx-field-lineage-header",
+                SectionHeader { title: "LINEAGE" }
+                button {
+                    class: if indirect_on {
+                        "klinx-field-trace-toggle klinx-field-trace-toggle--active"
+                    } else {
+                        "klinx-field-trace-toggle"
+                    },
+                    "aria-pressed": if indirect_on { "true" } else { "false" },
+                    title: "Show or hide INDIRECT influence hops (filter / group-by / join-key / branch)",
+                    onclick: move |_| {
+                        let next = !*include_indirect.peek();
+                        include_indirect.set(next);
+                    },
+                    "INDIRECT"
+                }
+            }
+            div { class: "klinx-field-lineage-summary",
+                span { "{upstream_count} upstream" }
+                span { "{downstream_count} downstream" }
+                span { "{field.role_usages.len()} role uses" }
+            }
+            // A field with no lineage edges shows the preserved empty-state
+            // message; an edged field whose precision is degraded surfaces the
+            // reason as a warning so the over-approximation is visible (#148).
+            if field.lineage_empty {
+                div { class: "klinx-field-warning", "{field.precision_reason}" }
+            } else if field.lineage_precision != Precision::Exact {
+                div {
+                    class: "klinx-field-precision-note",
+                    "data-precision": "{field.lineage_precision.precision_attr()}",
+                    "{field.precision_reason}"
+                }
+            }
+            TraceTree {
+                title: "UPSTREAM",
+                nodes: upstream.read().clone(),
+                empty: "No upstream fields.",
+                expanded,
+            }
+            TraceTree {
+                title: "DOWNSTREAM",
+                nodes: downstream.read().clone(),
+                empty: "No downstream fields.",
+                expanded,
+            }
+            RoleUsageList { usages: field.role_usages.clone() }
+        }
+    }
+}
+
+/// An expandable hop-by-hop trace tree (#153), replacing the former flat
+/// `TraceList`. Renders the tree as a depth-indented flat row list (one stably-keyed
+/// row per visible hop) so expand/collapse re-renders only the changed rows, reusing
+/// the file-explorer pattern.
+#[component]
+fn TraceTree(
+    title: &'static str,
+    nodes: Vec<TraceNode>,
+    empty: &'static str,
+    expanded: Signal<HashSet<TraceKey>>,
+) -> Element {
+    let is_empty = nodes.is_empty();
+    let rows = use_memo(use_reactive!(|(nodes, expanded)| {
+        let mut rows = Vec::new();
+        flatten_trace(&nodes, &expanded.read(), 0, &mut rows);
+        rows
+    }));
+
     rsx! {
         div {
             class: "klinx-field-trace-group",
             div { class: "klinx-field-trace-title", "{title}" }
-            if entries.is_empty() {
+            if is_empty {
                 div { class: "klinx-field-trace-empty", "{empty}" }
             } else {
                 div {
                     class: "klinx-field-trace-list",
-                    for entry in entries.iter() {
-                        // Clicking a hop selects that field on the canvas (#151):
-                        // it writes the shared `SelectedField`, which the canvas
-                        // reveal effect resolves to a node + reveals, and from
-                        // which the inspector rebuilds onto the new field. Field
-                        // selection supersedes any node selection, mirroring the
-                        // canvas field-row click.
-                        div {
-                            key: "{entry.stage_id}-{entry.field_name}-{entry.hop}",
-                            class: "klinx-field-trace-row klinx-field-trace-row--selectable",
-                            "data-stage-kind": "{entry.stage_kind_attr}",
-                            onclick: {
-                                let target = entry.to_selected_field();
-                                move |_| {
-                                    let mut selected_field = state.selected_field;
-                                    let mut selected_stages = state.selected_stages;
-                                    selected_field.set(Some(target.clone()));
-                                    selected_stages.set(std::collections::HashSet::new());
+                    for row in rows.read().iter() {
+                        TraceTreeRow {
+                            key: "{row.node.endpoint.stage_id}-{row.node.endpoint.field_name}-{row.node.endpoint.hop}",
+                            row: row.clone(),
+                            on_toggle: move |key: TraceKey| {
+                                let mut set = expanded.write();
+                                if !set.remove(&key) {
+                                    set.insert(key);
                                 }
                             },
-                            span { class: "klinx-field-trace-hop", "h{entry.hop}" }
-                            span { class: "klinx-field-trace-main",
-                                span { class: "klinx-field-trace-stage", "{entry.stage_label}" }
-                                span { class: "klinx-field-trace-field", "{entry.field_name}" }
-                            }
-                            span {
-                                class: "klinx-field-trace-kind",
-                                "data-kind": "{entry.edge_kind_attr}",
-                                "{entry.edge_kind_label}"
-                            }
-                            // Per-hop precision badge (#148): the tier of the edge
-                            // taken to reach this hop, so a reader sees where the
-                            // trace becomes an over-approximation.
-                            span {
-                                class: "klinx-field-trace-precision",
-                                "data-precision": "{entry.precision.precision_attr()}",
-                                "{entry.precision.precision_label()}"
-                            }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// A single trace-tree row: its own component with a stable `key:` so only rows
+/// whose props change re-render on expand/collapse (#153). A click on the caret
+/// toggles the branch; a click elsewhere selects that hop's field on the canvas.
+#[component]
+fn TraceTreeRow(row: TraceRow, on_toggle: EventHandler<TraceKey>) -> Element {
+    let state = use_app_state();
+    let entry = &row.node.endpoint;
+    // Indent children by depth, mirroring the file-explorer tree.
+    let indent = 10 + row.depth as i32 * 14;
+    let caret = if row.has_children {
+        if row.expanded { "\u{25BE}" } else { "\u{25B8}" }
+    } else {
+        ""
+    };
+    let key = trace_key(&row.node);
+
+    rsx! {
+        div {
+            class: "klinx-field-trace-row klinx-field-trace-row--tree klinx-field-trace-row--selectable",
+            style: "padding-left: {indent}px",
+            "data-stage-kind": "{entry.stage_kind_attr}",
+            // Clicking a hop selects that field on the canvas (#151): it writes the
+            // shared `SelectedField`, which the canvas reveal effect resolves to a
+            // node + reveals, and from which the inspector rebuilds onto the new
+            // field. Field selection supersedes any node selection, mirroring the
+            // canvas field-row click.
+            onclick: {
+                let target = entry.to_selected_field();
+                move |_| {
+                    let mut selected_field = state.selected_field;
+                    let mut selected_stages = state.selected_stages;
+                    selected_field.set(Some(target.clone()));
+                    selected_stages.set(std::collections::HashSet::new());
+                }
+            },
+            // Caret toggles expansion without selecting the field; `stop_propagation`
+            // keeps the row's select handler from also firing.
+            span {
+                class: "klinx-field-trace-caret",
+                onclick: move |e: MouseEvent| {
+                    e.stop_propagation();
+                    if row.has_children {
+                        on_toggle.call(key.clone());
+                    }
+                },
+                "{caret}"
+            }
+            span { class: "klinx-field-trace-hop", "h{entry.hop}" }
+            span { class: "klinx-field-trace-main",
+                span { class: "klinx-field-trace-stage", "{entry.stage_label}" }
+                span { class: "klinx-field-trace-field", "{entry.field_name}" }
+                // Per-hop CXL attribution (#153): the responsible statement(s) on
+                // this hop's own stage. Absent for a non-CXL stage, where the edge
+                // kind + precision badge is the attribution.
+                for mention in row.node.cxl_mentions.iter() {
+                    div {
+                        key: "{mention.kind}-{mention.expression}",
+                        class: "klinx-field-trace-cxl",
+                        span { class: "klinx-field-trace-cxl-kind", "{mention.kind}" }
+                        span { class: "klinx-field-trace-cxl-expr", "{mention.expression}" }
+                    }
+                }
+            }
+            span {
+                class: "klinx-field-trace-kind",
+                "data-kind": "{entry.edge_kind_attr}",
+                "{entry.edge_kind_label}"
+            }
+            // Per-hop precision badge (#148): the tier of the edge taken to reach
+            // this hop, so a reader sees where the trace becomes an
+            // over-approximation.
+            span {
+                class: "klinx-field-trace-precision",
+                "data-precision": "{entry.precision.precision_attr()}",
+                "{entry.precision.precision_label()}"
             }
         }
     }
@@ -613,5 +815,169 @@ fn DrawerUnavailable(label: &'static str) -> Element {
                 "{label} is unavailable for this selection."
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::model::TraceEndpointView;
+    use super::*;
+    use crate::pipeline_view::EdgeNature;
+
+    /// A test `TraceNode` at `(stage, field, hop)` with the given children. Edge
+    /// kind/precision are fixed (DIRECT derive, Exact) since these tests exercise the
+    /// flatten / expand-key / prune logic, not per-hop attribution.
+    fn node(stage: &str, field: &str, hop: usize, children: Vec<TraceNode>) -> TraceNode {
+        TraceNode {
+            endpoint: TraceEndpointView {
+                stage_id: stage.to_string(),
+                stage_label: stage.to_string(),
+                stage_kind_label: "Transform",
+                stage_kind_attr: "transform",
+                field_name: field.to_string(),
+                edge_kind_label: "derive",
+                edge_kind_attr: "derive",
+                edge_nature: EdgeNature::Direct,
+                precision: Precision::Exact,
+                hop,
+            },
+            cxl_mentions: Vec::new(),
+            children,
+        }
+    }
+
+    /// An INDIRECT-influence test node (`Filter`), so the prune path has something
+    /// to remove.
+    fn indirect_node(stage: &str, field: &str, hop: usize, children: Vec<TraceNode>) -> TraceNode {
+        let mut n = node(stage, field, hop, children);
+        n.endpoint.edge_kind_label = "filter";
+        n.endpoint.edge_kind_attr = "filter";
+        n.endpoint.edge_nature = EdgeNature::Indirect;
+        n.endpoint.precision = Precision::Approximate;
+        n
+    }
+
+    /// #153: the expand key is the hop's STABLE identity `(stage_id, field_name,
+    /// hop)`, NOT its position in the flattened list — so a branch's open/closed
+    /// state survives re-renders that reorder rows. Two distinct hops yield distinct
+    /// keys; the same hop yields the same key regardless of siblings.
+    #[test]
+    fn trace_key_is_stable_hop_identity() {
+        let a = node("mid", "y", 1, vec![]);
+        let b = node("src", "x", 2, vec![]);
+        assert_eq!(trace_key(&a), ("mid".to_string(), "y".to_string(), 1));
+        assert_ne!(trace_key(&a), trace_key(&b));
+        // A clone (what a re-render produces) keeps the identical key.
+        assert_eq!(trace_key(&a), trace_key(&a.clone()));
+    }
+
+    /// #153: `default_expanded` opens ONLY the hop-1 (direct) children, so the first
+    /// hop is visible and deeper hops start collapsed.
+    #[test]
+    fn default_expanded_opens_only_first_hop() {
+        let up = vec![node("mid", "y", 1, vec![node("src", "x", 2, vec![])])];
+        let down: Vec<TraceNode> = vec![];
+        let expanded = default_expanded(&up, &down);
+        assert!(expanded.contains(&("mid".to_string(), "y".to_string(), 1)));
+        assert!(
+            !expanded.contains(&("src".to_string(), "x".to_string(), 2)),
+            "deeper hops start collapsed"
+        );
+    }
+
+    /// #153: `flatten_trace` emits a collapsed node as a row but withholds its
+    /// descendants; expanding the node reveals them, indented one level deeper.
+    /// Toggling one branch never affects an unrelated branch's expansion.
+    #[test]
+    fn flatten_respects_collapsed_set_and_depth() {
+        // Two independent hop-1 branches, each with a hop-2 child.
+        let forest = vec![
+            node("midA", "a", 1, vec![node("srcA", "a0", 2, vec![])]),
+            node("midB", "b", 1, vec![node("srcB", "b0", 2, vec![])]),
+        ];
+
+        // Expand only branch A's hop-1 node: A's child shows, B's stays hidden.
+        let mut expanded = HashSet::new();
+        expanded.insert(("midA".to_string(), "a".to_string(), 1));
+        let mut rows = Vec::new();
+        flatten_trace(&forest, &expanded, 0, &mut rows);
+
+        let visible: Vec<_> = rows
+            .iter()
+            .map(|r| (r.node.endpoint.stage_id.as_str(), r.depth))
+            .collect();
+        // Both hop-1 roots at depth 0; only A's hop-2 child (depth 1) is revealed.
+        assert_eq!(
+            visible,
+            vec![("midA", 0), ("srcA", 1), ("midB", 0)],
+            "collapsing branch B hides its child without affecting branch A"
+        );
+        // The hidden child must not leak in.
+        assert!(
+            !rows.iter().any(|r| r.node.endpoint.stage_id == "srcB"),
+            "a collapsed branch withholds its descendants"
+        );
+    }
+
+    /// #153: pruning the built tree (the toggle-OFF path) drops an INDIRECT hop AND
+    /// the subtree reachable only through it, but keeps a DIRECT sibling and its
+    /// descendants.
+    #[test]
+    fn prune_removes_indirect_rooted_subtrees_only() {
+        let forest = vec![
+            node("carry", "k", 1, vec![node("origin", "k", 2, vec![])]),
+            indirect_node("filtered", "f", 1, vec![node("buried", "f0", 2, vec![])]),
+        ];
+        let pruned = prune_indirect_trace(&forest);
+        let roots: Vec<_> = pruned
+            .iter()
+            .map(|r| r.endpoint.stage_id.as_str())
+            .collect();
+        assert_eq!(roots, vec!["carry"], "the INDIRECT root is removed");
+        assert_eq!(
+            pruned[0].children.len(),
+            1,
+            "the DIRECT branch keeps its descendants"
+        );
+        // The node buried under the INDIRECT hop is gone with it.
+        let mut all = Vec::new();
+        flatten_trace(&pruned, &default_expanded(&pruned, &[]), 0, &mut all);
+        assert!(
+            !all.iter().any(|r| r.node.endpoint.stage_id == "buried"),
+            "a subtree reachable only through an INDIRECT hop is pruned with it"
+        );
+    }
+
+    /// #153: the trace-tree caret + indent CSS exists so the expandable tree renders
+    /// with affordances. Asserts the new `klinx-field-trace-caret` and lineage
+    /// header rules, following the `css_rule_block` pattern.
+    #[test]
+    fn trace_tree_css_rules_present() {
+        let css = include_str!("../../../assets/klinx.css");
+        assert!(
+            css_rule_block(css, ".klinx-field-trace-caret").is_some(),
+            "the trace caret needs a CSS rule"
+        );
+        assert!(
+            css_rule_block(css, ".klinx-field-lineage-header").is_some(),
+            "the lineage header (with the INDIRECT toggle) needs a CSS rule"
+        );
+        assert!(
+            css_rule_block(css, ".klinx-field-trace-toggle").is_some(),
+            "the INDIRECT toggle button needs a CSS rule"
+        );
+        assert!(
+            css_rule_block(css, ".klinx-field-trace-cxl").is_some(),
+            "the per-hop CXL line needs a CSS rule"
+        );
+    }
+
+    /// Local copy of the canvas test's CSS-rule-block extractor — returns the body
+    /// between the first `{` after `selector` and its closing `}`.
+    fn css_rule_block<'a>(css: &'a str, selector: &str) -> Option<&'a str> {
+        let start = css.find(selector)?;
+        let open = css[start..].find('{')? + start;
+        let close = css[open..].find('}')? + open;
+        Some(&css[open + 1..close])
     }
 }
