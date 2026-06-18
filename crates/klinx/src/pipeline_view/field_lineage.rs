@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cxl::ast::{BinOp, Expr, LiteralValue, Program, Statement, UnaryOp};
+use cxl::ast::{BinOp, EmitTarget, Expr, LiteralValue, Program, Statement, UnaryOp};
 use cxl::builtins::BuiltinRegistry;
 use cxl::parser::Parser;
 use cxl::typecheck::Type;
@@ -620,21 +620,62 @@ fn emitted_field_names(program: &Program) -> Vec<String> {
 /// writes and the set of input columns its expression reads after let-chain
 /// resolution. The canvas turns each pair into derive edges by intersecting
 /// the support with the node's real input columns.
+///
+/// A field emitted inside an `emit each` / `emit each … outer` block additionally
+/// depends on the iterated **source** column(s) — the fan-out binds each element
+/// of `source` to the loop variable, so every body emit is derived from `source`
+/// (#150). Without this a fanned-out output would lose its upstream derive edge
+/// entirely. Nested fan-out accumulates: an inner body emit depends on every
+/// enclosing source.
 pub fn emit_supports(program: &Program) -> Vec<(String, HashSet<String>)> {
     let let_support = build_let_support(program);
     let mut out: Vec<(String, HashSet<String>)> = Vec::new();
-    // `for_each_field_emit` descends into `Statement::EmitEach.body`, so each
-    // emitted field *inside* an `emit each` block is reported here. It does NOT
-    // walk the `EmitEach.source` expression, so a fanned-out field's dependence
-    // on the iterated source column is not yet captured.
-    // Phase 2 (#67): EmitEach.source binding lineage not yet derived.
-    cxl::ast::for_each_field_emit(&program.statements, &mut |name, expr| {
-        let mut raw = HashSet::new();
-        expr.support_into(&mut raw);
-        let resolved = resolve_support(&raw, &let_support);
-        out.push((name.to_string(), resolved));
-    });
+    collect_emit_supports(&program.statements, &let_support, &HashSet::new(), &mut out);
     out
+}
+
+/// Recursive worker for [`emit_supports`], mirroring
+/// `cxl::ast::for_each_field_emit`'s `EmitTarget::Field` filtering while
+/// threading each enclosing `emit each` source's resolved support down onto the
+/// body emits it fans out (#150).
+fn collect_emit_supports(
+    stmts: &[Statement],
+    let_support: &HashMap<String, HashSet<String>>,
+    enclosing_source_support: &HashSet<String>,
+    out: &mut Vec<(String, HashSet<String>)>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Statement::Emit {
+                name,
+                expr,
+                target: EmitTarget::Field,
+                ..
+            } => {
+                let mut raw = HashSet::new();
+                expr.support_into(&mut raw);
+                let mut resolved = resolve_support(&raw, let_support);
+                // The fanned-out field is derived from the iterated source
+                // column(s) of every enclosing `emit each`, in addition to its
+                // own expression's support.
+                resolved.extend(enclosing_source_support.iter().cloned());
+                out.push((name.to_string(), resolved));
+            }
+            Statement::EmitEach { source, body, .. }
+            | Statement::ExplodeOuter { source, body, .. } => {
+                // Resolve this fan-out's source support and union it with any
+                // outer enclosing sources so nested fan-out accumulates. A
+                // literal or empty source resolves to an empty set, adding no
+                // spurious edges.
+                let mut src_raw = HashSet::new();
+                source.support_into(&mut src_raw);
+                let mut nested = enclosing_source_support.clone();
+                nested.extend(resolve_support(&src_raw, let_support));
+                collect_emit_supports(body, let_support, &nested, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Group a set of lineage edges' `(node, field)` endpoints by node.
@@ -797,6 +838,59 @@ mod tests {
         assert_eq!(
             support,
             &HashSet::from(["a".to_string(), "b".to_string(), "c".to_string()])
+        );
+    }
+
+    fn support_of<'a>(
+        supports: &'a [(String, HashSet<String>)],
+        target: &str,
+    ) -> &'a HashSet<String> {
+        supports
+            .iter()
+            .find(|(name, _)| name == target)
+            .map(|(_, support)| support)
+            .unwrap_or_else(|| panic!("emit `{target}` present"))
+    }
+
+    /// A field emitted inside `emit each` depends on the iterated source column,
+    /// even though its own expression only references the loop binding (#150).
+    #[test]
+    fn emit_each_threads_source_support_to_body_emit() {
+        let prog = program("emit each x in items {\n  emit y = x.v\n}\n");
+        let supports = emit_supports(&prog);
+        assert!(
+            support_of(&supports, "y").contains("items"),
+            "the iterated source column flows to the fanned-out field: {:?}",
+            support_of(&supports, "y"),
+        );
+    }
+
+    /// Nested fan-out accumulates: an inner body emit depends on EVERY enclosing
+    /// `emit each` source (#150).
+    #[test]
+    fn nested_emit_each_unions_enclosing_sources() {
+        let prog = program(
+            "emit each x in items {\n  emit each w in extras {\n    emit z = w.q\n  }\n}\n",
+        );
+        let supports = emit_supports(&prog);
+        let z = support_of(&supports, "z");
+        assert!(
+            z.contains("items") && z.contains("extras"),
+            "both enclosing sources flow to the inner fanned-out field: {z:?}",
+        );
+    }
+
+    /// An `emit each` source with empty column support (here a system-namespaced
+    /// `$pipeline.items`, which `support_into` excludes) adds no spurious support
+    /// — and therefore no spurious derive edge — to the fanned-out field (#150).
+    #[test]
+    fn emit_each_empty_support_source_adds_no_support() {
+        let prog = program("emit each x in $pipeline.items {\n  emit y = x.v\n}\n");
+        let supports = emit_supports(&prog);
+        assert!(
+            !support_of(&supports, "y").contains("items"),
+            "an empty-support source contributes no column: {:?}",
+            support_of(&supports, "y"),
         );
     }
 
