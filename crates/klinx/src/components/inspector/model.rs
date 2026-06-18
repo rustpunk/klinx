@@ -305,7 +305,12 @@ fn build_node_detail(stage_id: &str, ctx: InspectorBuildContext<'_>) -> Selected
         overview.push(InspectorFact::new("note", notes.stage_note.clone()));
     }
 
-    let diagnostics = node_diagnostics(stage, ctx.visible_errors, ctx.schema_warnings);
+    let diagnostics = node_diagnostics(
+        stage,
+        node.and_then(node_cxl_source).as_deref(),
+        ctx.visible_errors,
+        ctx.schema_warnings,
+    );
     let mut status_chips = status_chips(
         diagnostics
             .iter()
@@ -397,8 +402,19 @@ fn status_chips(
     chips
 }
 
+/// Render a CXL parse diagnostic as a single human line: the parser message,
+/// followed by ` → {how_to_fix}` when the parser offers an actionable fix.
+fn cxl_diagnostic_message(diagnostic: &crate::cxl_bridge::CxlDiagnostic) -> String {
+    if diagnostic.how_to_fix.is_empty() {
+        diagnostic.message.clone()
+    } else {
+        format!("{} \u{2192} {}", diagnostic.message, diagnostic.how_to_fix)
+    }
+}
+
 fn node_diagnostics(
     stage: Option<&StageView>,
+    cxl_source: Option<&str>,
     visible_errors: &[String],
     schema_warnings: &[String],
 ) -> Vec<InspectorDiagnostic> {
@@ -409,6 +425,17 @@ fn node_diagnostics(
             message: error.clone(),
             tone: StatusTone::Error,
         });
+    }
+    // Edit-time CXL syntax validation: a malformed `cxl:` block surfaces as an
+    // Error diagnostic, which flips the node status chip off "ok" (#141).
+    if let Some(source) = cxl_source {
+        for diagnostic in crate::cxl_bridge::validate_expr(source).errors {
+            diagnostics.push(InspectorDiagnostic {
+                label: "cxl".to_string(),
+                message: cxl_diagnostic_message(&diagnostic),
+                tone: StatusTone::Error,
+            });
+        }
     }
     diagnostics.extend(visible_errors.iter().map(|message| InspectorDiagnostic {
         label: "parse".to_string(),
@@ -753,6 +780,16 @@ fn cxl_section(
         return InspectorSection::unavailable("CXL", "This node has no top-level CXL block.");
     };
     let mut rows = Vec::new();
+    // Surface syntax errors at the top of the section so a malformed block is
+    // visible even when statement analysis yields nothing (#141).
+    let validation = crate::cxl_bridge::validate_expr(&cxl_source);
+    for diagnostic in &validation.errors {
+        rows.push(InspectorRow::toned(
+            "error",
+            cxl_diagnostic_message(diagnostic),
+            StatusTone::Error,
+        ));
+    }
     if let Some(analysis) = doc.and_then(|doc| doc.cxl_analysis.as_ref()) {
         for statement in &analysis.statements {
             rows.push(InspectorRow::new(
@@ -1345,6 +1382,89 @@ nodes:
                 .sections
                 .iter()
                 .any(|section| section.title == "ROLE PORTS" && section.unavailable.is_none())
+        );
+    }
+
+    /// A structurally-valid pipeline whose transform's `cxl:` block is
+    /// syntactically malformed (`emit x =` has no right-hand side). The YAML
+    /// parses clean; only edit-time CXL validation can catch the error (#141).
+    const MALFORMED_CXL_PIPELINE: &str = r#"
+pipeline:
+  name: malformed_cxl
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: x, type: int }
+  - type: transform
+    name: bad
+    input: src
+    config:
+      cxl: |
+        emit x =
+  - type: output
+    name: out
+    input: bad
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+
+    #[test]
+    fn malformed_cxl_flips_node_off_ok() {
+        let config = parse_config(MALFORMED_CXL_PIPELINE).expect("fixture parses");
+        let view = derive_pipeline_view(&config);
+        let bad = build_node(&config, &view, "bad");
+
+        let cxl_diag = bad
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.label == "cxl")
+            .expect("malformed cxl produces a `cxl` diagnostic");
+        assert_eq!(cxl_diag.tone, StatusTone::Error);
+        assert!(!cxl_diag.message.is_empty());
+
+        assert!(
+            bad.status_chips
+                .iter()
+                .any(|chip| chip.label == "errors" && chip.tone == StatusTone::Error),
+            "malformed cxl should yield an `errors` chip, got {:?}",
+            bad.status_chips
+        );
+        assert!(
+            !bad.status_chips.iter().any(|chip| chip.label == "ok"),
+            "malformed cxl must not report `ok`, got {:?}",
+            bad.status_chips
+        );
+    }
+
+    #[test]
+    fn valid_cxl_keeps_node_ok() {
+        let config = parse_config(VARIANT_PIPELINE).expect("fixture parses");
+        let view = derive_pipeline_view(&config);
+        // `clean` carries `emit x2 = x + 1`, which is well-formed CXL.
+        let clean = build_node(&config, &view, "clean");
+
+        assert!(
+            !clean
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.label == "cxl"),
+            "valid cxl should not produce a `cxl` diagnostic, got {:?}",
+            clean.diagnostics
+        );
+        assert!(
+            clean
+                .status_chips
+                .iter()
+                .any(|chip| chip.label == "ok" && chip.tone == StatusTone::Ok),
+            "valid cxl should yield an `ok` chip, got {:?}",
+            clean.status_chips
         );
     }
 

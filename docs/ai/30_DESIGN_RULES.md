@@ -41,6 +41,7 @@
 - **Verified:** Composition YAML is detected by root `_compose:`.
 - **Verified:** `PipelineNode` variant matches should stay exhaustive; do not add broad wildcard arms around engine variants.
 - **Verified:** Field lineage should use clean CXL parses; parse errors render diagnostics/rows but should not drive inferred edges.
+- **Verified:** Invalid CXL is flagged with a message + how-to-fix at edit time. `cxl_bridge::validate_expr` (parser-only, syntax) is the validation boundary; the inspector view-model (`components/inspector/model.rs`) surfaces each parse error as a `"cxl"` node diagnostic (which flips the status chip off `ok`) and as CXL-section error rows. Evidence: `cxl_bridge.rs` and `components/inspector/model.rs` tests (#141, regressed by #139).
 - **Verified:** Raw Aggregate field-lineage rows are the grouped output shape: de-duplicated `group_by` keys first, then aggregate emit targets. Aggregate `group_by` keys also render as semantic input role ports above the output fields. With clean CXL, Aggregate group keys and emits derive from their source/support fields, while unrelated input fields do not pass through. Evidence: `pipeline_view` aggregate field-lineage tests and `docs/research/2026-06-17-aggregate-field-lineage-ui.md`.
 - **Verified:** Route nodes expose branch ports, including default branches, rather than generic edge labels.
 

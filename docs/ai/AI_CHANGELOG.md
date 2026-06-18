@@ -167,3 +167,10 @@ When architecture changes, append a dated entry with:
 - Field details keep kind/type/badges/transitive upstream/downstream/role-use information and add stage context, annotations, emitted/passthrough/declared explanations, CXL statement mentions when available, and lineage-unavailable reasons.
 - `ScopedYamlEditor` replaces the read-only scoped YAML panel. It derives node ranges from every `PipelineNode` in `config.nodes`, splices node-scoped drafts back into `yaml_text` under `EditSource::Yaml`, and keeps a last-known range so temporary invalid scoped YAML does not erase the inspector.
 - Verification: `cargo test -p klinx inspector`, `cargo test -p klinx sync`, `cargo test -p klinx pipeline_view`, `cargo fmt --all --check`, and `cargo clippy -p klinx -- -D warnings`.
+
+## 2026-06-17: Re-established Live CXL Syntax Validation In The Inspector
+
+- Restored `crates/klinx/src/cxl_bridge.rs` (the parser-only `validate_expr` adapter over `cxl::parser::Parser::parse`) that #139 deleted, and re-added `mod cxl_bridge;` to `main.rs`. Public API unchanged from the pre-#139 version; the pinned cxl `997ea7d` `ParseError`/`Span` fields (`span.start/end`, `message`, `how_to_fix`) still match, so no field-access adaptation was needed.
+- `components/inspector/model.rs` now validates a node's `cxl:` block at edit time: `node_diagnostics` emits a `"cxl"` Error diagnostic per parse error (flipping the node status chip off `ok`), and `cxl_section` prepends CXL-section error rows. Messages append ` → {how_to_fix}` when the parser supplies a fix.
+- This re-establishes the invariant regressed by #139: a structurally-valid pipeline whose CXL is malformed (e.g. `emit x =`) is flagged at edit time instead of rendering as `ok` (#141). See the new rule under "YAML And Pipeline Rules" in `30_DESIGN_RULES.md`.
+- Verification: `cargo fmt --all`, `cargo build --package klinx`, `cargo test --package klinx`.
