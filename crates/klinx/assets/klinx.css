@@ -5835,6 +5835,47 @@ input:-webkit-autofill:focus {
   overflow-wrap: anywhere;
 }
 
+/* LINEAGE section header (#153): the section title and the INDIRECT include/
+   exclude toggle share a row, the toggle pushed to the right edge. */
+.klinx-field-lineage-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.klinx-field-lineage-header .klinx-section-header {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The INDIRECT include/exclude toggle button (#153): a small chip styled like the
+   file-explorer view toggle. Active (influence hops shown) reads verdigris; inactive
+   (hidden) is dimmed. */
+.klinx-field-trace-toggle {
+  flex: none;
+  margin-right: 16px;
+  padding: 2px 8px;
+  border: 1px solid var(--klinx-border-subtle);
+  border-radius: 2px;
+  background: var(--klinx-char);
+  font-family: var(--klinx-font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--klinx-iron);
+  cursor: pointer;
+}
+
+.klinx-field-trace-toggle:hover {
+  border-color: var(--klinx-stage-accent);
+}
+
+.klinx-field-trace-toggle--active {
+  color: var(--klinx-verdigris);
+  border-color: rgba(67, 179, 174, 0.45);
+}
+
 .klinx-field-lineage-summary {
   display: flex;
   flex-wrap: wrap;
@@ -5903,6 +5944,56 @@ input:-webkit-autofill:focus {
 .klinx-field-trace-row--selectable:hover {
   border-color: var(--klinx-stage-accent);
   background: rgba(255, 255, 255, 0.04);
+}
+
+/* Expandable hop-by-hop trace tree (#153): the tree row prepends a caret column
+   ahead of the hop/main/kind/precision columns; children are depth-indented via an
+   inline padding-left, so the grid keeps the caret aligned regardless of depth. The
+   flat role-usage rows keep the base 3-column grid (no caret). */
+.klinx-field-trace-row--tree {
+  grid-template-columns: 14px 42px minmax(0, 1fr) auto;
+}
+
+/* The expand/collapse caret. A leaf hop renders an empty caret span, holding the
+   column so sibling rows stay aligned. */
+.klinx-field-trace-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  font-size: 10px;
+  color: var(--klinx-iron);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* Per-hop CXL attribution line (#153): the responsible statement on the hop's own
+   stage, sitting under the stage/field labels in the trace row's main column. */
+.klinx-field-trace-cxl {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin-top: 2px;
+  font-family: var(--klinx-font-code);
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--klinx-text-dim);
+}
+
+.klinx-field-trace-cxl-kind {
+  flex: none;
+  font-family: var(--klinx-font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--klinx-iron);
+}
+
+.klinx-field-trace-cxl-expr {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--klinx-text);
 }
 
 .klinx-field-trace-main {
