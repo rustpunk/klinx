@@ -14,8 +14,8 @@ mod field_lineage;
 pub mod layout_model;
 
 pub use field_lineage::{
-    FieldEdge, FieldEdgeKind, FieldKind, FieldRow, field_lineage_full, group_endpoints_by_node,
-    lineage_closure,
+    FieldEdge, FieldEdgeKind, FieldKind, FieldRow, compact_type, field_lineage_full,
+    group_endpoints_by_node, lineage_closure,
 };
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;
@@ -1285,28 +1285,6 @@ fn declared_rows(
             is_aggregate_grain: false,
         })
         .collect()
-}
-
-/// A short, lowercase datatype label for inline display on a field row, e.g.
-/// `float`, `string`, `datetime`, and `int?` for `Nullable(Int)`. The engine's
-/// `Display`/`display_name` are unsuitable: `display_name` drops the inner type
-/// of `Nullable`, and `Display` renders the verbose `Nullable(Int)` form.
-fn compact_type(ty: &cxl::typecheck::Type) -> String {
-    use cxl::typecheck::Type;
-    match ty {
-        Type::Nullable(inner) => format!("{}?", compact_type(inner)),
-        Type::Null => "null".to_string(),
-        Type::Bool => "bool".to_string(),
-        Type::Int => "int".to_string(),
-        Type::Float => "float".to_string(),
-        Type::String => "string".to_string(),
-        Type::Date => "date".to_string(),
-        Type::DateTime => "datetime".to_string(),
-        Type::Array => "array".to_string(),
-        Type::Map => "map".to_string(),
-        Type::Numeric => "numeric".to_string(),
-        Type::Any => "any".to_string(),
-    }
 }
 
 /// Per-index classification fed to the shared lineage core: each slot is either
@@ -4023,7 +4001,7 @@ nodes:
 
         // Transform: `a` shadowed? No — `c` is emitted, so a & b ride through as
         // passthrough (input order, carrying their source types), then emitted
-        // `c` (no type — typing an emit is Phase 2b).
+        // `c` with its conservatively inferred type (#149: arithmetic → numeric).
         assert_eq!(
             view.stages[i_t].fields,
             vec![
@@ -4042,7 +4020,7 @@ nodes:
                 FieldRow {
                     name: "c".to_string(),
                     kind: FieldKind::Emitted,
-                    ty: None,
+                    ty: Some("numeric".to_string()),
                     ..Default::default()
                 },
             ]
@@ -4641,7 +4619,13 @@ nodes:
         let raw_t = stage_idx(&raw, "t");
         let raw_c = field_by_name(&raw, raw_t, "c");
         assert_eq!(raw_c.kind, FieldKind::Emitted);
-        assert_eq!(raw_c.ty, None, "Raw mode keeps emitted field types unknown");
+        // Raw mode now infers a conservative type for the emit (#149): arithmetic
+        // is the `numeric` over-approximation — a supertype of the engine's `int`.
+        assert_eq!(
+            raw_c.ty.as_deref(),
+            Some("numeric"),
+            "Raw mode infers arithmetic emits as numeric"
+        );
 
         let resolved_t = stage_idx(&resolved, "t");
         let resolved_c = field_by_name(&resolved, resolved_t, "c");
@@ -4650,6 +4634,15 @@ nodes:
             resolved_c.ty.as_deref(),
             Some("int"),
             "Resolved mode uses the engine's typed output row"
+        );
+        // The raw inference is conservative: it never contradicts the engine. The
+        // inferred `numeric` unifies with the engine's `int` (numeric ⊇ int).
+        let raw_ty = compact_type(&cxl::typecheck::Type::Numeric);
+        assert!(
+            cxl::typecheck::Type::Numeric
+                .unify(&cxl::typecheck::Type::Int)
+                .is_some(),
+            "inferred {raw_ty} must be consistent with the engine's int"
         );
 
         let resolved_src = stage_idx(&resolved, "src");
@@ -4665,6 +4658,98 @@ nodes:
             "resolved lineage edge should still target the typed row: {:?}",
             resolved.field_edges
         );
+    }
+
+    /// #149 validation harness: the raw type inferencer never contradicts the
+    /// engine. For a fixture exercising every covered emit shape, each
+    /// raw-inferred emitted type is *consistent* with the engine's compiled
+    /// `typed_output_row` — identical, the `numeric` supertype of an engine
+    /// int/float, or the liberal Unknown (`None`). This bounds the inferencer's
+    /// error rate to zero on the covered shapes while letting it over-approximate
+    /// (numeric) or abstain (None).
+    #[test]
+    fn raw_inferred_emit_types_are_consistent_with_compiled_truth() {
+        let yaml = r#"
+pipeline:
+  name: inferred_types
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+        - { name: name, type: string }
+  - type: transform
+    name: t
+    input: src
+    config:
+      cxl: |
+        let w = a + 1
+        emit lit_i = 1
+        emit lit_s = "x"
+        emit ari = a + 1
+        emit cmp = a > 3
+        emit logic = a > 1 and a < 10
+        emit up = name.upper()
+        emit chained = w * 2
+        emit renamed = b
+  - type: output
+    name: out
+    input: t
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(yaml).expect("inference fixture parses");
+        let raw = derive_pipeline_view(&config);
+        let plan = config
+            .compile(&CompileContext::default())
+            .expect("inference fixture compiles");
+        let resolved = derive_resolved_pipeline_view(&plan);
+
+        let raw_t = stage_idx(&raw, "t");
+        let resolved_t = stage_idx(&resolved, "t");
+
+        // Inferred-vs-engine consistency: Unknown is always safe; an exact match
+        // is safe; `numeric` is the safe supertype of an engine int/float. The
+        // raw inferencer does not track nullability, so an engine `T?` is
+        // consistent with an inferred base `T`.
+        let consistent = |raw: Option<&str>, engine: Option<&str>| {
+            let engine_base = engine.map(|e| e.trim_end_matches('?'));
+            match (raw, engine_base) {
+                (None, _) => true,
+                (Some(r), Some(e)) if r == e => true,
+                (Some("numeric"), Some("int" | "float" | "numeric")) => true,
+                _ => false,
+            }
+        };
+
+        // Lock in the inferred raw label for each covered shape, and prove each
+        // is consistent with the engine's compiled truth.
+        let expected_raw = [
+            ("lit_i", Some("int")),
+            ("lit_s", Some("string")),
+            ("ari", Some("numeric")),
+            ("cmp", Some("bool")),
+            ("logic", Some("bool")),
+            ("up", Some("string")),
+            ("chained", Some("numeric")),
+            ("renamed", None), // bare input-column ref → Unknown in raw mode
+        ];
+        for (field, want) in expected_raw {
+            let raw_ty = field_by_name(&raw, raw_t, field).ty.clone();
+            assert_eq!(raw_ty.as_deref(), want, "raw inferred type for `{field}`");
+            let engine_ty = field_by_name(&resolved, resolved_t, field).ty.clone();
+            assert!(
+                consistent(raw_ty.as_deref(), engine_ty.as_deref()),
+                "raw `{field}`={raw_ty:?} contradicts engine {engine_ty:?}",
+            );
+        }
     }
 
     /// #96: top-level pipeline field lineage is not only populated from Source
@@ -5518,7 +5603,7 @@ nodes:
         );
 
         // t1: passthrough `a` (not shadowed, carries `float`) then emitted `b`
-        // (no type — emit typing is Phase 2b).
+        // with its inferred type (#149: `a * 2.0` arithmetic → numeric).
         assert_eq!(
             view.stages[i_t1].fields,
             vec![
@@ -5531,14 +5616,16 @@ nodes:
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::Emitted,
-                    ty: None,
+                    ty: Some("numeric".to_string()),
                     ..Default::default()
                 },
             ]
         );
 
-        // t2: passthrough `a` (still `float`), `b` (untyped — it was emitted
-        // upstream), then emitted `c`.
+        // t2: passthrough `a` (still `float`), `b` (carries t1's inferred
+        // `numeric` through the passthrough), then emitted `c` = `b + a`. Both
+        // operands are bare refs (Unknown in raw mode), and `+` is overloaded
+        // (numeric add vs string concat), so inference abstains → `None` (#149).
         assert_eq!(
             view.stages[i_t2].fields,
             vec![
@@ -5551,7 +5638,7 @@ nodes:
                 FieldRow {
                     name: "b".to_string(),
                     kind: FieldKind::PassThrough,
-                    ty: None,
+                    ty: Some("numeric".to_string()),
                     ..Default::default()
                 },
                 FieldRow {
