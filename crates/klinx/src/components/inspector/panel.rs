@@ -13,7 +13,7 @@ use super::model::{
     CxlMentionView, FieldInspectorModel, InspectorBuildContext, InspectorDiagnostic, InspectorFact,
     InspectorRow, InspectorSection, InspectorSelection, MissingInspectorModel, NodeInspectorModel,
     RoleUsageView, SelectedInspectorModel, StatusChip, StatusTone, TraceNode,
-    build_selected_inspector, count_trace_nodes,
+    build_selected_inspector, count_field_hops,
 };
 use super::scoped_yaml::ScopedYamlEditor;
 
@@ -607,9 +607,12 @@ fn LineageSection(field: FieldInspectorModel) -> Element {
 
     // The LINEAGE summary counts the field's FULL lineage (toggle-independent), so it
     // agrees with the `lineage` context fact and presents one source of truth; the
-    // INDIRECT toggle filters which hops the tree below DISPLAYS, not the count.
-    let upstream_count = count_trace_nodes(&field.upstream);
-    let downstream_count = count_trace_nodes(&field.downstream);
+    // INDIRECT toggle filters which hops the tree below DISPLAYS, not the count. It
+    // counts real source/consumer FIELDS, excluding the synthetic composition-boundary
+    // crossings #155 inserts (`count_field_hops`), so the figure matches the `lineage`
+    // fact built in `build_field_detail`.
+    let upstream_count = count_field_hops(&field.upstream);
+    let downstream_count = count_field_hops(&field.downstream);
     let indirect_on = include_indirect();
 
     rsx! {

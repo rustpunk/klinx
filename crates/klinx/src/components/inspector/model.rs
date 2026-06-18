@@ -10,7 +10,8 @@ use crate::autodoc::{CxlStatementKind, generate_stage_doc};
 use crate::notes::parse_notes;
 use crate::pipeline_view::{
     BodyScope, EdgeNature, FieldEdgeKind, FieldKind, PipelineView, Precision, RoleEdge, StageKind,
-    StagePortSide, StageView, derive_body_scope,
+    StagePortSide, StageView, composition_in_boundary_field, derive_body_scope,
+    parse_composition_in_boundary_field,
 };
 use crate::state::{ChannelViewMode, SelectedField};
 
@@ -305,17 +306,29 @@ pub struct TraceNode {
 }
 
 impl TraceNode {
-    /// Total node count in this subtree, including the node itself (#153). The
-    /// LINEAGE summary counts every traced hop, not just the direct (hop-1) ones,
-    /// so the count matches the former flat list's length.
-    fn count(&self) -> usize {
-        1 + self.children.iter().map(TraceNode::count).sum::<usize>()
+    /// Count of REAL field hops in this subtree (#155) — every hop except the
+    /// synthetic composition-boundary crossings (`Enter`/`Exit`/`Recursive`). Used by
+    /// the "N upstream / M downstream" LINEAGE figure, which means "real source /
+    /// consumer FIELDS": a boundary crossing is not a distinct upstream field, so
+    /// counting it would inflate the figure for any column carried through a
+    /// composition (a #155 regression vs the pre-composition-descent count).
+    fn count_field_hops(&self) -> usize {
+        let self_count = usize::from(self.endpoint.boundary.is_none());
+        self_count
+            + self
+                .children
+                .iter()
+                .map(TraceNode::count_field_hops)
+                .sum::<usize>()
     }
 }
 
-/// Total node count across a forest of trace trees (#153).
-pub fn count_trace_nodes(nodes: &[TraceNode]) -> usize {
-    nodes.iter().map(TraceNode::count).sum()
+/// Count of real FIELD hops across a forest, excluding synthetic composition-boundary
+/// crossings (#155). This is what the Inspector's "N upstream / M downstream" summary
+/// reports, so a column carried through a composition counts its true source/consumer
+/// fields, not the Enter/Exit markers added by the scope-aware descent.
+pub fn count_field_hops(nodes: &[TraceNode]) -> usize {
+    nodes.iter().map(TraceNode::count_field_hops).sum()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1159,8 +1172,12 @@ fn build_field_detail(
     // into Approximate. The PER-HOP badges still show each hop's own edge precision
     // (see `TraceEndpointView::precision`), so the approximation is visible exactly
     // where it occurs without painting the whole upstream cone.
-    let upstream_count = count_trace_nodes(&upstream);
-    let downstream_count = count_trace_nodes(&downstream);
+    // The LINEAGE "N upstream / M downstream" figure counts real source/consumer
+    // FIELDS, so it excludes the synthetic composition-boundary crossings #155 inserts
+    // (a carried column's Enter/Exit hops are not distinct fields). Pre-#155 there were
+    // no boundary hops, so this preserves the original meaning of the count.
+    let upstream_count = count_field_hops(&upstream);
+    let downstream_count = count_field_hops(&downstream);
     // The deepest composition nesting either direction descended through (#155) — the
     // "originated N deep" figure #156 surfaces. The full (indirect-included) trees are
     // the authoritative depth: a direct-only toggle can only PRUNE crossings, never
@@ -1331,7 +1348,14 @@ struct TracedHop {
 /// descent that would exceed it is dropped silently (no terminal hop — the body it
 /// would enter is simply not expanded), which keeps a pathological pipeline's
 /// Inspector responsive without inventing a misleading marker.
-const MAX_SCOPE_DEPTH: usize = 16;
+///
+/// Set ABOVE the engine's own nesting cap (`MAX_COMPOSITION_DEPTH = 50`, enforced at
+/// compile with E107/E112): any plan that compiled is already ≤ 50 deep, so this cap
+/// never truncates a legitimate trace — it is purely a defense against a malformed /
+/// future-unbounded body graph the Inspector might be handed. Keeping it strictly
+/// greater than the engine limit guarantees the trace shows every crossing of any
+/// real plan while still terminating on garbage input.
+const MAX_SCOPE_DEPTH: usize = 64;
 
 /// Memoizing resolver from a composition (by node name) to its body's [`BodyScope`]
 /// — the body's own lineage view plus the port↔slot maps the scope-aware trace
@@ -1428,6 +1452,12 @@ impl ScopeFrame {
     /// Whether `body_id` is already open on this frame's path — the recursion guard
     /// (modeled on `field_lineage::expand_member`'s `visiting` set). A descent into an
     /// already-open body would loop, so it is treated as a terminal `Recursive` hop.
+    ///
+    /// Flagging ANY repeat `body_id` on the ancestor chain (not just an immediate
+    /// self-reference) is correct AND safe: the engine forbids composition `use:`
+    /// cycles at compile (E107), so a re-entered body id can only arise from a
+    /// malformed/adversarial plan — exactly what this defends against — never from a
+    /// legitimately distinct re-use, which always carries a distinct body id.
     fn is_open(&self, body_id: CompositionBodyId) -> bool {
         let mut frame = Some(self);
         while let Some(f) = frame {
@@ -1601,16 +1631,22 @@ fn trace_tree(
                 .then_with(|| a.0.0.cmp(&b.0.0))
         });
         for ((next_node, next_field), (edge_kind, edge_precision)) in endpoints {
-            // DOWNSTREAM INPUT-MARKER descent (#155): a downstream endpoint landing on
+            // DOWNSTREAM INPUT-MARKER endpoint (#155): a downstream endpoint landing on
             // a composition's synthetic `\u{2190}in:port:col` marker crosses INTO the
-            // body. The marker is NOT a real row, so no visible hop is emitted for it;
-            // `try_descend_marker` emits the `Enter` hop directly and enqueues the
-            // in-body continuation. (Other crossings — a composition reached at a real
-            // column, either direction — are handled at DEQUEUE by
+            // body. The marker is NOT a real row — it must NEVER surface as a visible
+            // hop (the panel renders `field_name` verbatim, so a leaked `\u{2190}in:`
+            // would show to the user). So whenever the endpoint field is a marker we
+            // `continue` unconditionally: `try_descend_marker` emits the `Enter` hop and
+            // enqueues the in-body continuation on success; on a degrade (malformed /
+            // unresolvable body — port-slot miss, missing assignment) it returns false
+            // and we drop the marker as a clean leaf. (Other crossings — a composition
+            // reached at a real column, either direction — are handled at DEQUEUE by
             // `descend_into_composition`, so the visible comp-column hop is kept.)
             if let Some(res) = resolver
                 && matches!(direction, TraceDirection::Downstream)
-                && try_descend_marker(
+                && parse_composition_in_boundary_field(next_field).is_some()
+            {
+                try_descend_marker(
                     &item,
                     scope_view,
                     next_node,
@@ -1620,8 +1656,7 @@ fn trace_tree(
                     &mut seen,
                     &mut queue,
                     &mut hops,
-                )
-            {
+                );
                 continue;
             }
 
@@ -1671,6 +1706,13 @@ fn trace_tree(
 ///
 /// The recursion guard and [`MAX_SCOPE_DEPTH`] backstop are applied via the shared
 /// [`enter_body`]. A resolve/map miss returns `false` (degrade to a leaf).
+///
+/// Note (known limitation, not a bug): the in-body BFS that follows an `Enter` rides
+/// `derive_body_view`'s edges, which are CARRY-ONLY. A column carried through the body
+/// traces all the way to the outer producer/consumer; a column COMPUTED inside the
+/// body dead-ends at its in-body row because the body view draws no derive edge for it.
+/// Body-internal derive lineage is a pending follow-up; #155 surfaces every crossing
+/// correctly regardless.
 #[allow(clippy::too_many_arguments)]
 fn descend_into_composition(
     item: &Frontier,
@@ -1758,7 +1800,7 @@ fn try_descend_marker(
     queue: &mut VecDeque<Frontier>,
     hops: &mut Vec<TracedHop>,
 ) -> bool {
-    let Some((port, col)) = parse_in_boundary_field(next_field) else {
+    let Some((port, col)) = parse_composition_in_boundary_field(next_field) else {
         return false;
     };
     let Some(comp_stage) = scope_view.stages.get(next_node) else {
@@ -1861,6 +1903,13 @@ fn enter_body(
     // The `Enter` hop is the first hop INSIDE the body, on the body column the crossing
     // lands at. Mark `(child_scope, entry_slot, body_field)` seen so the body BFS does
     // not rediscover it.
+    //
+    // `child_scope.id` is freshly minted just above (`next_scope_id`), so this insert
+    // is always a no-op `true` TODAY — the early-return on `false` is dead under the
+    // current unique-scope-id scheme. It is kept deliberately: if a future change
+    // reuses scope ids (e.g. interns identical body scopes), this guard is what stops a
+    // duplicate `Enter` hop from being emitted. Removing it would make such a change
+    // silently double-emit crossings.
     let key = (child_scope.id, entry_slot, body_field.clone());
     if !seen.insert(key) {
         return true;
@@ -1951,7 +2000,18 @@ fn resurface_from_body(
             //    nested comp node `inner` consumes its input via ORDINARY edges
             //    `producer.col \u{2192} inner.col`, so the upstream feed is just the
             //    parent-scope upstream neighbors of `(comp_node, col)`.
-            let marker = composition_in_boundary_marker(&port, &item.field);
+            //
+            // The marker is rebuilt from `item.field` — the body column on the
+            // INPUT-PORT body node — via the same `composition_in_boundary_field`
+            // builder #154 minted it with. These agree because #154 mints one marker
+            // per `body.input_port_rows[port]` column, and that port row IS the row of
+            // the body's input-seed node (a pure Source seed applies no projection, so
+            // it cannot rename the port column). If a future engine change let an input
+            // node rename the seeded column, the rebuilt marker would miss the #154 edge
+            // and the `producers.is_empty()` fallback below would (correctly) try the
+            // ordinary-neighbor path; worst case the trace truncates at the wall rather
+            // than resurfacing — never a wrong producer.
+            let marker = composition_in_boundary_field(&port, &item.field);
             let producers: Vec<(usize, String, Precision)> = parent_view
                 .field_edges
                 .iter()
@@ -2119,24 +2179,6 @@ fn input_port_for_column(
         }
     }
     None
-}
-
-/// The synthetic input-boundary marker field for `(port, col)` (#155) — the parser
-/// side of [`crate::pipeline_view::field_lineage::composition_in_boundary_field`]'s
-/// `"\u{2190}in:{port}:{col}"` convention. Kept here (not calling the `pub(crate)`
-/// builder across the module boundary) so the convention used to MATCH a marker edge
-/// lives next to the convention used to PARSE one.
-fn composition_in_boundary_marker(port: &str, col: &str) -> String {
-    format!("\u{2190}in:{port}:{col}")
-}
-
-/// Parse a synthetic `\u{2190}in:{port}:{col}` input-boundary marker field back into
-/// its `(port, col)` (#155), or `None` if `field` is not a marker. The port name
-/// cannot contain `:` (it is a composition signature identifier), so a single
-/// `split_once(':')` after the `\u{2190}in:` prefix recovers both halves; `col` keeps
-/// any remaining colons verbatim.
-fn parse_in_boundary_field(field: &str) -> Option<(&str, &str)> {
-    field.strip_prefix("\u{2190}in:")?.split_once(':')
 }
 
 /// Fold the flat, BFS-ordered hops into a forest of [`TraceNode`]s (#153). Each
@@ -3202,8 +3244,10 @@ nodes:
             "the chain terminates at the source"
         );
 
-        // The summary counts EVERY traced node, not just the direct hops.
-        assert_eq!(count_trace_nodes(&detail.upstream), 2);
+        // The summary counts EVERY traced field hop, not just the direct hops (this
+        // boundary-free view has no composition crossings, so the field-hop count is
+        // the whole tree).
+        assert_eq!(count_field_hops(&detail.upstream), 2);
     }
 
     /// #153: a BRANCHING upstream trace keeps each deeper hop under the CORRECT
@@ -3293,8 +3337,9 @@ nodes:
         // midB has no deeper hop (its `b` is a declared root).
         assert!(detail.upstream[1].children.is_empty());
 
-        // Every endpoint reached exactly once: 2 hop-1 + 2 hop-2 = 4 nodes.
-        assert_eq!(count_trace_nodes(&detail.upstream), 4);
+        // Every endpoint reached exactly once: 2 hop-1 + 2 hop-2 = 4 field hops (no
+        // composition crossings in this view).
+        assert_eq!(count_field_hops(&detail.upstream), 4);
     }
 
     /// #153: each hop names its transform — the edge-kind label and per-hop
@@ -3869,9 +3914,11 @@ nodes:
         // One composition was crossed → depth 1.
         assert_eq!(max_scope_depth(&detail.upstream), 1);
 
-        // A computed body column still descends (Enter), even though `derive_body_view`
-        // synthesizes no in-body derive edge for it, so it terminates inside the body
-        // rather than resurfacing.
+        // A computed body column still descends (Enter), then dead-ends inside the body
+        // because `derive_body_view` is CARRY-ONLY (it draws no in-body derive edges —
+        // body-internal lineage fidelity is a pending follow-up, NOT a #155 bug). The
+        // crossing is still surfaced correctly; only the deeper in-body origin of a
+        // computed column is absent until the body view gains derive edges.
         let computed =
             build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "c"))
                 .expect("out.c exists");
@@ -4225,5 +4272,183 @@ nodes:
             children: Vec::new(),
         }];
         assert_eq!(max_scope_depth(&forest), 1);
+    }
+
+    /// #155 review item 1: a `\u{2190}in:` synthetic marker must NEVER surface as a
+    /// visible hop, even on the degrade path where descent fails. Here a hand-built
+    /// downstream view has a marker edge `src.a \u{2192} ghost.(\u{2190}in:p:a)` into a
+    /// Composition node `ghost` that has NO body assignment in the plan, so
+    /// `try_descend_marker` returns false — the marker must be dropped as a clean leaf,
+    /// not emitted/enqueued. The whole tree is asserted free of any `\u{2190}` field
+    /// name.
+    #[test]
+    fn unresolvable_downstream_marker_never_leaks_to_a_hop() {
+        // A real resolver (its plan has `comp`, but NOT `ghost`).
+        let plan = compiled_single_composition();
+
+        let src = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "a".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        // A Composition-kind node whose id is unknown to the plan, so `resolve` misses.
+        let ghost = stage("ghost", StageKind::Composition, Vec::new());
+        let marker = composition_in_boundary_field("p", "a");
+        let view = PipelineView {
+            stages: vec![src, ghost],
+            field_edges: vec![FieldEdge::boundary(
+                0,
+                "a".to_string(),
+                1,
+                marker.clone(),
+                false,
+            )],
+            ..Default::default()
+        };
+
+        let resolver = BodyScopeResolver::new(&plan);
+        let down = trace_tree(
+            &view,
+            0,
+            "a",
+            TraceDirection::Downstream,
+            true,
+            Some(&resolver),
+        );
+
+        // The unresolvable marker descent fails → the marker is dropped; the tree is
+        // empty (no other downstream edge), and crucially carries no `\u{2190}` field.
+        let names: Vec<String> = collect_boundaries(&down)
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            names.iter().all(|f| !f.contains('\u{2190}')),
+            "a synthetic input marker must never reach a hop's field_name, got {names:?}",
+        );
+        assert!(
+            down.is_empty(),
+            "the only downstream endpoint was an unresolvable marker, dropped as a leaf: {:?}",
+            collect_boundaries(&down),
+        );
+
+        // Belt-and-braces: even on a REAL composition plan, no `\u{2190}` ever surfaces
+        // in any direction (the descend path emits the Enter hop on the real column).
+        let real_view = derive_resolved_pipeline_view(&plan);
+        for field in ["a", "b", "c", "d"] {
+            for sel in [
+                SelectedField::new("out", field),
+                SelectedField::new("src", field),
+            ] {
+                if let Some(detail) = build_field_detail(&real_view, None, Some(&plan), &sel) {
+                    for tree in [
+                        &detail.upstream,
+                        &detail.downstream,
+                        &detail.upstream_direct,
+                        &detail.downstream_direct,
+                    ] {
+                        assert!(
+                            collect_boundaries(tree)
+                                .iter()
+                                .all(|(f, _)| !f.contains('\u{2190}')),
+                            "no synthetic marker may surface for {sel:?}: {:?}",
+                            collect_boundaries(tree),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// #155 review item 2: the "N upstream / M downstream" LINEAGE figure counts real
+    /// source/consumer FIELDS, excluding the synthetic Enter/Exit boundary crossings.
+    /// A column carried through one composition would otherwise report inflated counts.
+    /// Asserts that `count_field_hops` + the boundary-crossing count partitions the
+    /// whole tree, and that the model's `lineage` fact reports only the real fields.
+    #[test]
+    fn lineage_count_excludes_boundary_crossings() {
+        let plan = compiled_single_composition();
+        let view = derive_resolved_pipeline_view(&plan);
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "a"))
+            .expect("out.a exists");
+
+        // The upstream tree has boundary crossings (Enter + Exit on `a`), so the raw
+        // node count is strictly greater than the field-hop count.
+        let boundary_hops = collect_boundaries(&detail.upstream)
+            .iter()
+            .filter(|(_, b)| b.is_some())
+            .count();
+        assert!(
+            boundary_hops >= 2,
+            "the carried column crosses comp in and out: {:?}",
+            collect_boundaries(&detail.upstream),
+        );
+        let field_hops = count_field_hops(&detail.upstream);
+        let all_hops = collect_boundaries(&detail.upstream).len();
+        assert_eq!(
+            field_hops + boundary_hops,
+            all_hops,
+            "field hops + boundary crossings must partition the tree",
+        );
+
+        // The `lineage` context fact uses the field-hop count, so it never includes a
+        // boundary crossing.
+        let lineage_fact = detail
+            .context
+            .iter()
+            .find(|f| f.label == "lineage")
+            .expect("lineage fact present");
+        let upstream_reported: usize = lineage_fact
+            .value
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("lineage fact starts with the upstream count");
+        assert_eq!(
+            upstream_reported, field_hops,
+            "the lineage fact reports field hops, not boundary-inflated counts: {:?}",
+            lineage_fact.value,
+        );
+    }
+
+    /// #155 review item 3: tracing DOWNSTREAM descends INTO a composition (Enter) and
+    /// resurfaces FROM it (Exit) to the outer CONSUMER. The carried column `a` enters
+    /// `comp` at its input port, rides the body to the output port, and resurfaces to
+    /// `out.a` — exercising the `TraceDirection::Downstream` arm of
+    /// `resurface_from_body` and its `emit_resurface_hop` path.
+    #[test]
+    fn downstream_descends_and_resurfaces_to_outer_consumer() {
+        let plan = compiled_single_composition();
+        let view = derive_resolved_pipeline_view(&plan);
+
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("src", "a"))
+            .expect("src.a exists");
+
+        // Enter hop on the carried body column `a` naming `comp`.
+        assert!(
+            has_boundary(
+                &detail.downstream,
+                "a",
+                &BoundaryHopKind::Enter("comp".to_string())
+            ),
+            "downstream from src.a must Enter composition `comp`: {:?}",
+            collect_boundaries(&detail.downstream),
+        );
+        // Exit hop resurfacing to the outer consumer `out.a`.
+        let exit_to_out = find_hop(&detail.downstream, |hop| {
+            hop.boundary == Some(BoundaryHopKind::Exit("comp".to_string()))
+                && hop.stage_id == "out"
+                && hop.field_name == "a"
+        });
+        assert!(
+            exit_to_out,
+            "downstream must Exit composition `comp` and resurface to the outer consumer out.a: {:?}",
+            collect_boundaries(&detail.downstream),
+        );
+        assert_eq!(max_scope_depth(&detail.downstream), 1);
     }
 }
