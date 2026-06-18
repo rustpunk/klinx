@@ -1412,6 +1412,20 @@ input:-webkit-autofill:focus {
   white-space: nowrap;
 }
 
+/* Expand-further affordance (#123): raises the hop cap to reveal more of a deep
+   selected lineage. Carries the verdigris accent so it reads as an active, on-
+   demand control distinct from the static view toggles, and only appears while
+   the cap is clipping the closure. */
+.klinx-lineage-expand {
+  border-color: rgba(67, 179, 174, 0.45);
+  color: var(--klinx-verdigris);
+}
+
+.klinx-lineage-expand:hover:not(:disabled) {
+  background: rgba(67, 179, 174, 0.2);
+  border-color: var(--klinx-verdigris);
+}
+
 /* ── Canvas / sidebar widths per pipeline layout mode ── */
 .klinx-main[data-layout="hybrid"] .klinx-canvas-column {
   flex: 1;
@@ -4889,6 +4903,16 @@ input:-webkit-autofill:focus {
   transition:
     filter 150ms ease,
     box-shadow 150ms ease;
+}
+
+/* Filter-mode reveal (#123): a node OUTSIDE the active lineage closure is removed
+   from the canvas entirely so only the connecting paths remain readable. Uses
+   `display: none` (not opacity) so the off-path card occupies no space and casts
+   no below-card stroke; the matching node-level connectors are skipped in the
+   render when either endpoint is hidden, so no half-edge dangles to a gone card.
+   Mutually exclusive with `--dimmed`: Highlight mode dims, Filter mode hides. */
+.klinx-node--hidden {
+  display: none;
 }
 
 /* Node-level cable GROUP recedes while a field's lineage is revealed — only the

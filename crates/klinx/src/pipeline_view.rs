@@ -15,7 +15,8 @@ pub mod layout_model;
 
 pub use field_lineage::{
     EdgeNature, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, Precision, compact_type,
-    field_lineage_full, group_endpoints_by_node, lineage_closure,
+    field_lineage_full, field_lineage_full_capped, group_endpoints_by_node, lineage_closure,
+    lineage_keep_nodes,
 };
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;

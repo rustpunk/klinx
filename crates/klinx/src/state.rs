@@ -240,6 +240,60 @@ pub enum ChannelViewMode {
     Resolved,
 }
 
+/// How a field-lineage reveal treats the off-path graph (#123).
+///
+/// A reveal (hovering or selecting a field column) computes that column's lineage
+/// closure. This mode decides what happens to the nodes/edges OUTSIDE that
+/// closure while the reveal is active:
+///
+/// - `Highlight` keeps the FULL graph and DIMS the off-path cards/cables, so the
+///   surrounding context stays visible. This is the long-standing default and the
+///   only behavior before #123 — formalized behind the mode without changing its
+///   effect.
+/// - `Filter` HIDES off-path cards (and any edge with a hidden endpoint) so only
+///   the connecting paths remain, keeping a large lineage closure readable. Every
+///   connecting path stays intact — an edge is drawn only when BOTH endpoints
+///   survive, so no dangling partial path is left behind.
+///
+/// Stored as a per-tab signal on [`AppState`] so the canvas reveal logic and the
+/// toolbar toggle share one source of truth. PR5 (#152) reuses this exact state
+/// for its persistent focus toggle, so the mode lives here rather than as
+/// canvas-local component state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LineageRevealMode {
+    /// Keep the full graph; dim everything outside the active lineage closure.
+    #[default]
+    Highlight,
+    /// Hide everything outside the active lineage closure; keep connecting paths.
+    Filter,
+}
+
+impl LineageRevealMode {
+    /// CSS `data-reveal-mode` attribute value for the canvas container.
+    pub fn as_data_attr(self) -> &'static str {
+        match self {
+            Self::Highlight => "highlight",
+            Self::Filter => "filter",
+        }
+    }
+
+    /// Short display label for the toolbar toggle.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Highlight => "HIGHLIGHT",
+            Self::Filter => "FILTER",
+        }
+    }
+
+    /// The opposite mode — the toolbar toggle flips between the two.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Highlight => Self::Filter,
+            Self::Filter => Self::Highlight,
+        }
+    }
+}
+
 /// A frame in the composition drill-in stack.
 ///
 /// Each frame represents one level of drill-in. The body_id indexes into
@@ -313,6 +367,11 @@ pub struct AppState {
     pub schema_warnings: Signal<Vec<SchemaWarning>>,
     /// Canvas data source mode (Raw = pipeline config, Resolved = compiled plan).
     pub channel_view_mode: Signal<ChannelViewMode>,
+    /// How a field-lineage reveal treats the off-path graph: dim it
+    /// (`Highlight`, the default) or hide it (`Filter`). Shared by the canvas
+    /// reveal logic and the toolbar toggle; reused by PR5's persistent focus
+    /// toggle (#123).
+    pub lineage_reveal_mode: Signal<LineageRevealMode>,
     /// Composition drill-in stack. Empty = top-level pipeline view.
     /// Each frame holds a body ID for rendering the sub-canvas.
     pub composition_drill_stack: Signal<Vec<CompositionDrillFrame>>,
@@ -428,4 +487,57 @@ pub struct ChannelBindingSummary {
     pub source_path: PathBuf,
     /// Display string for the channel's target (pipeline or composition path).
     pub target: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #123: the reveal mode defaults to `Highlight` — the long-standing behavior
+    /// before the mode existed — so formalizing it behind the mode does not change
+    /// the out-of-the-box reveal.
+    #[test]
+    fn lineage_reveal_mode_defaults_to_highlight() {
+        assert_eq!(LineageRevealMode::default(), LineageRevealMode::Highlight);
+    }
+
+    /// #123: the toolbar toggle flips between exactly the two modes and is its own
+    /// inverse, so a double-click returns to the start. PR5 reuses this toggle for
+    /// its persistent focus control, so the round-trip contract is load-bearing.
+    #[test]
+    fn lineage_reveal_mode_toggle_is_involution() {
+        assert_eq!(
+            LineageRevealMode::Highlight.toggled(),
+            LineageRevealMode::Filter
+        );
+        assert_eq!(
+            LineageRevealMode::Filter.toggled(),
+            LineageRevealMode::Highlight
+        );
+        for mode in [LineageRevealMode::Highlight, LineageRevealMode::Filter] {
+            assert_eq!(mode.toggled().toggled(), mode, "toggling twice is identity");
+        }
+    }
+
+    /// #123: each mode carries a DISTINCT, slug-safe `data-reveal-mode` attribute
+    /// and a distinct label, so CSS keyed off the attribute and the toolbar label
+    /// can tell the two apart.
+    #[test]
+    fn lineage_reveal_mode_attrs_and_labels_are_distinct() {
+        assert_ne!(
+            LineageRevealMode::Highlight.as_data_attr(),
+            LineageRevealMode::Filter.as_data_attr()
+        );
+        assert_ne!(
+            LineageRevealMode::Highlight.label(),
+            LineageRevealMode::Filter.label()
+        );
+        for mode in [LineageRevealMode::Highlight, LineageRevealMode::Filter] {
+            let attr = mode.as_data_attr();
+            assert!(
+                !attr.is_empty() && attr.chars().all(|c| c.is_ascii_lowercase()),
+                "{mode:?} data attr must be a lowercase slug, got {attr:?}",
+            );
+        }
+    }
 }
