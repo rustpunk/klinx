@@ -466,6 +466,30 @@ impl FieldEdge {
     }
 }
 
+/// The synthetic `to_field` name for a composition **input** boundary edge (#154):
+/// an outer producer column crossing INTO a composition's input port.
+///
+/// Returns `"\u{2190}in:{port}:{col}"` (a leading `←` U+2190 LEFTWARDS ARROW, then
+/// `in:`, the port name, and the column). The `←` prefix is the collision-safety
+/// guarantee: it is not a valid CXL/engine identifier character, so this synthetic
+/// field can NEVER equal a real output column on the composition node — the edge
+/// lands on a marker anchor, never on a visible [`FieldRow`]. The port and column
+/// are recoverable by splitting on `:` after the `\u{2190}in:` prefix.
+///
+/// This naming convention is the contract #155 (descent into composition bodies)
+/// relies on to detect "an outer column enters the body at port `port` as column
+/// `col`", so it is a documented `pub(crate)` helper rather than an inline literal.
+///
+/// The OUTPUT side has no synthetic-marker analogue: a composition's output columns
+/// are materialized as real [`FieldRow`]s on the node (synthesized from the body's
+/// output ports), so the OUT crossing is the ordinary `comp.col → consumer.col`
+/// edge re-tagged [`FieldEdgeKind::Boundary`]. #155 recovers the body node + output
+/// port for `comp.col` from the body's `output_port_rows` (which port declares
+/// `col`) and `output_port_to_node_idx` (that port's terminal body NodeIndex).
+pub(crate) fn composition_in_boundary_field(port: &str, col: &str) -> String {
+    format!("\u{2190}in:{port}:{col}")
+}
+
 /// Resolve the let-expanded input-column support of a single `emit`
 /// expression's already-collected raw support.
 ///
