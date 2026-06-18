@@ -135,7 +135,9 @@ pub(super) struct FieldDisplayInfo {
 /// [`super::CanvasHover`] context after a cold-entry dwell, then instantly while
 /// warm. Plain card hover does not reveal field connectors. `dimmed` fades the
 /// card when a field's lineage is being revealed and this node is outside that
-/// closure.
+/// closure (Highlight mode). `hidden` removes the card entirely when Filter mode
+/// is suppressing off-path nodes (#123); the two are mutually exclusive — Filter
+/// mode hides instead of dimming.
 ///
 /// `highlighted_fields` names THIS card's own field rows that are lineage
 /// endpoints of the active hover reveal (#87) — the rows to tint so a reader of
@@ -153,6 +155,7 @@ pub fn CanvasNode(
     on_field_toggle: EventHandler<()>,
     on_display_action: EventHandler<NodeDisplayAction>,
     dimmed: bool,
+    #[props(default = false)] hidden: bool,
     highlighted_fields: Vec<String>,
     highlighted_role_ports: Vec<String>,
 ) -> Element {
@@ -265,8 +268,14 @@ pub fn CanvasNode(
         (false, false, _) => "klinx-node",
     };
     // Append the dim modifier when this node is outside the revealed field's
-    // lineage closure; an undimmed card keeps exactly its classic class string.
+    // lineage closure (Highlight mode); an undimmed card keeps exactly its classic
+    // class string. Filter mode hides the card instead (#123) — `--hidden` sets
+    // `display:none`, removing it from layout while keeping its key/identity stable
+    // so the component memoizes and re-appears unchanged when the reveal clears.
     let mut node_class = base_class.to_string();
+    if hidden {
+        node_class.push_str(" klinx-node--hidden");
+    }
     if dimmed {
         node_class.push_str(" klinx-node--dimmed");
     }

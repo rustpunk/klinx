@@ -1160,42 +1160,112 @@ pub fn lineage_closure(edges: &[FieldEdge], node: usize, field: &str) -> HashSet
 /// lineage at once is permitted ONLY on explicit click (one column on demand) —
 /// hover stays 1-hop to avoid flooding the canvas.
 pub fn field_lineage_full(edges: &[FieldEdge], node: usize, field: &str) -> HashSet<usize> {
-    // The canvas value/influence toggle is deferred to PR5 (the dual value/influence
-    // ribbon). This walk stays KIND-AGNOSTIC so INDIRECT edges are never permanently
-    // invisible on the canvas; the Inspector trace tree carries its own INDIRECT
-    // include/exclude toggle (#153), scoped to that surface.
+    field_lineage_full_capped(edges, node, field, None)
+}
+
+/// [`field_lineage_full`] with a deterministic per-direction hop cap (#123).
+///
+/// `hop_cap` bounds how many edges deep each directed walk (provenance and
+/// impact) is allowed to expand. `None` is the uncapped walk — identical to
+/// [`field_lineage_full`], which delegates here with `None`. `Some(n)` keeps only
+/// the edges reachable within `n` hops of the anchor in each direction:
+///  - `Some(0)` yields the empty set (no edge is within zero hops);
+/// - `Some(1)` yields exactly the anchor's directly-incident edges in both
+///   directions (the 1-hop neighbourhood, like [`lineage_closure`]);
+/// - each larger `n` is a SUPERSET of the previous (the bounded set grows
+///   monotonically), so the canvas "expand further" affordance can raise the cap
+///   and only ever reveal more, never reshuffle what was already shown.
+///
+/// The bound is on edge DEPTH (the BFS layer at which an edge is first crossed),
+/// not on endpoint count, so a large fan-out at one depth does not consume the
+/// budget. The walk is breadth-first per depth layer with a per-direction visited
+/// set, so the same `(edges, node, field, hop_cap)` always yields the same set —
+/// the determinism the cap-level tests assert.
+///
+/// The walk stays KIND-AGNOSTIC (the canvas value/influence toggle is deferred to
+/// PR5's dual value/influence ribbon) so INDIRECT edges are never permanently
+/// invisible on the canvas; the Inspector trace tree carries its own INDIRECT
+/// include/exclude toggle (#153), scoped to that surface.
+pub fn field_lineage_full_capped(
+    edges: &[FieldEdge],
+    node: usize,
+    field: &str,
+    hop_cap: Option<usize>,
+) -> HashSet<usize> {
     let mut result: HashSet<usize> = HashSet::new();
 
     // Upstream (provenance): follow edges INTO the current endpoint, back to
     // origins. Downstream (impact): follow edges OUT to sinks. Each direction is
     // its own breadth-first walk over the (node, field) endpoint graph, with its
     // own visited set; both deposit edge indices into the shared `result`.
+    //
+    // The frontier is drained one full DEPTH LAYER at a time (`depth` counts the
+    // layers already crossed), so `hop_cap` can stop expansion at a precise edge
+    // depth — a depth-first pop order would make the cap order-sensitive.
     for forward in [false, true] {
         let mut seen: HashSet<(usize, String)> = HashSet::new();
         let start = (node, field.to_string());
         seen.insert(start.clone());
         let mut frontier = vec![start];
-        while let Some((n, f)) = frontier.pop() {
-            for (i, e) in edges.iter().enumerate() {
-                // Forward walk steps producer→consumer (match the `from` side and
-                // hop to `to`); backward walk steps consumer→producer.
-                let next = if forward && e.from_node == n && e.from_field == f {
-                    Some((e.to_node, e.to_field.clone()))
-                } else if !forward && e.to_node == n && e.to_field == f {
-                    Some((e.from_node, e.from_field.clone()))
-                } else {
-                    None
-                };
-                if let Some(other) = next {
-                    result.insert(i);
-                    if seen.insert(other.clone()) {
-                        frontier.push(other);
+        let mut depth = 0usize;
+        while !frontier.is_empty() {
+            if hop_cap.is_some_and(|cap| depth >= cap) {
+                break;
+            }
+            let mut next_frontier: Vec<(usize, String)> = Vec::new();
+            for (n, f) in frontier.drain(..) {
+                for (i, e) in edges.iter().enumerate() {
+                    // Forward walk steps producer→consumer (match the `from` side
+                    // and hop to `to`); backward walk steps consumer→producer.
+                    let next = if forward && e.from_node == n && e.from_field == f {
+                        Some((e.to_node, e.to_field.clone()))
+                    } else if !forward && e.to_node == n && e.to_field == f {
+                        Some((e.from_node, e.from_field.clone()))
+                    } else {
+                        None
+                    };
+                    if let Some(other) = next {
+                        result.insert(i);
+                        if seen.insert(other.clone()) {
+                            next_frontier.push(other);
+                        }
                     }
                 }
             }
+            frontier = next_frontier;
+            depth += 1;
         }
     }
     result
+}
+
+/// The Filter-mode keep-set of NODE indices for an active reveal (#123).
+///
+/// Given the participating field-edge indices of a reveal (the closure from
+/// [`field_lineage_full`]/[`field_lineage_full_capped`] or [`lineage_closure`])
+/// and the anchor node, returns every node index that Filter mode must KEEP
+/// visible: the anchor plus both endpoints of every participating edge. A node not
+/// in this set is off-path clutter that Filter mode hides.
+///
+/// WHY endpoints-of-participating-edges suffices to avoid dangling partial paths:
+/// the closure walks the anchor's full transitive up+down lineage, so every node
+/// on a connecting path between two kept nodes is itself an endpoint of some
+/// participating edge — there are no gaps to bridge. An edge is therefore safe to
+/// draw iff BOTH its endpoints are in this set; the caller filters node-level
+/// connectors on exactly that predicate, so no half-edge can dangle to a hidden
+/// card. The anchor is included even when it has no resolved edges (a leaf column
+/// selected on a single-node graph) so the selected card never hides itself.
+pub fn lineage_keep_nodes<'a>(
+    participating_edges: impl IntoIterator<Item = &'a FieldEdge>,
+    anchor_node: usize,
+) -> HashSet<usize> {
+    let mut keep: HashSet<usize> = HashSet::new();
+    keep.insert(anchor_node);
+    for edge in participating_edges {
+        keep.insert(edge.from_node);
+        keep.insert(edge.to_node);
+    }
+    keep
 }
 
 #[cfg(test)]
@@ -1590,6 +1660,231 @@ mod tests {
             field_lineage_full(&edges, 2, "kept").contains(&2),
             "selecting an INDIRECT edge's target must reveal that edge"
         );
+    }
+
+    /// A linear derive chain `0.f -> 1.f -> 2.f -> ... -> len.f`, with edge index
+    /// `i` carrying node `i` to node `i+1`. Selecting node 0 walks the whole chain
+    /// downstream; the edge crossed at depth `d` (0-indexed) is edge `d`.
+    fn linear_chain(len: usize) -> Vec<FieldEdge> {
+        (0..len)
+            .map(|i| FieldEdge {
+                from_node: i,
+                from_field: "f".to_string(),
+                to_node: i + 1,
+                to_field: "f".to_string(),
+                kind: FieldEdgeKind::Derive,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// #123: the hop cap bounds the closure to exactly the edges within `n` hops of
+    /// the anchor, per direction. On a long downstream chain selected at its head,
+    /// `Some(n)` keeps exactly edges `0..n`; `Some(0)` is empty; `None` is the
+    /// whole chain. The bounded set is computed at the helper level so it is unit-
+    /// testable without the canvas.
+    #[test]
+    fn hop_cap_bounds_closure_to_exact_depth() {
+        let edges = linear_chain(6); // 0.f -> 1.f -> ... -> 6.f (6 edges)
+
+        // Zero hops reveals nothing — no edge is within zero steps of the anchor.
+        assert!(field_lineage_full_capped(&edges, 0, "f", Some(0)).is_empty());
+
+        // From the head, only downstream edges exist; `Some(n)` keeps edges 0..n.
+        assert_eq!(
+            field_lineage_full_capped(&edges, 0, "f", Some(1)),
+            HashSet::from([0]),
+            "1-hop keeps exactly the anchor's incident edge",
+        );
+        assert_eq!(
+            field_lineage_full_capped(&edges, 0, "f", Some(3)),
+            HashSet::from([0, 1, 2]),
+            "3-hop keeps exactly the first three chain edges",
+        );
+
+        // A cap at or beyond the chain length equals the uncapped walk.
+        let uncapped = field_lineage_full(&edges, 0, "f");
+        assert_eq!(uncapped, HashSet::from([0, 1, 2, 3, 4, 5]));
+        assert_eq!(
+            field_lineage_full_capped(&edges, 0, "f", Some(6)),
+            uncapped,
+            "a cap == chain length matches the uncapped closure",
+        );
+        assert_eq!(
+            field_lineage_full_capped(&edges, 0, "f", Some(99)),
+            uncapped,
+            "a cap beyond the chain length matches the uncapped closure",
+        );
+        assert_eq!(
+            field_lineage_full_capped(&edges, 0, "f", None),
+            uncapped,
+            "None is the uncapped closure",
+        );
+    }
+
+    /// #123: the cap counts hops PER DIRECTION. Selecting a mid-chain anchor with
+    /// `Some(2)` reaches two edges upstream AND two downstream of the anchor, so a
+    /// symmetric anchor yields a symmetric four-edge window.
+    #[test]
+    fn hop_cap_counts_each_direction_independently() {
+        let edges = linear_chain(6); // edges 0..6 across nodes 0..7
+        // Anchor node 3 sits between incoming edge 2 (2->3) and outgoing edge 3
+        // (3->4). Two hops up reaches edges 2,1; two hops down reaches edges 3,4.
+        assert_eq!(
+            field_lineage_full_capped(&edges, 3, "f", Some(2)),
+            HashSet::from([1, 2, 3, 4]),
+            "a 2-hop cap window is two edges up and two edges down of the anchor",
+        );
+    }
+
+    /// #123: raising the cap expands the bounded set MONOTONICALLY — each larger
+    /// cap is a superset of the smaller — so "expand further" only ever reveals
+    /// more, never reshuffles. Recomputed in a fresh loop each run; the assertion
+    /// holds regardless of `HashSet` iteration order because it compares set
+    /// membership, not ordering.
+    #[test]
+    fn hop_cap_expands_monotonically() {
+        let edges = linear_chain(8);
+        let mut prev = field_lineage_full_capped(&edges, 0, "f", Some(0));
+        assert!(prev.is_empty());
+        for cap in 1..=8 {
+            let cur = field_lineage_full_capped(&edges, 0, "f", Some(cap));
+            assert!(
+                prev.is_subset(&cur),
+                "cap {cap} must be a superset of cap {}: {prev:?} ⊄ {cur:?}",
+                cap - 1,
+            );
+            assert_eq!(
+                cur.len(),
+                cap,
+                "each added hop reveals exactly one more chain edge",
+            );
+            prev = cur;
+        }
+    }
+
+    /// #123: the capped walk is DETERMINISTIC — identical input yields an identical
+    /// set every time. Run repeatedly with a branchy graph (multiple producers and
+    /// consumers per endpoint exercise `HashSet`-ordered iteration) to prove the
+    /// breadth-first layering does not let map ordering leak into the result.
+    #[test]
+    fn hop_cap_is_deterministic_across_runs() {
+        // A diamond that re-converges: 0.a feeds both 1.b and 1.c, which both feed
+        // 2.d; plus a longer tail 2.d -> 3.e -> 4.g.
+        let derive = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            kind: FieldEdgeKind::Derive,
+            ..Default::default()
+        };
+        let edges = vec![
+            derive(0, "a", 1, "b"),
+            derive(0, "a", 1, "c"),
+            derive(1, "b", 2, "d"),
+            derive(1, "c", 2, "d"),
+            derive(2, "d", 3, "e"),
+            derive(3, "e", 4, "g"),
+        ];
+        let baseline = field_lineage_full_capped(&edges, 0, "a", Some(2));
+        // Two hops down from 0.a: edges {0,1} (depth 1) then {2,3} (depth 2); the
+        // 2.d -> 3.e edge is depth 3 and excluded.
+        assert_eq!(baseline, HashSet::from([0, 1, 2, 3]));
+        for _ in 0..64 {
+            assert_eq!(
+                field_lineage_full_capped(&edges, 0, "a", Some(2)),
+                baseline,
+                "the capped closure must be identical on every run",
+            );
+        }
+    }
+
+    /// #123: the Filter keep-set is exactly the anchor plus the endpoints of every
+    /// participating edge, and an edge is safe to draw iff BOTH endpoints are kept
+    /// — so Filter mode hides off-path clutter with no dangling partial paths AND
+    /// retains every node on a connecting path between two kept nodes.
+    #[test]
+    fn filter_keep_set_has_no_dangling_paths() {
+        // Two independent chains share node 1 as a hub:
+        //   on-path:  0.a -> 1.a -> 2.a   (the anchor's lineage)
+        //   off-path: 9.z -> 1.z          (touches the hub but not the anchor field)
+        let derive = |fnode: usize, ff: &str, tnode: usize, tf: &str| FieldEdge {
+            from_node: fnode,
+            from_field: ff.to_string(),
+            to_node: tnode,
+            to_field: tf.to_string(),
+            kind: FieldEdgeKind::Derive,
+            ..Default::default()
+        };
+        let edges = vec![
+            derive(0, "a", 1, "a"), // 0: on-path
+            derive(1, "a", 2, "a"), // 1: on-path
+            derive(9, "z", 1, "z"), // 2: off-path (different field on the hub node)
+        ];
+
+        // Select the chain head 0.a: the closure is the directed lineage of `a`.
+        let closure = field_lineage_full(&edges, 0, "a");
+        assert_eq!(
+            closure,
+            HashSet::from([0, 1]),
+            "off-path edge 2 is excluded"
+        );
+
+        let participating: Vec<&FieldEdge> = closure.iter().map(|&i| &edges[i]).collect();
+        let keep = lineage_keep_nodes(participating.iter().copied(), 0);
+
+        // The keep-set is exactly the anchor's lineage nodes 0,1,2.
+        assert_eq!(keep, HashSet::from([0, 1, 2]));
+        // The off-path producer node 9 (only reachable via the unrelated `z` edge)
+        // is excluded — Filter mode hides it.
+        assert!(!keep.contains(&9), "off-path node must be filtered out");
+
+        // No dangling edges: every participating edge has BOTH endpoints kept, so
+        // the canvas's both-endpoints-kept draw predicate never leaves a half-edge.
+        for edge in &participating {
+            assert!(
+                keep.contains(&edge.from_node) && keep.contains(&edge.to_node),
+                "a kept edge has both endpoints in the keep-set: {edge:?}",
+            );
+        }
+
+        // The off-path edge fails the both-endpoints predicate (node 9 absent), so
+        // it would not be drawn — confirming the predicate suppresses it.
+        let off_path = &edges[2];
+        assert!(
+            !(keep.contains(&off_path.from_node) && keep.contains(&off_path.to_node)),
+            "an off-path edge is suppressed by the both-endpoints-kept predicate",
+        );
+    }
+
+    /// #123: a node that lies on a connecting path BETWEEN two kept endpoints (a
+    /// midpoint of the anchor's transitive lineage) is itself retained — the
+    /// closure yields full up+down paths, so participating nodes form connected
+    /// paths with no interior gap.
+    #[test]
+    fn filter_keep_set_retains_connecting_path_midpoint() {
+        let edges = linear_chain(4); // 0.f -> 1.f -> 2.f -> 3.f -> 4.f
+        // Select the MIDDLE node 2: its lineage spans the whole chain (up to 0,
+        // down to 4). Every interior node 1,2,3 — including the midpoints between
+        // the kept ends 0 and 4 — must be retained.
+        let closure = field_lineage_full(&edges, 2, "f");
+        let participating: Vec<&FieldEdge> = closure.iter().map(|&i| &edges[i]).collect();
+        let keep = lineage_keep_nodes(participating.iter().copied(), 2);
+        assert_eq!(
+            keep,
+            HashSet::from([0, 1, 2, 3, 4]),
+            "every node on the connecting path between the kept ends is retained",
+        );
+    }
+
+    /// #123: the anchor is always kept, even with NO participating edges (a leaf
+    /// column on a single-node graph), so a Filter reveal never hides the very card
+    /// the user selected.
+    #[test]
+    fn filter_keep_set_always_retains_lonely_anchor() {
+        let keep = lineage_keep_nodes(std::iter::empty(), 7);
+        assert_eq!(keep, HashSet::from([7]));
     }
 
     /// `group_endpoints_by_node` records BOTH sides of every supplied edge under

@@ -78,6 +78,10 @@ pub fn AppShell() -> Element {
     // no-op. See the error-settle effect below.
     let mut error_settle_gen = use_signal(|| 0u64);
     let channel_view_mode = use_signal(|| ChannelViewMode::Raw);
+    // How a field-lineage reveal treats the off-path graph (#123). A UI
+    // preference like `channel_view_mode` — it persists across tab switches
+    // rather than resetting per tab.
+    let lineage_reveal_mode = use_signal(crate::state::LineageRevealMode::default);
     let compiled_plan: Signal<Option<std::sync::Arc<clinker_plan::plan::CompiledPlan>>> =
         use_signal(|| None);
     let composition_drill_stack: Signal<Vec<crate::state::CompositionDrillFrame>> =
@@ -350,6 +354,7 @@ pub fn AppShell() -> Element {
         edit_source,
         schema_warnings,
         channel_view_mode,
+        lineage_reveal_mode,
         compiled_plan,
         composition_drill_stack,
     };

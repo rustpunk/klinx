@@ -8,10 +8,10 @@ use dioxus::prelude::*;
 use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
 use crate::pipeline_view::{
     CanvasConnectorPath, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow, NODE_WIDTH,
-    RoleEdge, StagePortSide, StageView, field_lineage_full, fit_transform, group_endpoints_by_node,
-    layout_bounds, lineage_closure,
+    RoleEdge, StagePortSide, StageView, field_lineage_full, field_lineage_full_capped,
+    fit_transform, group_endpoints_by_node, layout_bounds, lineage_closure, lineage_keep_nodes,
 };
-use crate::state::{ChannelViewMode, current_pipeline_view, use_app_state};
+use crate::state::{ChannelViewMode, LineageRevealMode, current_pipeline_view, use_app_state};
 
 use super::connector::{
     Connector, ConnectorEndpoints, ConnectorObstacle, FieldConnector, obstacle_aware_channel_paths,
@@ -20,6 +20,19 @@ use super::node::{
     CanvasNode, FieldDisplayInfo, GlobalNodeDisplayMode, NodeDisplayAction, ResolvedNodeDisplayMode,
 };
 use super::{CanvasHover, HoverTarget, LineageTarget, PinnedField};
+
+/// One node-level connector ready to render: its endpoint node indices (for the
+/// Filter-mode keep-set check, #123), the resolved endpoint [`StageView`]s, the
+/// source branch port (if it leaves a Route), and the routed path.
+#[derive(Clone, PartialEq)]
+struct CanvasConnection {
+    from_index: usize,
+    to_index: usize,
+    from: StageView,
+    to: StageView,
+    from_branch: Option<usize>,
+    path: Option<CanvasConnectorPath>,
+}
 
 /// Resolved world-space endpoints + accent for one field-lineage cable.
 ///
@@ -100,6 +113,34 @@ const SMALL_GRAPH_FIELD_LIMIT: usize = 12;
 const WIDE_SCHEMA_FIELD_LIMIT: usize = FIELD_ROW_CAP;
 const AUTO_COMPACT_ZOOM: f32 = 0.55;
 const AUTO_PREVIEW_ZOOM: f32 = 0.95;
+/// Default per-direction hop cap for a SELECTED field's transitive lineage reveal
+/// in FILTER mode (#123). Bounds the closure walk so a runaway lineage on a large
+/// graph stays readable, while sitting comfortably ABOVE the deepest closure in any
+/// bundled example (deepest 7 hops; generous headroom) so the default Filter reveal
+/// is unclipped on real examples. Only a pathologically deep closure is clipped, and
+/// then the "expand further" affordance raises it by [`HOP_CAP_STEP`]; a cap at/beyond
+/// the lineage depth equals the uncapped walk. Highlight mode is never capped (see
+/// [`reveal_closure_cap`]); hover reveals are already 1-hop and never capped. The
+/// `default_hop_cap_does_not_clip_example_pipelines` guard locks this against the
+/// bundled examples.
+const DEFAULT_HOP_CAP: usize = 16;
+/// How far each "expand further" click raises the active hop cap (#123).
+const HOP_CAP_STEP: usize = 8;
+
+/// The hop cap to apply to a selected/pinned reveal's closure for `mode` (#123).
+///
+/// Filter mode HIDES off-path cards, so a bounded closure is the readability win
+/// (and the EXPAND+ affordance un-clips it) → `Some(hop_cap)`. Highlight mode only
+/// DIMS (never hides), so it keeps the FULL, uncapped closure → `None`, preserving
+/// the pre-#123 selected-field reveal at ANY lineage depth (the "#123: Highlight
+/// preserves current selected-field behavior" acceptance criterion, honored for
+/// every pipeline, not just ones shallower than the cap).
+fn reveal_closure_cap(mode: LineageRevealMode, hop_cap: usize) -> Option<usize> {
+    match mode {
+        LineageRevealMode::Filter => Some(hop_cap),
+        LineageRevealMode::Highlight => None,
+    }
+}
 #[derive(Clone, Debug, Default, PartialEq)]
 struct FieldDisplayState {
     visible_limit: usize,
@@ -686,6 +727,7 @@ struct DragState {
 #[component]
 pub fn CanvasPanel() -> Element {
     let state = use_app_state();
+    let tab_mgr = use_context::<crate::state::TabManagerState>();
     let mut field_display_states = use_signal(HashMap::<String, FieldDisplayState>::new);
     let mut global_field_query = use_signal(String::new);
     let mut global_node_display_mode = use_signal(|| GlobalNodeDisplayMode::Auto);
@@ -705,7 +747,20 @@ pub fn CanvasPanel() -> Element {
     // ── Non-reactive drag state — hot path, no re-renders during drag ─────────
     let drag = use_hook(|| Rc::new(RefCell::new(DragState::default())));
 
+    // Per-direction hop cap for the SELECTED column's transitive reveal (#123).
+    // Bounds a deep lineage so a large closure stays readable; "expand further"
+    // raises it, and the view-swap effect resets it so a cap never carries across
+    // graphs. Canvas-local because it is a transient reveal control, not tab state.
+    let mut hop_cap = use_signal(|| DEFAULT_HOP_CAP);
+
     let view_mode = *state.channel_view_mode.read();
+    // How the active reveal treats off-path nodes: Highlight dims them (today's
+    // behavior), Filter hides them (#123). Read once per render and shared by the
+    // dim/hide branch below and the toolbar toggle.
+    let reveal_mode = *state.lineage_reveal_mode.read();
+    let active_hop_cap = *hop_cap.read();
+    let is_filter_mode = reveal_mode == LineageRevealMode::Filter;
+    let closure_cap = reveal_closure_cap(reveal_mode, active_hop_cap);
     let pipeline_view = current_pipeline_view(state);
     let pipeline_view =
         apply_canvas_layout(pipeline_view, CanvasLayoutEngine::PortAwareSugiyama).view;
@@ -762,7 +817,7 @@ pub fn CanvasPanel() -> Element {
     let hover_target = hovered_field.0.read().clone();
     let (closure, role_closure): (HashSet<usize>, HashSet<usize>) = match &pinned_selection {
         Some(LineageTarget::Field(node, field)) => {
-            let field_closure = field_lineage_full(&field_edges, *node, field);
+            let field_closure = field_lineage_full_capped(&field_edges, *node, field, closure_cap);
             let mut fields_by_node = field_endpoint_names_by_node(&field_edges, &field_closure);
             fields_by_node
                 .entry(*node)
@@ -778,10 +833,11 @@ pub fn CanvasPanel() -> Element {
                 let Some(edge) = role_edges.get(*role_index) else {
                     continue;
                 };
-                field_closure.extend(field_lineage_full(
+                field_closure.extend(field_lineage_full_capped(
                     &field_edges,
                     edge.from_node,
                     &edge.from_field,
+                    closure_cap,
                 ));
             }
             (field_closure, role_closure)
@@ -958,12 +1014,7 @@ pub fn CanvasPanel() -> Element {
         .collect();
     let connection_channel_paths =
         obstacle_aware_channel_paths(&connection_endpoints, &connector_obstacles);
-    let connections: Vec<(
-        StageView,
-        StageView,
-        Option<usize>,
-        Option<CanvasConnectorPath>,
-    )> = connections_model
+    let connections: Vec<CanvasConnection> = connections_model
         .iter()
         .enumerate()
         .map(|(edge_index, c)| {
@@ -975,12 +1026,14 @@ pub fn CanvasPanel() -> Element {
                 .get(edge_index)
                 .filter(|path| path.points.len() >= 2)
                 .cloned();
-            (
-                stages[c.from].clone(),
-                stages[c.to].clone(),
-                c.from_branch,
-                dynamic_path.or(layout_path),
-            )
+            CanvasConnection {
+                from_index: c.from,
+                to_index: c.to,
+                from: stages[c.from].clone(),
+                to: stages[c.to].clone(),
+                from_branch: c.from_branch,
+                path: dynamic_path.or(layout_path),
+            }
         })
         .collect();
 
@@ -1017,6 +1070,14 @@ pub fn CanvasPanel() -> Element {
         let pipeline_present = state.pipeline.read().is_some();
         let plan_present = state.compiled_plan.read().is_some();
         let partial_present = state.partial_pipeline.read().is_some();
+        // The active tab id distinguishes two DIFFERENT loaded pipelines that share
+        // the same fingerprint otherwise (both top-level, no drill, same channel
+        // mode) — without it, switching between two pipeline tabs leaves the present
+        // booleans unchanged and the effect never re-runs, carrying a stale hover /
+        // pin / hop cap onto a different graph (#123 acceptance: no stale state
+        // pointing at another graph). Tab identity lives on `TabManagerState`, not
+        // `AppState`.
+        let active_tab = *tab_mgr.active_tab_id.read();
         // Bind the fingerprint so the reads above are retained as subscriptions.
         let _ = (
             &comp_ids,
@@ -1025,6 +1086,7 @@ pub fn CanvasPanel() -> Element {
             pipeline_present,
             plan_present,
             partial_present,
+            active_tab,
         );
 
         let mut hovered = hovered_field;
@@ -1033,6 +1095,10 @@ pub fn CanvasPanel() -> Element {
         pinned.0.set(None);
         let mut selected_field = state.selected_field;
         selected_field.set(None);
+        // Reset the reveal depth so a cap raised on the old graph never carries
+        // into the new one (#123). The reveal MODE is a persistent UI preference
+        // and is intentionally NOT reset here.
+        hop_cap.set(DEFAULT_HOP_CAP);
 
         if node_display_overrides
             .peek()
@@ -1140,6 +1206,70 @@ pub fn CanvasPanel() -> Element {
             .collect::<HashMap<_, _>>();
     // Any field hovered with a non-empty closure dims the rest of the canvas.
     let hover_active = !active_field_edges.is_empty() || !active_role_edges.is_empty();
+
+    // The node anchoring the active reveal — a pinned/selected column wins over a
+    // hover, mirroring the closure dispatch above. Used as the Filter keep-set's
+    // seed so the selected card is never hidden, even with no resolved edges.
+    let anchor_node: Option<usize> = match &pinned_selection {
+        Some(LineageTarget::Field(node, _) | LineageTarget::RolePort(node, _)) => Some(*node),
+        None => match &hover_target {
+            HoverTarget::Field(node, _) | HoverTarget::RolePort(node, _) => Some(*node),
+            HoverTarget::None => None,
+        },
+    };
+
+    // Filter mode (#123): the set of node indices to KEEP visible while a reveal is
+    // active — the anchor plus every endpoint of a participating (resolved) field
+    // edge. `lineage_keep_nodes` is the tested helper that guarantees no dangling
+    // path (an edge is kept only when BOTH endpoints are kept). The role-edge
+    // endpoints are folded in too, so a role port on a kept connecting path does
+    // not vanish; both edge kinds share the node-index space. Computed ONLY when
+    // Filter mode is actually suppressing a reveal, so Highlight mode pays nothing
+    // and keeps byte-for-byte its prior behavior.
+    let filter_keep_nodes: Option<HashSet<usize>> = if is_filter_mode && hover_active {
+        let participating_field_edges = active_field_edges.iter().map(|(ei, _)| &field_edges[*ei]);
+        let mut keep =
+            lineage_keep_nodes(participating_field_edges, anchor_node.unwrap_or_default());
+        for (ei, _) in &active_role_edges {
+            let edge = &role_edges[*ei];
+            keep.insert(edge.from_node);
+            keep.insert(edge.to_node);
+        }
+        Some(keep)
+    } else {
+        None
+    };
+
+    // Whether raising the hop cap would reveal MORE of the SELECTED column's
+    // lineage (#123). Only meaningful in Filter mode — Highlight keeps the full
+    // uncapped closure, so there is never anything to expand there. True when a
+    // column OR role port is pinned/selected and its uncapped closure strictly
+    // exceeds the (capped) `closure` already computed above — i.e. the cap is
+    // currently clipping. Reuses `closure`/`role_closure` rather than recomputing
+    // the capped walk; the uncapped walk runs only in this Filter+pinned case, so
+    // Highlight and idle hovers pay nothing. Hover reveals are 1-hop, never capped.
+    let can_expand_lineage: bool = is_filter_mode
+        && match &pinned_selection {
+            Some(LineageTarget::Field(node, field)) => {
+                field_lineage_full(&field_edges, *node, field).len() > closure.len()
+            }
+            Some(LineageTarget::RolePort(_, _)) => {
+                // The role-port closure is the union of its source fields' lineage;
+                // compare the uncapped union against the capped `closure`.
+                let mut uncapped: HashSet<usize> = HashSet::new();
+                for role_index in &role_closure {
+                    if let Some(edge) = role_edges.get(*role_index) {
+                        uncapped.extend(field_lineage_full(
+                            &field_edges,
+                            edge.from_node,
+                            &edge.from_field,
+                        ));
+                    }
+                }
+                uncapped.len() > closure.len()
+            }
+            None => false,
+        };
 
     // Bounding box of the current layout (None when empty). `LayoutBounds` is
     // Copy, so each fit handler captures it without cloning the stage list.
@@ -1303,8 +1433,7 @@ pub fn CanvasPanel() -> Element {
         })
         .collect();
 
-    // Channel view mode toggle state
-    let tab_mgr = use_context::<crate::state::TabManagerState>();
+    // Channel view mode toggle state (`tab_mgr` captured once at the top).
     let has_channel = tab_mgr
         .channel_state
         .read()
@@ -1315,6 +1444,10 @@ pub fn CanvasPanel() -> Element {
     rsx! {
         div {
             class: "klinx-canvas-column",
+            // Surface the active reveal mode as a data attribute (consistent with
+            // `data-layout`/`data-context`), so CSS and PR5's focus toggle can key
+            // off it without re-reading the signal (#123).
+            "data-reveal-mode": reveal_mode.as_data_attr(),
 
             // ── Breadcrumb bar (composition drill-in navigation) ─────────
             {
@@ -1351,6 +1484,36 @@ pub fn CanvasPanel() -> Element {
                     },
                     span { class: "klinx-view-toggle-label",
                         if is_resolved { "RESOLVED" } else { "RAW" }
+                    }
+                }
+
+                // ── Lineage reveal-mode toggle (#123) ────────────────────────
+                // Highlight dims off-path nodes (default); Filter hides them while
+                // keeping connecting paths. Shared per-tab state reused by PR5.
+                button {
+                    class: if is_filter_mode { "klinx-view-toggle klinx-view-toggle--active" } else { "klinx-view-toggle" },
+                    title: if is_filter_mode { "Filter mode: off-path nodes are hidden. Click to dim them instead." } else { "Highlight mode: off-path nodes are dimmed. Click to hide them instead." },
+                    onclick: move |_| {
+                        let mut mode = state.lineage_reveal_mode;
+                        let next = mode.read().toggled();
+                        mode.set(next);
+                    },
+                    span { class: "klinx-view-toggle-label", "{reveal_mode.label()}" }
+                }
+
+                // ── Expand-further affordance (#123) ─────────────────────────
+                // Raises the active hop cap, revealing more of a deep selected
+                // lineage. Shown only when the cap is currently clipping the
+                // closure (more lineage exists past the bound).
+                if can_expand_lineage {
+                    button {
+                        class: "klinx-view-toggle klinx-lineage-expand",
+                        title: "Reveal more of this column's lineage (raise the hop limit)",
+                        onclick: move |_| {
+                            let next = hop_cap.peek().saturating_add(HOP_CAP_STEP);
+                            hop_cap.set(next);
+                        },
+                        span { class: "klinx-view-toggle-label", "EXPAND +" }
                     }
                 }
 
@@ -1476,13 +1639,21 @@ pub fn CanvasPanel() -> Element {
                     // cables in the active overlay read clearly against it.
                     g {
                         class: if hover_active { "klinx-canvas-edges klinx-canvas-edges--recede" } else { "klinx-canvas-edges" },
-                        for (from, to, from_branch, path) in connections {
-                            Connector {
-                                key: "{from.id}-{to.id}-{from_branch:?}",
-                                from,
-                                to,
-                                from_branch,
-                                path,
+                        for conn in connections {
+                            // Filter mode (#123): draw a node-level connector only
+                            // when BOTH endpoints survive the keep-set, so a cable
+                            // never dangles to a hidden card. Highlight mode keeps
+                            // every connector (`keep` is None) and only recedes it.
+                            if filter_keep_nodes.as_ref().is_none_or(|keep| {
+                                keep.contains(&conn.from_index) && keep.contains(&conn.to_index)
+                            }) {
+                                Connector {
+                                    key: "{conn.from.id}-{conn.to.id}-{conn.from_branch:?}",
+                                    from: conn.from,
+                                    to: conn.to,
+                                    from_branch: conn.from_branch,
+                                    path: conn.path,
+                                }
                             }
                         }
                     }
@@ -1581,8 +1752,14 @@ pub fn CanvasPanel() -> Element {
                                 }
                             }
                         },
-                        // Dim cards outside the revealed field's lineage closure.
-                        dimmed: hover_active && !participating_nodes.contains(&index),
+                        // Highlight mode: dim cards outside the revealed field's
+                        // lineage closure (today's behavior). In Filter mode no card
+                        // is dimmed — off-path cards are HIDDEN instead (#123).
+                        dimmed: hover_active && filter_keep_nodes.is_none() && !participating_nodes.contains(&index),
+                        // Filter mode: hide cards outside the keep-set so only the
+                        // connecting paths remain. `keep` is None outside Filter mode,
+                        // so this is always false in Highlight mode.
+                        hidden: filter_keep_nodes.as_ref().is_some_and(|keep| !keep.contains(&index)),
                         highlighted_fields: highlighted_by_node.remove(&index).unwrap_or_default(),
                         highlighted_role_ports: highlighted_role_ports_by_node.remove(&index).unwrap_or_default(),
                     }
@@ -2063,6 +2240,104 @@ mod tests {
         assert!(
             block.contains("filter:"),
             "dimmed cards should recede visually without changing alpha"
+        );
+    }
+
+    /// #123: Filter mode HIDES an off-path card (`display: none`) rather than
+    /// dimming it — so the off-path card occupies no layout space and casts no
+    /// below-card stroke. The hidden modifier is distinct from `--dimmed` (which
+    /// recedes via `filter`), so Highlight mode's dim effect is untouched.
+    #[test]
+    fn filter_hidden_node_css_removes_card_from_layout() {
+        let css = include_str!("../../../assets/klinx.css");
+        let block =
+            css_rule_block(css, ".klinx-node--hidden {").expect("hidden node CSS rule (#123)");
+        assert!(
+            block.contains("display:") && block.contains("none"),
+            "a Filter-mode off-path card must be removed with display:none, got {block:?}"
+        );
+
+        // The dim rule must NOT use display:none — Highlight mode keeps the card in
+        // layout (it only recedes). This guards the two modes staying distinct.
+        let dimmed =
+            css_rule_block(css, ".klinx-node--dimmed").expect("dimmed node CSS rule still present");
+        assert!(
+            !dimmed.contains("display:"),
+            "Highlight-mode dimming must keep the card in layout, never display:none",
+        );
+    }
+
+    /// #123: the central reveal-cap invariant — Highlight is NEVER capped (full
+    /// closure at any depth, preserving the pre-#123 selected-field behavior), while
+    /// Filter caps at the active hop cap (bounded + EXPAND+ recoverable). This is the
+    /// fix for the Highlight-clips-deep-pipelines regression; a flip of the match arm
+    /// would silently re-introduce it.
+    #[test]
+    fn highlight_reveal_is_never_capped_filter_is() {
+        assert_eq!(
+            super::reveal_closure_cap(crate::state::LineageRevealMode::Highlight, 16),
+            None,
+            "Highlight mode must use the full uncapped closure at any depth"
+        );
+        assert_eq!(
+            super::reveal_closure_cap(crate::state::LineageRevealMode::Filter, 16),
+            Some(16),
+            "Filter mode bounds the closure at the active hop cap"
+        );
+    }
+
+    /// #123 guard: the [`DEFAULT_HOP_CAP`] must NOT clip the lineage of any field in
+    /// any bundled example pipeline. Highlight mode is now unconditionally UNCAPPED
+    /// (`closure_cap = None`), so it preserves the pre-#123 reveal for every pipeline
+    /// regardless of depth; the cap applies only in Filter mode. This guard keeps the
+    /// FILTER-mode default honest on the bundled examples: a default-cap Filter reveal
+    /// equals the full closure (so no example is silently hidden, and the EXPAND+
+    /// affordance does not spuriously appear on a shallow graph). If a future example
+    /// introduces a deeper closure, this fails loudly so the constant (or a
+    /// degree-based strategy) is revisited rather than silently clipping a Filter view.
+    #[test]
+    fn default_hop_cap_does_not_clip_example_pipelines() {
+        use crate::pipeline_view::{field_lineage_full, field_lineage_full_capped};
+        let examples: &[&str] = &[
+            include_str!("../../../../../examples/pipelines/audit_join.yaml"),
+            include_str!("../../../../../examples/pipelines/customer_etl.yaml"),
+            include_str!("../../../../../examples/pipelines/invoice_daily_rollup.yaml"),
+            include_str!("../../../../../examples/pipelines/invoices.yaml"),
+            include_str!("../../../../../examples/pipelines/long_field_support.yaml"),
+            include_str!("../../../../../examples/pipelines/multi_source_session.yaml"),
+            include_str!("../../../../../examples/pipelines/order_fulfillment.yaml"),
+            include_str!("../../../../../examples/pipelines/tumbling_clicks.yaml"),
+            include_str!("../../../../../examples/pipelines/layout_benchmark_order_lifecycle.yaml"),
+            include_str!("../../../../../examples/pipelines/layout_benchmark_source_reuse.yaml"),
+        ];
+        let mut checked_fields = 0usize;
+        for yaml in examples {
+            let config = parse_config(yaml).expect("bundled example pipeline parses");
+            let view = derive_pipeline_view(&config);
+            for (node, stage) in view.stages.iter().enumerate() {
+                for field in &stage.fields {
+                    let full = field_lineage_full(&view.field_edges, node, &field.name);
+                    let capped = field_lineage_full_capped(
+                        &view.field_edges,
+                        node,
+                        &field.name,
+                        Some(super::DEFAULT_HOP_CAP),
+                    );
+                    assert_eq!(
+                        capped,
+                        full,
+                        "default hop cap {} clips {}.{}'s lineage — Highlight mode would regress",
+                        super::DEFAULT_HOP_CAP,
+                        stage.id,
+                        field.name,
+                    );
+                    checked_fields += 1;
+                }
+            }
+        }
+        assert!(
+            checked_fields > 0,
+            "the guard must actually exercise some example fields",
         );
     }
 
