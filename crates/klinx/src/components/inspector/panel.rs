@@ -10,10 +10,10 @@ use super::drawer_docs::DrawerDocs;
 use super::drawer_notes::DrawerNotes;
 use super::drawer_run::DrawerRun;
 use super::model::{
-    CxlMentionView, FieldInspectorModel, InspectorBuildContext, InspectorDiagnostic, InspectorFact,
-    InspectorRow, InspectorSection, InspectorSelection, MissingInspectorModel, NodeInspectorModel,
-    RoleUsageView, SelectedInspectorModel, StatusChip, StatusTone, TraceNode,
-    build_selected_inspector, count_field_hops,
+    BoundaryHopKind, CxlMentionView, FieldInspectorModel, InspectorBuildContext,
+    InspectorDiagnostic, InspectorFact, InspectorRow, InspectorSection, InspectorSelection,
+    MissingInspectorModel, NodeInspectorModel, RoleUsageView, SelectedInspectorModel, StatusChip,
+    StatusTone, TraceNode, build_selected_inspector, count_field_hops,
 };
 use super::scoped_yaml::ScopedYamlEditor;
 
@@ -491,28 +491,66 @@ fn CxlMentionsSection(mentions: Vec<CxlMentionView>) -> Element {
     }
 }
 
-/// A stable expand-state key for a trace hop: `(stage_id, field_name, hop)` (#153).
-/// Keying expansion by the hop's IDENTITY — not its position in the flattened row
-/// list — keeps a branch's open/closed state stable across re-renders (selecting a
-/// new field, toggling the INDIRECT filter), since the same hop keeps the same key
-/// even as rows shift around it.
-type TraceKey = (String, String, usize);
+/// A stable expand-state key for a trace hop: `(stage_id, field_name, hop, scope_depth)`
+/// (#153, scope component added in #156). Keying expansion by the hop's IDENTITY — not
+/// its position in the flattened row list — keeps a branch's open/closed state stable
+/// across re-renders (selecting a new field, toggling the INDIRECT filter), since the
+/// same hop keeps the same key even as rows shift around it.
+///
+/// `scope_depth` — the number of composition walls (`Enter`/`Recursive` crossings)
+/// open above-and-including this hop — disambiguates two same-named nodes living in
+/// DIFFERENT scopes at the same hop (#156). A body node and an outer node can share a
+/// `(stage_id, field_name, hop)` triple because the body view reuses unqualified stage
+/// ids; without the scope component, collapsing one would collapse the other. The trace
+/// BFS itself already keeps these distinct (it dedups on `(scope_id, node, field)`); this
+/// mirrors that scope-awareness into the panel's expand-state key.
+type TraceKey = (String, String, usize, usize);
 
-fn trace_key(node: &TraceNode) -> TraceKey {
+/// Build a hop's [`TraceKey`] at a known scope depth. The depth is supplied by the
+/// caller (the tree walk accumulates it) because a [`TraceNode`] alone does not carry
+/// its path's open-composition count.
+fn trace_key_at(node: &TraceNode, scope_depth: usize) -> TraceKey {
     (
         node.endpoint.stage_id.clone(),
         node.endpoint.field_name.clone(),
         node.endpoint.hop,
+        scope_depth,
     )
 }
 
+/// The scope depth ON this node, given its parent's scope depth: a node whose hop is an
+/// `Enter`/`Recursive` composition crossing opens one more wall (mirroring
+/// [`super::model::max_scope_depth`]'s increment), so it and its descendants live one
+/// scope deeper. An `Exit` resurfaces but is counted at the depth it is reached at — the
+/// crossing-count on the path only ever grows, so two distinct scopes reached via
+/// different Enter chains can never collide on depth for the SAME hop number.
+fn node_scope_depth(parent_depth: usize, node: &TraceNode) -> usize {
+    match node.endpoint.boundary {
+        Some(BoundaryHopKind::Enter(_)) | Some(BoundaryHopKind::Recursive(_)) => parent_depth + 1,
+        _ => parent_depth,
+    }
+}
+
+/// Singular/plural noun for the "originated N compositions deep" summary (#156), so a
+/// single crossing reads "1 composition deep" rather than "1 compositions deep".
+fn composition_word(depth: usize) -> &'static str {
+    if depth == 1 {
+        "composition"
+    } else {
+        "compositions"
+    }
+}
+
 /// One flattened, depth-tagged row of a trace tree, ready to render in document
-/// order (#153). `has_children` drives the caret; `expanded` whether this row's
-/// children follow.
+/// order (#153). `depth` is the VISUAL indent depth; `scope_depth` is the composition
+/// nesting (#156), carried so the row reconstructs the same [`TraceKey`] the walk
+/// inserted. `has_children` drives the caret; `expanded` whether this row's children
+/// follow.
 #[derive(Clone, PartialEq)]
 struct TraceRow {
     node: TraceNode,
     depth: usize,
+    scope_depth: usize,
     has_children: bool,
     expanded: bool,
 }
@@ -520,35 +558,46 @@ struct TraceRow {
 /// Flatten a trace forest into visible rows in pre-order (parent before its
 /// children), honoring the collapsed set (#153). A collapsed node still appears as
 /// a row — only its descendants are withheld — so its caret can re-expand it.
+///
+/// `scope_depth` is the composition nesting of `nodes`' parent; each node's own scope
+/// depth (#156) is derived via [`node_scope_depth`] and folded into its [`TraceKey`],
+/// so a body node and an outer node sharing `(stage_id, field, hop)` are keyed apart.
 fn flatten_trace(
     nodes: &[TraceNode],
     expanded: &HashSet<TraceKey>,
     depth: usize,
+    scope_depth: usize,
     out: &mut Vec<TraceRow>,
 ) {
     for node in nodes {
         let has_children = !node.children.is_empty();
-        let is_expanded = expanded.contains(&trace_key(node));
+        let node_scope = node_scope_depth(scope_depth, node);
+        let is_expanded = expanded.contains(&trace_key_at(node, node_scope));
         out.push(TraceRow {
             node: node.clone(),
             depth,
+            scope_depth: node_scope,
             has_children,
             expanded: is_expanded,
         });
         if has_children && is_expanded {
-            flatten_trace(&node.children, expanded, depth + 1, out);
+            flatten_trace(&node.children, expanded, depth + 1, node_scope, out);
         }
     }
 }
 
-/// The default-expanded set for a freshly-built tree: every hop-1 (direct) child
-/// of the selected root, so the first hop is open and deeper hops start collapsed
-/// (#153).
+/// The default-expanded set for a freshly-built tree (#153): every hop-1 (direct) child
+/// of the selected root EXCEPT a composition `Enter` crossing, so the first hop is open
+/// and deeper hops start collapsed. Descending INTO a composition is opt-in (#156): an
+/// `Enter` hop stays collapsed even at hop 1, so the reader expands one wall per click
+/// rather than being dropped into a body's internals. `Recursive`/`Exit` and ordinary
+/// hop-1 nodes open as before.
 fn default_expanded(upstream: &[TraceNode], downstream: &[TraceNode]) -> HashSet<TraceKey> {
     upstream
         .iter()
         .chain(downstream.iter())
-        .map(trace_key)
+        .filter(|node| !matches!(node.endpoint.boundary, Some(BoundaryHopKind::Enter(_))))
+        .map(|node| trace_key_at(node, node_scope_depth(0, node)))
         .collect()
 }
 
@@ -638,6 +687,15 @@ fn LineageSection(field: FieldInspectorModel) -> Element {
                 span { "{upstream_count} upstream" }
                 span { "{downstream_count} downstream" }
                 span { "{field.role_usages.len()} role uses" }
+                // Cross-boundary depth (#156): how many composition walls the deepest
+                // trace path crossed. Shown only when the trace descended at all (> 0);
+                // a flat trace keeps the summary unchanged from before #156.
+                if field.max_scope_depth > 0 {
+                    span {
+                        class: "klinx-field-lineage-depth",
+                        "originated {field.max_scope_depth} {composition_word(field.max_scope_depth)} deep"
+                    }
+                }
             }
             // A field with no lineage edges shows the preserved empty-state
             // message; an edged field whose precision is degraded surfaces the
@@ -682,7 +740,7 @@ fn TraceTree(
     let is_empty = nodes.is_empty();
     let rows = use_memo(use_reactive!(|(nodes, expanded)| {
         let mut rows = Vec::new();
-        flatten_trace(&nodes, &expanded.read(), 0, &mut rows);
+        flatten_trace(&nodes, &expanded.read(), 0, 0, &mut rows);
         rows
     }));
 
@@ -727,7 +785,43 @@ fn TraceTreeRow(row: TraceRow, on_toggle: EventHandler<TraceKey>) -> Element {
     } else {
         ""
     };
-    let key = trace_key(&row.node);
+    let key = trace_key_at(&row.node, row.scope_depth);
+    // Composition-boundary crossing marker (#156): an Enter/Exit/Recursive hop names
+    // the composition wall the lineage crosses. `None` on an ordinary intra-scope hop.
+    let boundary = entry.boundary.as_ref().map(|kind| match kind {
+        BoundaryHopKind::Enter(label) => ("enter", "\u{21B3}", "enters composition", label.clone()),
+        BoundaryHopKind::Exit(label) => ("exit", "\u{21A5}", "exits composition", label.clone()),
+        BoundaryHopKind::Recursive(label) => (
+            "recursive",
+            "\u{21BA}",
+            "recursive composition",
+            label.clone(),
+        ),
+    });
+    // The precision badge's tooltip (#156). On a boundary hop, surface WHY the tier is
+    // what it is — a Recursive crossing is Approximate because the composition recurses,
+    // so the reason names the boundary rather than leaving the bare tier unexplained.
+    // Reuses the existing `entry.precision` badge (no new badge); only the tooltip is
+    // enriched. Ordinary hops keep the plain tier label.
+    let precision_title = match &entry.boundary {
+        Some(BoundaryHopKind::Recursive(label)) => format!(
+            "{} — recursive composition {label} cannot be expanded further",
+            entry.precision.precision_label()
+        ),
+        Some(BoundaryHopKind::Enter(label)) => {
+            format!(
+                "{} — lineage enters composition {label}",
+                entry.precision.precision_label()
+            )
+        }
+        Some(BoundaryHopKind::Exit(label)) => {
+            format!(
+                "{} — lineage exits composition {label}",
+                entry.precision.precision_label()
+            )
+        }
+        None => entry.precision.precision_label().to_string(),
+    };
 
     rsx! {
         div {
@@ -764,6 +858,18 @@ fn TraceTreeRow(row: TraceRow, on_toggle: EventHandler<TraceKey>) -> Element {
             span { class: "klinx-field-trace-main",
                 span { class: "klinx-field-trace-stage", "{entry.stage_label}" }
                 span { class: "klinx-field-trace-field", "{entry.field_name}" }
+                // Composition-boundary marker (#156): when this hop crosses a
+                // composition wall, name the crossing (↳ enters / ↥ exits / ↺
+                // recursive) so a cross-boundary trace reads legibly. `data-boundary`
+                // tints the base `.klinx-field-trace-boundary` rule per crossing kind.
+                if let Some((kind, glyph, verb, label)) = boundary.as_ref() {
+                    span {
+                        class: "klinx-field-trace-boundary",
+                        "data-boundary": "{kind}",
+                        span { class: "klinx-field-trace-boundary-glyph", "{glyph}" }
+                        span { class: "klinx-field-trace-boundary-text", "{verb} {label}" }
+                    }
+                }
                 // Per-hop CXL attribution (#153): the responsible statement(s) on
                 // this hop's own stage. Absent for a non-CXL stage, where the edge
                 // kind + precision badge is the attribution.
@@ -787,6 +893,7 @@ fn TraceTreeRow(row: TraceRow, on_toggle: EventHandler<TraceKey>) -> Element {
             span {
                 class: "klinx-field-trace-precision",
                 "data-precision": "{entry.precision.precision_attr()}",
+                title: "{precision_title}",
                 "{entry.precision.precision_label()}"
             }
         }
@@ -841,7 +948,7 @@ fn DrawerUnavailable(label: &'static str) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::super::model::TraceEndpointView;
+    use super::super::model::{BoundaryHopKind, TraceEndpointView};
     use super::*;
 
     /// A test `TraceNode` at `(stage, field, hop)` with the given children. Edge
@@ -866,18 +973,103 @@ mod tests {
         }
     }
 
-    /// #153: the expand key is the hop's STABLE identity `(stage_id, field_name,
-    /// hop)`, NOT its position in the flattened list — so a branch's open/closed
+    /// A test `TraceNode` carrying a composition-boundary crossing (#156): the edge
+    /// kind is `boundary` and the precision is the caller's, so the same fixture builds
+    /// an Exact `Enter` hop or an Approximate `Recursive` hop.
+    fn boundary_node(
+        stage: &str,
+        field: &str,
+        hop: usize,
+        boundary: BoundaryHopKind,
+        precision: Precision,
+        children: Vec<TraceNode>,
+    ) -> TraceNode {
+        TraceNode {
+            endpoint: TraceEndpointView {
+                stage_id: stage.to_string(),
+                stage_label: stage.to_string(),
+                stage_kind_label: "Composition",
+                stage_kind_attr: "composition",
+                field_name: field.to_string(),
+                edge_kind_label: "boundary",
+                edge_kind_attr: "boundary",
+                precision,
+                hop,
+                boundary: Some(boundary),
+            },
+            cxl_mentions: Vec::new(),
+            children,
+        }
+    }
+
+    /// #153: the expand key is the hop's STABLE identity `(stage_id, field_name, hop,
+    /// scope_depth)`, NOT its position in the flattened list — so a branch's open/closed
     /// state survives re-renders that reorder rows. Two distinct hops yield distinct
-    /// keys; the same hop yields the same key regardless of siblings.
+    /// keys; the same hop yields the same key regardless of siblings. The #156
+    /// scope-depth component is fixed at 0 here (a flat, boundary-free trace).
     #[test]
     fn trace_key_is_stable_hop_identity() {
         let a = node("mid", "y", 1, vec![]);
         let b = node("src", "x", 2, vec![]);
-        assert_eq!(trace_key(&a), ("mid".to_string(), "y".to_string(), 1));
-        assert_ne!(trace_key(&a), trace_key(&b));
+        assert_eq!(
+            trace_key_at(&a, 0),
+            ("mid".to_string(), "y".to_string(), 1, 0)
+        );
+        assert_ne!(trace_key_at(&a, 0), trace_key_at(&b, 0));
         // A clone (what a re-render produces) keeps the identical key.
-        assert_eq!(trace_key(&a), trace_key(&a.clone()));
+        assert_eq!(trace_key_at(&a, 0), trace_key_at(&a.clone(), 0));
+    }
+
+    /// #156: two same-named nodes reached in DIFFERENT composition scopes — a body
+    /// node and an outer node sharing `(stage_id, field, hop)` — get DISTINCT expand
+    /// keys via the scope-depth component, so collapsing the body node never collapses
+    /// the outer one. The body view reuses unqualified stage ids, so without the scope
+    /// component these would alias and one caret would drive both.
+    #[test]
+    fn trace_key_distinguishes_same_name_across_scopes() {
+        // `inner.v` at hop 2 reached at the top scope (depth 0)…
+        let outer = node("inner", "v", 2, vec![]);
+        // …versus the SAME `(inner, v, 2)` reached one composition wall deeper.
+        let inner = node("inner", "v", 2, vec![]);
+        assert_ne!(
+            trace_key_at(&outer, 0),
+            trace_key_at(&inner, 1),
+            "the scope-depth component must keep same-named cross-scope hops distinct"
+        );
+
+        // The whole-tree walk derives those depths itself: an Enter crossing pushes its
+        // body one scope deeper, so the body's `inner.v` is keyed at depth 1 while an
+        // outer `inner.v` stays at depth 0 — they never collide in the expand set.
+        let forest = vec![
+            // Outer occurrence of inner.v at the top scope.
+            node("inner", "v", 2, vec![]),
+            // Enter a composition, whose body ALSO has an inner.v at the same hop.
+            boundary_node(
+                "comp",
+                "v",
+                1,
+                BoundaryHopKind::Enter("comp".to_string()),
+                Precision::Exact,
+                vec![node("inner", "v", 2, vec![])],
+            ),
+        ];
+        let mut expanded = HashSet::new();
+        // Open every node so the deep inner.v is visible.
+        expanded.insert(trace_key_at(&forest[0], 0));
+        let comp_scope = node_scope_depth(0, &forest[1]);
+        expanded.insert(trace_key_at(&forest[1], comp_scope));
+        let mut rows = Vec::new();
+        flatten_trace(&forest, &expanded, 0, 0, &mut rows);
+        let inner_keys: Vec<TraceKey> = rows
+            .iter()
+            .filter(|r| r.node.endpoint.stage_id == "inner")
+            .map(|r| trace_key_at(&r.node, r.scope_depth))
+            .collect();
+        assert_eq!(inner_keys.len(), 2, "both inner.v rows are present");
+        assert_ne!(
+            inner_keys[0], inner_keys[1],
+            "the outer and in-body inner.v rows carry distinct keys"
+        );
     }
 
     /// #153: `default_expanded` opens ONLY the hop-1 (direct) children, so the first
@@ -887,10 +1079,105 @@ mod tests {
         let up = vec![node("mid", "y", 1, vec![node("src", "x", 2, vec![])])];
         let down: Vec<TraceNode> = vec![];
         let expanded = default_expanded(&up, &down);
-        assert!(expanded.contains(&("mid".to_string(), "y".to_string(), 1)));
+        assert!(expanded.contains(&("mid".to_string(), "y".to_string(), 1, 0)));
         assert!(
-            !expanded.contains(&("src".to_string(), "x".to_string(), 2)),
+            !expanded.contains(&("src".to_string(), "x".to_string(), 2, 0)),
             "deeper hops start collapsed"
+        );
+    }
+
+    /// #156: shallow-by-default descent — `default_expanded` does NOT open a hop-1
+    /// `Enter` boundary hop, so descending INTO a composition is opt-in (one caret
+    /// click per wall). An ordinary hop-1 node and a hop-1 `Recursive` leaf still open
+    /// as before; only `Enter` (a wall with a body behind it) stays collapsed.
+    #[test]
+    fn default_expanded_skips_enter_boundary_hops() {
+        let up = vec![
+            // An ordinary hop-1 hop opens by default.
+            node("mid", "y", 1, vec![]),
+            // A hop-1 Enter crossing stays collapsed — its body is opt-in.
+            boundary_node(
+                "comp",
+                "a",
+                1,
+                BoundaryHopKind::Enter("comp".to_string()),
+                Precision::Exact,
+                vec![node("body", "a", 2, vec![])],
+            ),
+        ];
+        let down: Vec<TraceNode> = vec![];
+        let expanded = default_expanded(&up, &down);
+        assert!(
+            expanded.contains(&("mid".to_string(), "y".to_string(), 1, 0)),
+            "an ordinary hop-1 node opens by default"
+        );
+        assert!(
+            !expanded.contains(&trace_key_at(&up[1], node_scope_depth(0, &up[1]))),
+            "a hop-1 Enter crossing stays collapsed: descending is opt-in"
+        );
+    }
+
+    /// #156: the precision tier of a boundary hop reaches the flattened row UNCHANGED,
+    /// so the existing per-hop precision badge renders "approximate" on a degraded
+    /// (Recursive) crossing without any new badge logic. The boundary marker itself is
+    /// also carried on the row's endpoint for the row to render.
+    #[test]
+    fn approximate_boundary_hop_reaches_row_with_precision() {
+        // A Recursive crossing is the degraded case — it carries Approximate.
+        let forest = vec![boundary_node(
+            "comp",
+            "v",
+            1,
+            BoundaryHopKind::Recursive("comp".to_string()),
+            Precision::Approximate,
+            vec![],
+        )];
+        let expanded = HashSet::new();
+        let mut rows = Vec::new();
+        flatten_trace(&forest, &expanded, 0, 0, &mut rows);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            row.node.endpoint.precision,
+            Precision::Approximate,
+            "the boundary hop's precision reaches the row unchanged for the badge"
+        );
+        assert_eq!(
+            row.node.endpoint.boundary,
+            Some(BoundaryHopKind::Recursive("comp".to_string())),
+            "the row carries the Recursive marker for the row to render"
+        );
+    }
+
+    /// #156: an `Enter` hop carries its marker through `flatten_trace` to the row, and
+    /// expanding it (one click) reveals its in-body child one scope deeper.
+    #[test]
+    fn enter_boundary_marker_and_child_reach_rows() {
+        let forest = vec![boundary_node(
+            "comp",
+            "a",
+            1,
+            BoundaryHopKind::Enter("comp".to_string()),
+            Precision::Exact,
+            vec![node("body", "a", 2, vec![])],
+        )];
+        // Expand the Enter hop (the opt-in click).
+        let mut expanded = HashSet::new();
+        expanded.insert(trace_key_at(&forest[0], node_scope_depth(0, &forest[0])));
+        let mut rows = Vec::new();
+        flatten_trace(&forest, &expanded, 0, 0, &mut rows);
+
+        assert_eq!(
+            rows[0].node.endpoint.boundary,
+            Some(BoundaryHopKind::Enter("comp".to_string())),
+            "the Enter marker reaches the row"
+        );
+        assert_eq!(rows[0].scope_depth, 1, "the Enter hop lives one wall deep");
+        // Its in-body child is revealed once the Enter hop is expanded.
+        assert!(
+            rows.iter()
+                .any(|r| r.node.endpoint.stage_id == "body" && r.scope_depth == 1),
+            "expanding the Enter hop reveals its in-body child one scope deeper"
         );
     }
 
@@ -907,9 +1194,9 @@ mod tests {
 
         // Expand only branch A's hop-1 node: A's child shows, B's stays hidden.
         let mut expanded = HashSet::new();
-        expanded.insert(("midA".to_string(), "a".to_string(), 1));
+        expanded.insert(("midA".to_string(), "a".to_string(), 1, 0));
         let mut rows = Vec::new();
-        flatten_trace(&forest, &expanded, 0, &mut rows);
+        flatten_trace(&forest, &expanded, 0, 0, &mut rows);
 
         let visible: Vec<_> = rows
             .iter()
@@ -949,6 +1236,36 @@ mod tests {
         assert!(
             css_rule_block(css, ".klinx-field-trace-cxl").is_some(),
             "the per-hop CXL line needs a CSS rule"
+        );
+        // #156: the composition-boundary marker needs its base rule, and the
+        // "originated N deep" depth summary needs its accent rule.
+        assert!(
+            css_rule_block(css, ".klinx-field-trace-boundary").is_some(),
+            "the composition-boundary marker needs a CSS rule"
+        );
+        assert!(
+            css_rule_block(css, ".klinx-field-lineage-depth").is_some(),
+            "the cross-boundary depth summary needs a CSS rule"
+        );
+    }
+
+    /// #156: the "originated N compositions deep" summary uses singular/plural nouns.
+    /// The RSX builds the string from `FieldInspectorModel.max_scope_depth` behind a
+    /// `> 0` gate (so it is absent at depth 0); this exercises the noun helper and the
+    /// exact rendered strings the gate emits at depth 1 and 2.
+    #[test]
+    fn depth_summary_word_and_string() {
+        assert_eq!(composition_word(1), "composition");
+        assert_eq!(composition_word(2), "compositions");
+        let depth = 2usize;
+        assert_eq!(
+            format!("originated {depth} {} deep", composition_word(depth)),
+            "originated 2 compositions deep"
+        );
+        let depth = 1usize;
+        assert_eq!(
+            format!("originated {depth} {} deep", composition_word(depth)),
+            "originated 1 composition deep"
         );
     }
 
