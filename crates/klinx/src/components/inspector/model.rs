@@ -956,7 +956,12 @@ fn build_field_detail(
     if field.is_correlation_key {
         badges.push("correlation key".to_string());
     }
-    if field.is_aggregate_grain {
+    // The aggregate (group-by) grain is now represented exactly once, as the
+    // INDIRECT `GroupBy` edge (#147), not a separate row flag. A field carries
+    // the grain badge when it is an endpoint of a `GroupBy` edge incident to this
+    // stage — either the group-key output row this stage produces, or the
+    // upstream column that drives it.
+    if is_group_by_grain(view, stage_index, &selection.field_name) {
         badges.push("aggregate grain".to_string());
     }
 
@@ -1044,6 +1049,7 @@ fn trace_endpoints(
     start_field: &str,
     direction: TraceDirection,
 ) -> Vec<TraceEndpointView> {
+    // PR3: add INDIRECT include/exclude toggle here
     let mut seen = HashSet::from([(start_node, start_field.to_string())]);
     let mut queue = VecDeque::from([(start_node, start_field.to_string(), 0usize)]);
     let mut out = Vec::new();
@@ -1106,6 +1112,22 @@ fn trace_endpoint(
         edge_kind_attr: edge_kind_attr(edge_kind),
         hop,
     }
+}
+
+/// Whether `field_name` on stage `stage_index` is part of an Aggregate group-by
+/// grain — i.e. it is an endpoint of a `GroupBy` [`FieldEdge`] incident to the
+/// stage (#147).
+///
+/// The grain is represented exactly once, as the INDIRECT `GroupBy` edge (the
+/// former `FieldRow::is_aggregate_grain` flag was retired). The group-key output
+/// row is the edge's `to` endpoint on the Aggregate stage; the upstream column
+/// that drives it is the `from` endpoint — both legitimately wear the badge.
+fn is_group_by_grain(view: &PipelineView, stage_index: usize, field_name: &str) -> bool {
+    view.field_edges.iter().any(|edge| {
+        edge.kind == FieldEdgeKind::GroupBy
+            && ((edge.to_node == stage_index && edge.to_field == field_name)
+                || (edge.from_node == stage_index && edge.from_field == field_name))
+    })
 }
 
 fn role_usages(view: &PipelineView, stage_index: usize, field_name: &str) -> Vec<RoleUsageView> {
@@ -1172,11 +1194,26 @@ fn edge_kind_label(kind: FieldEdgeKind) -> &'static str {
         FieldEdgeKind::Passthrough => "passthrough",
         FieldEdgeKind::Access => "access",
         FieldEdgeKind::Derive => "derive",
+        // INDIRECT influence edges (#147).
+        FieldEdgeKind::Filter => "filter",
+        FieldEdgeKind::GroupBy => "group by",
+        FieldEdgeKind::JoinKey => "join key",
+        FieldEdgeKind::Conditional => "conditional",
     }
 }
 
+/// The `data-kind` attribute slug for an edge kind — the human label
+/// ([`edge_kind_label`]) with its two multi-word INDIRECT kinds hyphenated so the
+/// attribute is a single token. Deriving from the label (rather than a parallel
+/// 7-arm match) keeps the two in lock-step: a new/renamed kind only has to be
+/// added to `edge_kind_label`, and only the multi-word kinds are special-cased
+/// here.
 fn edge_kind_attr(kind: FieldEdgeKind) -> &'static str {
-    edge_kind_label(kind)
+    match kind {
+        FieldEdgeKind::GroupBy => "group-by",
+        FieldEdgeKind::JoinKey => "join-key",
+        _ => edge_kind_label(kind),
+    }
 }
 
 fn join_or_unavailable(values: &[String]) -> String {
@@ -1493,7 +1530,6 @@ nodes:
                 kind: FieldKind::Declared,
                 ty: Some("int".to_string()),
                 is_correlation_key: true,
-                ..Default::default()
             }],
         );
         let transform = stage(
@@ -1519,7 +1555,6 @@ nodes:
             vec![FieldRow {
                 name: "x2".to_string(),
                 kind: FieldKind::Declared,
-                is_aggregate_grain: true,
                 ..Default::default()
             }],
         );
@@ -1585,6 +1620,76 @@ nodes:
         assert_eq!(resolved.selection, hop_selection);
     }
 
+    /// The aggregate-grain badge (#147) is derived from an incident `GroupBy`
+    /// edge — the grain is represented exactly once (the edge), not a row flag.
+    /// Both endpoints of the GroupBy edge wear the badge; an unrelated field on
+    /// the same stage does not.
+    #[test]
+    fn aggregate_grain_badge_comes_from_group_by_edge() {
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "region".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        let aggregate = stage(
+            "rollup",
+            StageKind::Aggregate,
+            vec![
+                FieldRow {
+                    name: "region".to_string(),
+                    kind: FieldKind::PassThrough,
+                    ..Default::default()
+                },
+                FieldRow {
+                    name: "total".to_string(),
+                    kind: FieldKind::Emitted,
+                    ..Default::default()
+                },
+            ],
+        );
+        let view = PipelineView {
+            stages: vec![source, aggregate],
+            field_edges: vec![FieldEdge {
+                from_node: 0,
+                from_field: "region".to_string(),
+                to_node: 1,
+                to_field: "region".to_string(),
+                kind: FieldEdgeKind::GroupBy,
+            }],
+            ..Default::default()
+        };
+
+        let group_key = build_field_detail(&view, None, &SelectedField::new("rollup", "region"))
+            .expect("field exists");
+        assert!(
+            group_key.badges.contains(&"aggregate grain".to_string()),
+            "the GroupBy edge target row wears the grain badge"
+        );
+
+        let upstream_driver = build_field_detail(&view, None, &SelectedField::new("src", "region"))
+            .expect("field exists");
+        assert!(
+            upstream_driver
+                .badges
+                .contains(&"aggregate grain".to_string()),
+            "the GroupBy edge source column also drives the grain"
+        );
+
+        let aggregate_value =
+            build_field_detail(&view, None, &SelectedField::new("rollup", "total"))
+                .expect("field exists");
+        assert!(
+            !aggregate_value
+                .badges
+                .contains(&"aggregate grain".to_string()),
+            "an aggregate value column is not part of the grain"
+        );
+    }
+
     #[test]
     fn field_model_reports_no_lineage_and_missing_current_view() {
         let view = PipelineView {
@@ -1619,5 +1724,35 @@ nodes:
             hop: 1,
         };
         assert!(build_field_detail(&view, None, &stale_hop.to_selected_field()).is_none());
+    }
+
+    /// `edge_kind_attr` feeds the `data-kind` HTML attribute, so EVERY kind's
+    /// value must be a single slug token — no whitespace. The attr derives from
+    /// `edge_kind_label` (which has multi-word labels like "group by"/"join key"),
+    /// hyphenating only the two known multi-word kinds; this guards against a
+    /// future multi-word kind leaking a space through that delegation. Every
+    /// variant is listed by name (no wildcard) so adding a kind without a slug
+    /// decision fails to compile.
+    #[test]
+    fn edge_kind_attr_is_always_slug_safe() {
+        for kind in [
+            FieldEdgeKind::Passthrough,
+            FieldEdgeKind::Access,
+            FieldEdgeKind::Derive,
+            FieldEdgeKind::Filter,
+            FieldEdgeKind::GroupBy,
+            FieldEdgeKind::JoinKey,
+            FieldEdgeKind::Conditional,
+        ] {
+            let attr = edge_kind_attr(kind);
+            assert!(
+                !attr.is_empty(),
+                "{kind:?} must have a non-empty data-kind slug"
+            );
+            assert!(
+                !attr.chars().any(char::is_whitespace),
+                "{kind:?} data-kind slug must contain no whitespace, got {attr:?}"
+            );
+        }
     }
 }

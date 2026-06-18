@@ -14,7 +14,7 @@ mod field_lineage;
 pub mod layout_model;
 
 pub use field_lineage::{
-    FieldEdge, FieldEdgeKind, FieldKind, FieldRow, compact_type, field_lineage_full,
+    EdgeNature, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, compact_type, field_lineage_full,
     group_endpoints_by_node, lineage_closure,
 };
 pub const NODE_HEIGHT: f32 = 92.0;
@@ -1282,7 +1282,6 @@ fn declared_rows(
             kind: FieldKind::Declared,
             ty: Some(compact_type(&c.ty)),
             is_correlation_key: ck_fields.contains(c.name.as_str()),
-            is_aggregate_grain: false,
         })
         .collect()
 }
@@ -1324,8 +1323,6 @@ struct ColMeta {
     ty: Option<String>,
     /// Whether any producer marked this column a correlation-key driver (#88).
     is_ck: bool,
-    /// Whether any producer marked this column as post-Aggregate group grain.
-    is_aggregate_grain: bool,
 }
 
 /// The bare column name an emit-support member denotes — the final dotted
@@ -1415,6 +1412,247 @@ fn resolve_support_anchors(
         .unwrap_or_default()
 }
 
+/// The full identity of a [`FieldEdge`] for dedup: `(from_node, from_field,
+/// to_node, to_field, kind)` — two edges are duplicates iff these are equal, so a
+/// value carry and an influence edge between the same endpoints (differing only
+/// in `kind`) are kept distinct.
+///
+/// `EdgeKeyRef` is the borrowed view used for the membership PROBE (the two field
+/// names stay `&str`, so probing allocates nothing); [`EdgeKey`] is the owned form
+/// stored on the insert-success path. They are compared field-by-field via
+/// [`EdgeKey::matches`] and hashed by the SAME [`hash_edge_key_ref`] over the
+/// borrowed view, so an owned key and a borrowed key with equal contents hash and
+/// compare identically (a `String` hashes exactly as the `str` it derefs to).
+type EdgeKeyRef<'a> = (usize, &'a str, usize, &'a str, FieldEdgeKind);
+
+struct EdgeKey {
+    from_node: usize,
+    from_field: String,
+    to_node: usize,
+    to_field: String,
+    kind: FieldEdgeKind,
+}
+
+/// Hash an [`EdgeKeyRef`] field-by-field. The owned [`EdgeKey`] is hashed by
+/// projecting it to the same borrowed view (see [`EdgeAccumulator::push_deduped`]),
+/// so the two are hash-coherent.
+fn hash_edge_key_ref<H: std::hash::Hasher>(key: &EdgeKeyRef<'_>, state: &mut H) {
+    use std::hash::Hash;
+    key.0.hash(state);
+    key.1.hash(state);
+    key.2.hash(state);
+    key.3.hash(state);
+    key.4.hash(state);
+}
+
+impl EdgeKey {
+    /// Field-by-field equality against a borrowed key — no allocation.
+    fn matches(&self, other: &EdgeKeyRef<'_>) -> bool {
+        self.from_node == other.0
+            && self.from_field == other.1
+            && self.to_node == other.2
+            && self.to_field == other.3
+            && self.kind == other.4
+    }
+
+    /// The owned key with equal contents — built ONLY on the insert path.
+    fn from_ref(key: &EdgeKeyRef<'_>) -> EdgeKey {
+        EdgeKey {
+            from_node: key.0,
+            from_field: key.1.to_string(),
+            to_node: key.2,
+            to_field: key.3.to_string(),
+            kind: key.4,
+        }
+    }
+}
+
+/// A growing edge list paired with an O(1)-membership dedup index over the edges
+/// already pushed through [`EdgeAccumulator::push_deduped`] (#147).
+///
+/// The `seen` map keys edges by their full identity hash; it is maintained
+/// ALONGSIDE `edges` so a deduped push is O(1) rather than the O(n) a
+/// `Vec::contains` rescan would cost inside the predicate fan's support ×
+/// producer × row triple loop. Bundling the two together (rather than threading
+/// both as separate `&mut` parameters) keeps the influence-edge helpers'
+/// signatures small. Insertion order in `edges` is unchanged — `seen` only gates
+/// whether a candidate is appended. DIRECT derive/carry edges that cannot collide
+/// by construction are pushed straight onto `edges` instead.
+struct EdgeAccumulator {
+    edges: Vec<FieldEdge>,
+    /// Dedup index keyed by the full-identity hash → the owned keys that hash
+    /// there (a bucket list to resolve the rare hash collision exactly). A probe
+    /// hashes the BORROWED key and compares against only its bucket, so a
+    /// duplicate allocates no `String`; the owned key is built ONLY when the edge
+    /// is genuinely new.
+    seen: std::collections::HashMap<u64, Vec<EdgeKey>>,
+}
+
+impl EdgeAccumulator {
+    fn new() -> Self {
+        Self {
+            edges: Vec::new(),
+            seen: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Push a [`FieldEdge`] only if no exact `(from_node, from_field, to_node,
+    /// to_field, kind)` tuple has been pushed before.
+    ///
+    /// INDIRECT influence edges fan a single predicate-support producer out to
+    /// every surviving output row, and a Cull may OR several rules over the same
+    /// column, so the same edge can be produced more than once. De-duplicating on
+    /// the full tuple keeps the edge list — and therefore the lineage closure walk
+    /// — bounded, while still permitting a column to carry BOTH a DIRECT and an
+    /// INDIRECT edge to the same endpoint (the `kind` is part of the identity, so
+    /// a value carry and an influence edge coexist).
+    ///
+    /// The membership probe hashes a BORROWED key ([`EdgeKeyRef`]) and compares
+    /// against its hash bucket, so a duplicate — the common case in the predicate
+    /// fan — allocates nothing; the two field names are cloned into an owned
+    /// [`EdgeKey`] ONLY when the edge is genuinely new and is about to be stored.
+    fn push_deduped(&mut self, edge: FieldEdge) {
+        let key_ref: EdgeKeyRef<'_> = (
+            edge.from_node,
+            edge.from_field.as_str(),
+            edge.to_node,
+            edge.to_field.as_str(),
+            edge.kind,
+        );
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hash_edge_key_ref(&key_ref, &mut hasher);
+        let hash = std::hash::Hasher::finish(&hasher);
+
+        let bucket = self.seen.entry(hash).or_default();
+        if bucket.iter().any(|k| k.matches(&key_ref)) {
+            return;
+        }
+        bucket.push(EdgeKey::from_ref(&key_ref));
+        self.edges.push(edge);
+    }
+}
+
+/// Emit INDIRECT *predicate* influence edges for one control-flow node (#147):
+/// a `Cull` removal predicate (`Filter`) or a `Route` branch condition
+/// (`Conditional`).
+///
+/// **Edge target-set policy (decided once here):** a filter / conditional
+/// predicate influences *which rows survive*, not any single output value, so
+/// each column the predicate reads is connected to **every surviving output row**
+/// of the node — `surviving_rows` is the node's own resolved output record
+/// (`out_fields[idx]`), not its role ports. This is the honest "this column
+/// decided whether these rows exist" relation; routing it to every output row
+/// (rather than a single representative) keeps the influence visible from any
+/// downstream column, and the de-dup keeps the closure bounded.
+///
+/// `predicate` is the raw CXL predicate string; it is run through
+/// [`field_lineage::predicate_support`], which returns `None` on a parse failure
+/// — in which case NO edges are emitted (never infer from unparseable CXL). Each
+/// resolved support column is mapped to its producer anchors via
+/// [`resolve_support_anchors`] (so a fan-in column connects to each producing
+/// input). Edges are de-duplicated on the full tuple.
+fn emit_predicate_influence_edges(
+    acc: &mut EdgeAccumulator,
+    idx: usize,
+    predicate: &str,
+    kind: FieldEdgeKind,
+    surviving_rows: &[FieldRow],
+    producers_of: &std::collections::HashMap<String, Vec<usize>>,
+    input_aliases: &std::collections::HashMap<String, usize>,
+) {
+    let Some(support) = field_lineage::predicate_support(predicate) else {
+        return;
+    };
+    for member in &support {
+        for (p, from_field) in resolve_support_anchors(member, producers_of, input_aliases) {
+            for row in surviving_rows {
+                acc.push_deduped(FieldEdge {
+                    from_node: p,
+                    from_field: from_field.clone(),
+                    to_node: idx,
+                    to_field: row.name.clone(),
+                    kind,
+                });
+            }
+        }
+    }
+}
+
+/// The control-flow predicates a node imposes, each paired with the INDIRECT
+/// edge kind it produces (#147) — the single place the clinker config shapes for
+/// influence predicates are read.
+///
+/// - **Route** (`RouteBody.conditions: IndexMap<String, CxlSource>`): each branch
+///   condition is a `Conditional` predicate. The always-present default/fallback
+///   branch has no predicate, so contributes nothing.
+/// - **Cull** (`CullBody.rules: Vec<CullRule>`, each
+///   `CullRule.drop_group_when: CxlSource`): every removal rule is a `Filter`
+///   predicate (a group is removed when ANY rule holds, so each rule's read
+///   columns influence which rows survive).
+/// - **Combine** (`CombineBody.where_expr: CxlSource`): the join predicate is the
+///   real join key. It is a `JoinKey` influence predicate, resolved through the
+///   SAME `predicate_support` path as Cull/Route — its read columns (including
+///   qualified `products.product_code` refs, resolved via `input_aliases`)
+///   influence which records are matched. A `Merge` is a streamwise row UNION
+///   (`MergeMode::Concat`/`Interleave`), never a join, so it imposes no predicate
+///   and yields no `JoinKey` edge.
+///
+/// Returns the borrowed predicate source strings; every other node yields none.
+fn node_influence_predicates(node: &PipelineNode) -> Vec<(&str, FieldEdgeKind)> {
+    match node {
+        PipelineNode::Route { config, .. } => config
+            .conditions
+            .values()
+            .map(|predicate| (predicate.as_ref(), FieldEdgeKind::Conditional))
+            .collect(),
+        PipelineNode::Cull { config, .. } => config
+            .rules
+            .iter()
+            .map(|rule| (rule.drop_group_when.as_ref(), FieldEdgeKind::Filter))
+            .collect(),
+        PipelineNode::Combine { config, .. } => {
+            vec![(config.where_expr.as_ref(), FieldEdgeKind::JoinKey)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Emit every INDIRECT influence edge a node contributes (#147): Route's
+/// `Conditional` branch conditions, Cull's `Filter` removal predicates, and
+/// Combine's `JoinKey` `where_expr` join predicate. Shared by both lineage paths
+/// so they stay identical.
+///
+/// Every influence edge now flows from one place — [`node_influence_predicates`]
+/// → [`emit_predicate_influence_edges`] — so the same `predicate_support`
+/// resolution backs all influence kinds. A `Merge` is a streamwise row UNION, not
+/// a join, so it imposes no predicate and contributes no `JoinKey` edge.
+///
+/// Called AFTER the node's normal DIRECT rows/carries are emitted, reading the
+/// node's already-populated output record (`surviving_rows`) so predicate edges
+/// land on the real surviving rows. `Aggregate` `group_by` `GroupBy` edges are
+/// NOT emitted here — they are produced inline alongside the group-key rows in
+/// each path (where the group-key resolution already happens).
+fn emit_indirect_influence_edges(
+    acc: &mut EdgeAccumulator,
+    idx: usize,
+    node: &PipelineNode,
+    surviving_rows: &[FieldRow],
+    producers_of: &std::collections::HashMap<String, Vec<usize>>,
+    input_aliases: &std::collections::HashMap<String, usize>,
+) {
+    for (predicate, kind) in node_influence_predicates(node) {
+        emit_predicate_influence_edges(
+            acc,
+            idx,
+            predicate,
+            kind,
+            surviving_rows,
+            producers_of,
+            input_aliases,
+        );
+    }
+}
+
 /// Stamp carried metadata onto pass-through rows.
 ///
 /// Normal pass-through rows use exact field names. Aggregate group keys may be
@@ -1437,7 +1675,6 @@ fn stamp_passthrough_metadata(
         if let Some(meta) = meta {
             row.ty = meta.ty.clone();
             row.is_correlation_key = meta.is_ck;
-            row.is_aggregate_grain |= meta.is_aggregate_grain;
         }
     }
 }
@@ -1495,7 +1732,10 @@ fn compute_field_lineage(
     let total = slots.len();
     debug_assert_eq!(total, predecessors.len());
     let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
-    let mut field_edges: Vec<FieldEdge> = Vec::new();
+    // Edge list + its O(1) dedup index (see [`EdgeAccumulator`]). The predicate
+    // fan pushes through `push_deduped`; DIRECT derive/carry edges that cannot
+    // collide by construction are pushed straight onto `acc.edges`.
+    let mut acc = EdgeAccumulator::new();
     let mut role_edges: Vec<RoleEdge> = Vec::new();
 
     // First pass: seed every origin slot's fixed output record. Origins have no
@@ -1545,7 +1785,6 @@ fn compute_field_lineage(
                 // by a fan-in IS a CK driver if ANY producer marks it one, so OR
                 // across every producer rather than trusting the first (#88, #2).
                 meta.is_ck |= row.is_correlation_key;
-                meta.is_aggregate_grain |= row.is_aggregate_grain;
                 // Guard against a single malformed input listing the column twice
                 // so we never emit two carries to the same producer.
                 if !producers.contains(&p) {
@@ -1590,23 +1829,27 @@ fn compute_field_lineage(
                         .filter(|row| matches!(row.kind, FieldKind::PassThrough))
                         .map(|row| row.name.clone())
                         .collect();
+                    // Group keys define the grouped-record grain — an INDIRECT
+                    // GROUP_BY influence, not a value derive (#147). This is the
+                    // single honest representation of the post-Aggregate grain
+                    // (it retired the duplicate `is_aggregate_grain` row flag).
                     for group_key in group_keys {
                         for (p, from_field) in
                             resolve_support_anchors(&group_key, &producers_of, aliases)
                         {
-                            field_edges.push(FieldEdge {
+                            acc.push_deduped(FieldEdge {
                                 from_node: p,
                                 from_field: from_field.clone(),
                                 to_node: idx,
                                 to_field: group_key.clone(),
-                                kind: FieldEdgeKind::Derive,
+                                kind: FieldEdgeKind::GroupBy,
                             });
                             role_edges.push(RoleEdge {
                                 from_node: p,
                                 from_field,
                                 to_node: idx,
                                 to_port: aggregate_group_key_port_id(&group_key),
-                                kind: FieldEdgeKind::Derive,
+                                kind: FieldEdgeKind::GroupBy,
                             });
                         }
                     }
@@ -1625,7 +1868,7 @@ fn compute_field_lineage(
                             let anchors = resolve_support_anchors(member, &producers_of, aliases);
                             if !anchors.is_empty() {
                                 for (p, from_field) in anchors {
-                                    field_edges.push(FieldEdge {
+                                    acc.edges.push(FieldEdge {
                                         from_node: p,
                                         from_field,
                                         to_node: idx,
@@ -1634,7 +1877,7 @@ fn compute_field_lineage(
                                     });
                                 }
                             } else if emitted_so_far.contains(col) && output_names.contains(col) {
-                                field_edges.push(FieldEdge {
+                                acc.edges.push(FieldEdge {
                                     from_node: idx,
                                     from_field: col.to_string(),
                                     to_node: idx,
@@ -1748,7 +1991,7 @@ fn compute_field_lineage(
                             // its target from each of them (#67); an alias-qualified
                             // ref resolves to its single declared port.
                             for (p, from_field) in anchors {
-                                field_edges.push(FieldEdge {
+                                acc.edges.push(FieldEdge {
                                     from_node: p,
                                     from_field,
                                     to_node: idx,
@@ -1757,7 +2000,7 @@ fn compute_field_lineage(
                                 });
                             }
                         } else if emitted_so_far.contains(col) {
-                            field_edges.push(FieldEdge {
+                            acc.edges.push(FieldEdge {
                                 from_node: idx,
                                 from_field: col.to_string(),
                                 to_node: idx,
@@ -1781,7 +2024,7 @@ fn compute_field_lineage(
                         // Access carry (#72).
                         let kind = carry_kind(col);
                         for &p in producers {
-                            field_edges.push(FieldEdge {
+                            acc.edges.push(FieldEdge {
                                 from_node: p,
                                 from_field: col.clone(),
                                 to_node: idx,
@@ -1808,7 +2051,7 @@ fn compute_field_lineage(
                     // every carry is a pure pass-through (#72).
                     if let Some(producers) = producers_of.get(col) {
                         for &p in producers {
-                            field_edges.push(FieldEdge {
+                            acc.edges.push(FieldEdge {
                                 from_node: p,
                                 from_field: col.clone(),
                                 to_node: idx,
@@ -1830,9 +2073,24 @@ fn compute_field_lineage(
         // unmarked/untyped (typing an emit needs the engine typechecker, Phase
         // 2b / #68).
         stamp_passthrough_metadata(&mut out_fields[idx], &col_meta, false);
+
+        // INDIRECT influence edges (#147): Route's `Conditional` and Cull's
+        // `Filter` predicate edges and Combine's `JoinKey` `where_expr` edges,
+        // added AFTER the node's DIRECT rows so they land on the real surviving
+        // output rows. Aggregate `group_by` GroupBy edges are emitted inline in
+        // the Aggregate arm above (which `continue`s before reaching here). A
+        // Merge is a row UNION and contributes none.
+        emit_indirect_influence_edges(
+            &mut acc,
+            idx,
+            node,
+            &out_fields[idx],
+            &producers_of,
+            &input_aliases[idx],
+        );
     }
 
-    (out_fields, field_edges, role_edges)
+    (out_fields, acc.edges, role_edges)
 }
 
 /// Build the composition's classified slot list and run the shared lineage core.
@@ -1893,7 +2151,6 @@ fn composition_field_lineage(
             // An output port is a synthetic boundary label, not a source
             // column, so it never drives a correlation key.
             is_correlation_key: false,
-            is_aggregate_grain: false,
         }]));
     }
 
@@ -2029,7 +2286,9 @@ fn resolved_pipeline_field_lineage(
         .collect();
 
     let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
-    let mut field_edges: Vec<FieldEdge> = Vec::new();
+    // Edge list + its O(1) dedup index (see [`EdgeAccumulator`]). Mirrors the raw
+    // builder (`compute_field_lineage`) so both paths dedup identically.
+    let mut acc = EdgeAccumulator::new();
     let mut role_edges: Vec<RoleEdge> = Vec::new();
 
     for (idx, spanned) in nodes.iter().enumerate() {
@@ -2049,7 +2308,6 @@ fn resolved_pipeline_field_lineage(
                     input_cols.push(row.name.clone());
                 }
                 meta.is_ck |= row.is_correlation_key;
-                meta.is_aggregate_grain |= row.is_aggregate_grain;
                 if !producers.contains(&p) {
                     producers.push(p);
                 }
@@ -2094,24 +2352,27 @@ fn resolved_pipeline_field_lineage(
 
         if let Some(_program) = parsed {
             let aliases = &input_aliases[idx];
+            // Group keys define the grouped-record grain — an INDIRECT GROUP_BY
+            // influence, not a value derive (#147). Single honest representation
+            // of the grain (retired the `is_aggregate_grain` row flag).
             for group_key in &aggregate_group_keys {
                 if !output_names.contains(group_key) {
                     continue;
                 }
                 for (p, from_field) in resolve_support_anchors(group_key, &producers_of, aliases) {
-                    field_edges.push(FieldEdge {
+                    acc.push_deduped(FieldEdge {
                         from_node: p,
                         from_field: from_field.clone(),
                         to_node: idx,
                         to_field: group_key.clone(),
-                        kind: FieldEdgeKind::Derive,
+                        kind: FieldEdgeKind::GroupBy,
                     });
                     role_edges.push(RoleEdge {
                         from_node: p,
                         from_field,
                         to_node: idx,
                         to_port: aggregate_group_key_port_id(group_key),
-                        kind: FieldEdgeKind::Derive,
+                        kind: FieldEdgeKind::GroupBy,
                     });
                 }
             }
@@ -2133,7 +2394,7 @@ fn resolved_pipeline_field_lineage(
                     let anchors = resolve_support_anchors(member, &producers_of, aliases);
                     if !anchors.is_empty() {
                         for (p, from_field) in anchors {
-                            field_edges.push(FieldEdge {
+                            acc.edges.push(FieldEdge {
                                 from_node: p,
                                 from_field,
                                 to_node: idx,
@@ -2142,7 +2403,7 @@ fn resolved_pipeline_field_lineage(
                             });
                         }
                     } else if emitted_so_far.contains(col) && output_names.contains(col) {
-                        field_edges.push(FieldEdge {
+                        acc.edges.push(FieldEdge {
                             from_node: idx,
                             from_field: col.to_string(),
                             to_node: idx,
@@ -2162,7 +2423,7 @@ fn resolved_pipeline_field_lineage(
                 {
                     let kind = carry_kind(col);
                     for &p in producers {
-                        field_edges.push(FieldEdge {
+                        acc.edges.push(FieldEdge {
                             from_node: p,
                             from_field: col.clone(),
                             to_node: idx,
@@ -2178,7 +2439,7 @@ fn resolved_pipeline_field_lineage(
                     && let Some(producers) = producers_of.get(col)
                 {
                     for &p in producers {
-                        field_edges.push(FieldEdge {
+                        acc.edges.push(FieldEdge {
                             from_node: p,
                             from_field: col.clone(),
                             to_node: idx,
@@ -2189,9 +2450,22 @@ fn resolved_pipeline_field_lineage(
                 }
             }
         }
+
+        // INDIRECT influence edges (#147): Route's `Conditional` and Cull's
+        // `Filter` predicate edges and Combine's `JoinKey` `where_expr` edges,
+        // added AFTER this node's DIRECT carries so they land on the real
+        // surviving output rows. A Merge is a row UNION and contributes none.
+        emit_indirect_influence_edges(
+            &mut acc,
+            idx,
+            node,
+            &out_fields[idx],
+            &producers_of,
+            &input_aliases[idx],
+        );
     }
 
-    (out_fields, field_edges, role_edges)
+    (out_fields, acc.edges, role_edges)
 }
 
 fn resolved_row_fields(
@@ -2210,13 +2484,6 @@ fn resolved_row_fields(
             .unwrap_or_default(),
         _ => std::collections::HashSet::new(),
     };
-    let aggregate_group_keys: std::collections::HashSet<&str> = match node {
-        PipelineNode::Aggregate { config, .. } => {
-            config.group_by.iter().map(String::as_str).collect()
-        }
-        _ => std::collections::HashSet::new(),
-    };
-
     row.fields()
         .filter_map(|(field, ty)| {
             let name = field.name.as_ref();
@@ -2237,23 +2504,11 @@ fn resolved_row_fields(
                 FieldKind::PassThrough => col_meta.get(name).is_some_and(|meta| meta.is_ck),
                 FieldKind::Emitted => false,
             };
-            let is_aggregate_grain = match kind {
-                FieldKind::PassThrough => {
-                    aggregate_group_keys
-                        .iter()
-                        .any(|key| *key == name || bare_column(key) == name)
-                        || col_meta
-                            .get(name)
-                            .is_some_and(|meta| meta.is_aggregate_grain)
-                }
-                FieldKind::Declared | FieldKind::Emitted => false,
-            };
             Some(FieldRow {
                 name: name.to_string(),
                 kind,
                 ty: Some(compact_type(ty)),
                 is_correlation_key,
-                is_aggregate_grain,
             })
         })
         .collect()
@@ -2958,7 +3213,6 @@ fn body_row_fields(row: &cxl::typecheck::Row) -> Vec<FieldRow> {
             kind: FieldKind::Declared,
             ty: Some(compact_type(ty)),
             is_correlation_key: false,
-            is_aggregate_grain: false,
         })
         .collect()
 }
@@ -4107,7 +4361,6 @@ nodes:
                     name: "department".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: Some("string".to_string()),
-                    is_aggregate_grain: true,
                     ..Default::default()
                 },
                 FieldRow {
@@ -4131,12 +4384,15 @@ nodes:
             "non-group input fields must not pass through aggregate rows"
         );
 
+        // The group key is an INDIRECT GROUP_BY influence edge (#147), not a
+        // value derive — it defines the grouped grain. It is represented exactly
+        // once (no duplicate Derive edge, no `is_aggregate_grain` row flag).
         let group_key_edge = FieldEdge {
             from_node: i_orders,
             from_field: "department".to_string(),
             to_node: i_totals,
             to_field: "department".to_string(),
-            kind: FieldEdgeKind::Derive,
+            kind: FieldEdgeKind::GroupBy,
         };
         let total_edge = FieldEdge {
             from_node: i_orders,
@@ -4147,7 +4403,20 @@ nodes:
         };
         assert!(
             view.field_edges.contains(&group_key_edge),
-            "group key should derive from source department, got {:?}",
+            "group key should be a GroupBy edge from source department, got {:?}",
+            view.field_edges
+        );
+        // The grain is represented EXACTLY ONCE: no stale Derive duplicate of the
+        // GroupBy edge survives (#147 acceptance).
+        assert!(
+            !view.field_edges.iter().any(|edge| {
+                edge.from_node == i_orders
+                    && edge.from_field == "department"
+                    && edge.to_node == i_totals
+                    && edge.to_field == "department"
+                    && edge.kind == FieldEdgeKind::Derive
+            }),
+            "the group-key grain must not also appear as a Derive edge, got {:?}",
             view.field_edges
         );
         assert!(
@@ -4254,6 +4523,9 @@ nodes:
                     && edge.to_field == "user_id"
             })
             .collect();
+        // The group key into the Aggregate is a single GroupBy influence edge
+        // (#147), not a value Derive — and exactly one (the grain is represented
+        // once, not duplicated per merged input).
         assert_eq!(
             outgoing_user_id_edges,
             vec![&FieldEdge {
@@ -4261,7 +4533,7 @@ nodes:
                 from_field: "user_id".to_string(),
                 to_node: i_aggregate,
                 to_field: "user_id".to_string(),
-                kind: FieldEdgeKind::Derive,
+                kind: FieldEdgeKind::GroupBy,
             }],
             "merged user_id should have exactly one downstream edge into the aggregate group key"
         );
@@ -4272,7 +4544,7 @@ nodes:
                 from_field: "user_id".to_string(),
                 to_node: i_aggregate,
                 to_port: "group_by:user_id".to_string(),
-                kind: FieldEdgeKind::Derive,
+                kind: FieldEdgeKind::GroupBy,
             }],
             "merged user_id should also feed exactly one group_by role input port"
         );
@@ -4333,21 +4605,17 @@ nodes:
                 1,
                 "group key {field} should remain one normal aggregate output row"
             );
-            let aggregate_field = field_by_name(&view, i_aggregate, field);
-            assert!(
-                aggregate_field.is_aggregate_grain,
-                "group key {field} should be marked as aggregate failure grain"
-            );
-
+            // The grain is the GroupBy edge (#147), represented exactly once —
+            // no separate row flag.
             assert!(
                 view.field_edges.iter().any(|edge| {
                     edge.from_node == i_source
                         && edge.from_field == field
                         && edge.to_node == i_aggregate
                         && edge.to_field == field
-                        && edge.kind == FieldEdgeKind::Derive
+                        && edge.kind == FieldEdgeKind::GroupBy
                 }),
-                "group key {field} should have normal field lineage into the output row"
+                "group key {field} should have a GroupBy influence edge into the output row"
             );
             assert!(
                 view.role_edges.iter().any(|edge| {
@@ -4355,9 +4623,9 @@ nodes:
                         && edge.from_field == field
                         && edge.to_node == i_aggregate
                         && edge.to_port == aggregate_group_key_port_id(field)
-                        && edge.kind == FieldEdgeKind::Derive
+                        && edge.kind == FieldEdgeKind::GroupBy
                 }),
-                "group key {field} should also feed the matching role input port"
+                "group key {field} should also feed the matching role input port as GroupBy"
             );
         }
     }
@@ -4419,6 +4687,15 @@ nodes:
         assert_invoice_rollup_grain(&resolved);
     }
 
+    /// Whether a `GroupBy` influence edge lands on `field` as the group-key
+    /// output row of stage `to_node` (#147) — the single representation of the
+    /// aggregate grain.
+    fn has_group_by_grain(view: &PipelineView, to_node: usize, field: &str) -> bool {
+        view.field_edges.iter().any(|edge| {
+            edge.kind == FieldEdgeKind::GroupBy && edge.to_node == to_node && edge.to_field == field
+        })
+    }
+
     fn assert_invoice_rollup_grain(view: &PipelineView) {
         let i_source = stage_idx(view, "invoices");
         let i_aggregate = stage_idx(view, "daily_totals");
@@ -4438,9 +4715,10 @@ nodes:
             aggregate_customer.is_correlation_key,
             "customer_id remains the surviving source CK component"
         );
+        // The grain is now the INDIRECT GroupBy edge, not a row flag (#147).
         assert!(
-            aggregate_customer.is_aggregate_grain,
-            "customer_id is also part of the aggregate failure grain"
+            has_group_by_grain(view, i_aggregate, "customer_id"),
+            "customer_id is part of the aggregate grain (a GroupBy edge lands on it)"
         );
 
         let aggregate_date = field_by_name(view, i_aggregate, "invoice_date");
@@ -4449,25 +4727,25 @@ nodes:
             "invoice_date was not declared as a source CK"
         );
         assert!(
-            aggregate_date.is_aggregate_grain,
-            "invoice_date is functionally part of the post-aggregate failure grain"
+            has_group_by_grain(view, i_aggregate, "invoice_date"),
+            "invoice_date is part of the aggregate grain (a GroupBy edge lands on it)"
         );
 
+        // The grain is represented EXACTLY ONCE — at the Aggregate node, as the
+        // GroupBy edge. It does NOT re-propagate as a flag onto downstream
+        // carried rows; those rows trace back to the GroupBy edge instead. The
+        // carried columns still pass through as ordinary rows.
         for field in ["customer_id", "invoice_date"] {
             let carried = field_by_name(view, i_transform, field);
             assert_eq!(carried.kind, FieldKind::PassThrough);
             assert!(
-                carried.is_aggregate_grain,
-                "{field} keeps the aggregate failure-grain marker downstream"
+                !has_group_by_grain(view, i_transform, field),
+                "{field}'s grain is recorded once at the Aggregate, not duplicated downstream"
             );
         }
 
         let rollup_customer = field_by_name(view, i_transform, "rollup_customer");
         assert_eq!(rollup_customer.kind, FieldKind::Emitted);
-        assert!(
-            !rollup_customer.is_aggregate_grain,
-            "a renamed emitted copy is not the original aggregate grain field"
-        );
     }
 
     /// A qualified group key is displayed as the aggregate output key while its
@@ -4504,26 +4782,24 @@ nodes:
 
         let group_key = field_by_name(&view, i_grouped, "source_b.field");
         assert_eq!(group_key.kind, FieldKind::PassThrough);
-        assert!(
-            group_key.is_aggregate_grain,
-            "qualified group key should be marked as aggregate failure grain"
-        );
         assert_eq!(
             group_key.ty.as_deref(),
             Some("string"),
             "qualified group key should inherit the matching producer field type"
         );
 
+        // The grain is the GroupBy edge (#147); the qualified key still resolves
+        // its lineage to the bare producer field `field`.
         let edge = FieldEdge {
             from_node: i_source,
             from_field: "field".to_string(),
             to_node: i_grouped,
             to_field: "source_b.field".to_string(),
-            kind: FieldEdgeKind::Derive,
+            kind: FieldEdgeKind::GroupBy,
         };
         assert!(
             view.field_edges.contains(&edge),
-            "qualified group key should draw lineage from source_b.field, got {:?}",
+            "qualified group key should draw a GroupBy edge from source_b.field, got {:?}",
             view.field_edges
         );
     }
@@ -4563,7 +4839,6 @@ nodes:
                 name: "department".to_string(),
                 kind: FieldKind::PassThrough,
                 ty: Some("string".to_string()),
-                is_aggregate_grain: true,
                 ..Default::default()
             }],
             "invalid aggregate CXL should degrade to config-derived group keys"
@@ -4574,6 +4849,415 @@ nodes:
                 .all(|edge| edge.to_node != i_totals && edge.from_node != i_totals),
             "invalid aggregate CXL should not infer edges, got {:?}",
             view.field_edges
+        );
+    }
+
+    /// #147 acceptance: a Cull emits INDIRECT `Filter` edges from every column its
+    /// removal predicate reads to EVERY surviving output row (the predicate
+    /// decides which rows survive), AND keeps the ordinary DIRECT passthrough
+    /// carries. A column the predicate does NOT read gets no Filter edge.
+    #[test]
+    fn cull_predicate_emits_filter_influence_edges() {
+        let yaml = r#"
+pipeline:
+  name: cull_filter
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: gid, type: string }
+        - { name: status, type: string }
+        - { name: amount, type: int }
+  - type: cull
+    name: prune
+    input: src
+    config:
+      partition_by: [gid]
+      removed_to: dropped
+      rules:
+        - name: drop_clean
+          drop_group_when: "sum(if status == 'error' then 1 else 0) > 0"
+"#;
+        let config = parse_config(yaml).expect("cull filter fixture parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "src");
+        let i_cull = stage_idx(&view, "prune");
+
+        // The predicate reads `status`; every surviving output row of the Cull is
+        // a Filter target from `status` (gid, status, amount all survive).
+        for row in ["gid", "status", "amount"] {
+            assert!(
+                view.field_edges.contains(&FieldEdge {
+                    from_node: i_src,
+                    from_field: "status".to_string(),
+                    to_node: i_cull,
+                    to_field: row.to_string(),
+                    kind: FieldEdgeKind::Filter,
+                }),
+                "status should Filter-influence surviving row {row}, got {:?}",
+                view.field_edges
+            );
+        }
+        // `amount` is not read by the predicate, so it produces no Filter edge.
+        assert!(
+            !view.field_edges.iter().any(|e| {
+                e.from_node == i_src && e.from_field == "amount" && e.kind == FieldEdgeKind::Filter
+            }),
+            "a column the predicate does not read must not emit a Filter edge"
+        );
+        // Every Filter edge is INDIRECT by nature.
+        assert!(
+            view.field_edges
+                .iter()
+                .filter(|e| e.kind == FieldEdgeKind::Filter)
+                .all(|e| e.kind.nature() == EdgeNature::Indirect)
+        );
+        // The DIRECT passthrough carries still exist alongside the Filter edges.
+        assert!(view.field_edges.contains(&FieldEdge {
+            from_node: i_src,
+            from_field: "status".to_string(),
+            to_node: i_cull,
+            to_field: "status".to_string(),
+            kind: FieldEdgeKind::Passthrough,
+        }));
+    }
+
+    /// #147 acceptance: a Cull predicate that fails to parse infers NO Filter
+    /// edges — never lineage from unparseable CXL (the degrade-gracefully rule).
+    #[test]
+    fn cull_unparseable_predicate_emits_no_filter_edges() {
+        let yaml = r#"
+pipeline:
+  name: cull_bad_predicate
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: gid, type: string }
+        - { name: status, type: string }
+  - type: cull
+    name: prune
+    input: src
+    config:
+      partition_by: [gid]
+      removed_to: dropped
+      rules:
+        - name: broken
+          drop_group_when: "status == == 'error'"
+"#;
+        let config = parse_config(yaml).expect("cull fixture parses even with bad predicate CXL");
+        let view = derive_pipeline_view(&config);
+        assert!(
+            !view
+                .field_edges
+                .iter()
+                .any(|e| e.kind == FieldEdgeKind::Filter),
+            "an unparseable Cull predicate must infer no Filter edges, got {:?}",
+            view.field_edges
+        );
+    }
+
+    /// #147 acceptance: a Route emits INDIRECT `Conditional` edges from every
+    /// column a branch condition reads to the Route's surviving output rows; the
+    /// always-present default/fallback branch has no predicate, so emits none.
+    #[test]
+    fn route_conditions_emit_conditional_influence_edges() {
+        let yaml = r#"
+pipeline:
+  name: route_conditional
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: region, type: string }
+        - { name: amount, type: int }
+  - type: route
+    name: split
+    input: src
+    config:
+      conditions:
+        eu: "region == 'EU'"
+      default: rest
+"#;
+        let config = parse_config(yaml).expect("route conditional fixture parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "src");
+        let i_route = stage_idx(&view, "split");
+
+        // The `eu` branch condition reads `region`; it conditionally influences
+        // every surviving output row of the Route.
+        for row in ["region", "amount"] {
+            assert!(
+                view.field_edges.contains(&FieldEdge {
+                    from_node: i_src,
+                    from_field: "region".to_string(),
+                    to_node: i_route,
+                    to_field: row.to_string(),
+                    kind: FieldEdgeKind::Conditional,
+                }),
+                "region should Conditional-influence row {row}, got {:?}",
+                view.field_edges
+            );
+        }
+        // `amount` is not read by any condition → no Conditional edge from it.
+        assert!(
+            !view.field_edges.iter().any(|e| {
+                e.from_node == i_src
+                    && e.from_field == "amount"
+                    && e.kind == FieldEdgeKind::Conditional
+            }),
+            "a column no branch condition reads must not emit a Conditional edge"
+        );
+        assert!(
+            view.field_edges
+                .iter()
+                .any(|e| e.kind == FieldEdgeKind::Conditional),
+            "the Route should emit at least one Conditional edge"
+        );
+    }
+
+    /// #147 acceptance: a Merge is a streamwise row UNION
+    /// (`MergeMode::Concat`/`Interleave`) — it stacks rows, it never joins — so a
+    /// column shared by more than one input is a plain `Passthrough` value carry
+    /// from EACH producer and carries NO `JoinKey` influence edge. (A join key is
+    /// emitted only by a `Combine`, derived from its `where_expr`; see
+    /// [`combine_multi_input_join_key_carries_from_every_input`].)
+    #[test]
+    fn merge_shared_column_is_passthrough_not_join_key() {
+        let yaml = r#"
+pipeline:
+  name: merge_join_key
+nodes:
+  - type: source
+    name: web
+    config:
+      name: web
+      type: csv
+      path: ./web.csv
+      schema:
+        - { name: user_id, type: string }
+        - { name: web_only, type: int }
+  - type: source
+    name: mobile
+    config:
+      name: mobile
+      type: csv
+      path: ./mobile.csv
+      schema:
+        - { name: user_id, type: string }
+        - { name: mobile_only, type: int }
+  - type: merge
+    name: all_events
+    inputs: [web, mobile]
+"#;
+        let config = parse_config(yaml).expect("merge join-key fixture parses");
+        let view = derive_pipeline_view(&config);
+        let i_web = stage_idx(&view, "web");
+        let i_mobile = stage_idx(&view, "mobile");
+        let i_merge = stage_idx(&view, "all_events");
+
+        // `user_id` is produced by both inputs → a plain Passthrough value carry
+        // from EACH input (the #67 fan-in carry), and nothing more.
+        for src in [i_web, i_mobile] {
+            assert!(
+                view.field_edges.contains(&FieldEdge {
+                    from_node: src,
+                    from_field: "user_id".to_string(),
+                    to_node: i_merge,
+                    to_field: "user_id".to_string(),
+                    kind: FieldEdgeKind::Passthrough,
+                }),
+                "shared user_id should carry a Passthrough value edge from each input, got {:?}",
+                view.field_edges
+            );
+        }
+        // A Merge performs no join, so it emits ZERO JoinKey edges — for the
+        // shared column or any other.
+        assert_eq!(
+            view.field_edges
+                .iter()
+                .filter(|e| e.kind == FieldEdgeKind::JoinKey)
+                .count(),
+            0,
+            "a Merge is a row UNION and must emit no JoinKey edges, got {:?}",
+            view.field_edges
+        );
+    }
+
+    /// #147 raw/resolved parity: the INDIRECT influence edges are emitted by BOTH
+    /// lineage builders. For a normal typed pipeline (every node has a
+    /// `typed_output_row`, so the resolved path does not `continue`), a Cull's
+    /// `drop_group_when` must drive `Filter` edges in resolved mode just as it does
+    /// in raw mode — locking the two paths together so an INDIRECT regression
+    /// cannot hide in only one. (The resolved `continue` for a node WITHOUT a typed
+    /// row is the deferred-acceptable gap; a normal pipeline never hits it.)
+    #[test]
+    fn resolved_mode_emits_cull_filter_edges_in_parity_with_raw() {
+        let yaml = r#"
+pipeline:
+  name: cull_filter_parity
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: gid, type: string }
+        - { name: amount, type: int }
+  - type: cull
+    name: prune
+    input: src
+    config:
+      partition_by: [gid]
+      removed_to: dropped
+      rules:
+        - name: drop_small
+          drop_group_when: "sum(amount) < 100"
+  - type: output
+    name: kept
+    input: prune
+    config:
+      name: kept
+      type: csv
+      path: ./kept.csv
+  - type: output
+    name: removed
+    input: prune.dropped
+    config:
+      name: removed
+      type: csv
+      path: ./removed.csv
+"#;
+        let config = parse_config(yaml).expect("cull parity fixture parses");
+
+        // The Filter edge from `amount` to the Cull's surviving rows: assert it in
+        // BOTH the raw approximation and the engine-resolved view.
+        let has_amount_filter = |view: &PipelineView| {
+            let i_src = stage_idx(view, "src");
+            let i_cull = stage_idx(view, "prune");
+            view.field_edges.iter().any(|e| {
+                e.from_node == i_src
+                    && e.from_field == "amount"
+                    && e.to_node == i_cull
+                    && e.kind == FieldEdgeKind::Filter
+            })
+        };
+
+        let raw = derive_pipeline_view(&config);
+        assert!(
+            has_amount_filter(&raw),
+            "raw mode must emit the Cull Filter edge from amount, got {:?}",
+            raw.field_edges
+        );
+
+        let plan = config
+            .compile(&CompileContext::default())
+            .expect("cull parity fixture compiles");
+        let resolved = derive_resolved_pipeline_view(&plan);
+        assert!(
+            has_amount_filter(&resolved),
+            "resolved mode must emit the Cull Filter edge from amount too (raw/resolved parity), got {:?}",
+            resolved.field_edges
+        );
+    }
+
+    /// #147 raw/resolved parity for COMBINE: a Combine's `where_expr`-driven
+    /// JoinKey edges must be emitted by the schema-resolved builder too, not just
+    /// the raw approximation — so a future resolved-path special-casing (e.g. the
+    /// typed-output-row `continue`) cannot silently drop the join key. Mirrors
+    /// `resolved_mode_emits_cull_filter_edges_in_parity_with_raw`.
+    #[test]
+    fn resolved_mode_emits_combine_join_key_edges_in_parity_with_raw() {
+        let yaml = r#"
+pipeline:
+  name: combine_join_key_parity
+nodes:
+  - type: source
+    name: products
+    config:
+      name: products
+      type: csv
+      path: ./products.csv
+      schema:
+        - { name: product_code, type: string }
+        - { name: product_name, type: string }
+  - type: source
+    name: inventory
+    config:
+      name: inventory
+      type: csv
+      path: ./inventory.csv
+      schema:
+        - { name: product_code, type: string }
+        - { name: on_hand, type: int }
+  - type: combine
+    name: joined
+    input:
+      products: products
+      inventory: inventory
+    config:
+      where: "products.product_code == inventory.product_code"
+      match: first
+      on_miss: skip
+      cxl: |
+        emit available = on_hand
+      propagate_ck: driver
+  - type: output
+    name: out
+    input: joined
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(yaml).expect("combine parity fixture parses");
+
+        // A JoinKey edge from EACH side's `product_code`, asserted in BOTH the raw
+        // approximation and the engine-resolved view.
+        let has_both_side_join_keys = |view: &PipelineView| {
+            let i_products = stage_idx(view, "products");
+            let i_inventory = stage_idx(view, "inventory");
+            let i_joined = stage_idx(view, "joined");
+            let from_side = |from: usize| {
+                view.field_edges.iter().any(|e| {
+                    e.from_node == from
+                        && e.from_field == "product_code"
+                        && e.to_node == i_joined
+                        && e.kind == FieldEdgeKind::JoinKey
+                })
+            };
+            from_side(i_products) && from_side(i_inventory)
+        };
+
+        let raw = derive_pipeline_view(&config);
+        assert!(
+            has_both_side_join_keys(&raw),
+            "raw mode must emit Combine JoinKey edges from both sides, got {:?}",
+            raw.field_edges
+        );
+
+        let plan = config
+            .compile(&CompileContext::default())
+            .expect("combine parity fixture compiles");
+        let resolved = derive_resolved_pipeline_view(&plan);
+        assert!(
+            has_both_side_join_keys(&resolved),
+            "resolved mode must emit Combine JoinKey edges from both sides too (raw/resolved parity), got {:?}",
+            resolved.field_edges
         );
     }
 
@@ -4976,15 +5660,88 @@ nodes:
             view.field_edges
         );
 
-        // A column unique to one input carries from exactly that input — the
-        // fan-out is keyed on real producers, not on every predecessor.
+        // #147: the Combine's `where_expr`
+        // (`products.product_code == inventory.product_code`) drives an INDIRECT
+        // `JoinKey` edge from EACH side's `product_code` to the joined output's
+        // `product_code` row — derived from the predicate's read columns (the SAME
+        // `predicate_support` path as Cull/Route), NOT a name-collision carry. It
+        // COEXISTS with the DIRECT Passthrough value carries asserted above.
+        let join_key_from_products = FieldEdge {
+            from_node: i_products,
+            from_field: "product_code".to_string(),
+            to_node: i_joined,
+            to_field: "product_code".to_string(),
+            kind: FieldEdgeKind::JoinKey,
+        };
+        let join_key_from_inventory = FieldEdge {
+            from_node: i_inventory,
+            from_field: "product_code".to_string(),
+            to_node: i_joined,
+            to_field: "product_code".to_string(),
+            kind: FieldEdgeKind::JoinKey,
+        };
+        assert!(
+            view.field_edges.contains(&join_key_from_products),
+            "where_expr must drive a JoinKey edge from `products.product_code`, got {:?}",
+            view.field_edges
+        );
+        assert!(
+            view.field_edges.contains(&join_key_from_inventory),
+            "where_expr must drive a JoinKey edge from `inventory.product_code`, got {:?}",
+            view.field_edges
+        );
+
+        // FAN-TO-EVERY-ROW POLICY (#147): a JoinKey influence edge connects each
+        // join-key producer to EVERY surviving output row of the Combine — not
+        // only the key row `product_code`. This is the policy the value/influence
+        // axis-separation relies on (the `nature()==Direct` scoping of the
+        // value-provenance counts below is only sound because JoinKey deliberately
+        // lands on non-key rows too). Assert it lands on the carried non-key row
+        // `on_hand` AND the computed emit row `available`, from BOTH sides — a
+        // regression narrowing JoinKey to only the key row would fail HERE.
+        for to_field in ["on_hand", "available"] {
+            for from in [i_products, i_inventory] {
+                assert!(
+                    view.field_edges.contains(&FieldEdge {
+                        from_node: from,
+                        from_field: "product_code".to_string(),
+                        to_node: i_joined,
+                        to_field: to_field.to_string(),
+                        kind: FieldEdgeKind::JoinKey,
+                    }),
+                    "JoinKey must fan from node {from}'s product_code to non-key row \
+                     `{to_field}`, got {:?}",
+                    view.field_edges
+                );
+            }
+        }
+        // Concretely: the join key influences ALL FOUR surviving rows
+        // (product_code, product_name, on_hand, available) from each of the two
+        // sides → eight JoinKey edges in total.
         assert_eq!(
             view.field_edges
                 .iter()
-                .filter(|e| e.to_node == i_joined && e.to_field == "on_hand")
+                .filter(|e| e.to_node == i_joined && e.kind == FieldEdgeKind::JoinKey)
+                .count(),
+            8,
+            "two producers × four surviving rows = eight JoinKey edges, got {:?}",
+            view.field_edges
+        );
+
+        // A column unique to one input carries from exactly that input — the
+        // fan-out is keyed on real producers, not on every predecessor. Scoped to
+        // DIRECT value carries: the Combine's `where_expr` JoinKey influence
+        // (#147) fans to EVERY surviving row (including `on_hand`), so it is
+        // counted separately and does not change the value-provenance count.
+        assert_eq!(
+            view.field_edges
+                .iter()
+                .filter(|e| e.to_node == i_joined
+                    && e.to_field == "on_hand"
+                    && e.kind.nature() == EdgeNature::Direct)
                 .count(),
             1,
-            "a column unique to one input carries from exactly that input"
+            "a column unique to one input carries (as a value) from exactly that input"
         );
 
         // The computed emit `available = on_hand` derives from the single input
@@ -5004,10 +5761,12 @@ nodes:
         assert_eq!(
             view.field_edges
                 .iter()
-                .filter(|e| e.to_node == i_joined && e.to_field == "available")
+                .filter(|e| e.to_node == i_joined
+                    && e.to_field == "available"
+                    && e.kind.nature() == EdgeNature::Direct)
                 .count(),
             1,
-            "available has exactly one producer (on_hand is unique to inventory)"
+            "available has exactly one value producer (on_hand is unique to inventory)"
         );
 
         // Hovering the join key on the combine lights up BOTH incoming carries —
@@ -5023,6 +5782,96 @@ nodes:
             closure.contains(&idx_of(&carry_from_products))
                 && closure.contains(&idx_of(&carry_from_inventory)),
             "hovering the join key reveals carries from every input, got {closure:?}"
+        );
+    }
+
+    /// #147 (the case the retired name-collision heuristic missed): a Combine
+    /// whose join columns DIFFER in name (`left.k1 == right.k2`) must still drive
+    /// `JoinKey` edges, sourced from the real `where_expr` read columns — `k1` on
+    /// the left side and `k2` on the right — NOT from any shared-name carry. And a
+    /// non-join column that happens to share a name across BOTH inputs
+    /// (`created_at`) must get NO `JoinKey` edge, proving the key comes from the
+    /// predicate, not a name collision.
+    #[test]
+    fn combine_join_key_from_where_expr_not_name_collision() {
+        let yaml = r#"
+pipeline:
+  name: combine_diff_keys
+nodes:
+  - type: source
+    name: left
+    config:
+      name: left
+      type: csv
+      path: ./left.csv
+      schema:
+        - { name: k1, type: string }
+        - { name: created_at, type: string }
+        - { name: left_val, type: int }
+  - type: source
+    name: right
+    config:
+      name: right
+      type: csv
+      path: ./right.csv
+      schema:
+        - { name: k2, type: string }
+        - { name: created_at, type: string }
+        - { name: right_val, type: int }
+  - type: combine
+    name: joined
+    input:
+      left: left
+      right: right
+    config:
+      where: "left.k1 == right.k2"
+      match: first
+      on_miss: skip
+      cxl: |
+        emit out_val = left_val + right_val
+      propagate_ck: driver
+"#;
+        let config = parse_config(yaml).expect("combine diff-keys pipeline parses");
+        let view = derive_pipeline_view(&config);
+
+        let i_left = stage_idx(&view, "left");
+        let i_right = stage_idx(&view, "right");
+        let i_joined = stage_idx(&view, "joined");
+
+        // The differently-named join columns each drive a JoinKey edge from their
+        // own side — `left.k1` and `right.k2`. (The edge fans to every surviving
+        // output row per the influence-edge target policy; here we only assert the
+        // origin column is correct and the side is correct.)
+        let has_join_key_from = |from: usize, field: &str| {
+            view.field_edges.iter().any(|e| {
+                e.from_node == from
+                    && e.from_field == field
+                    && e.to_node == i_joined
+                    && e.kind == FieldEdgeKind::JoinKey
+            })
+        };
+        assert!(
+            has_join_key_from(i_left, "k1"),
+            "where_expr must drive a JoinKey edge from left.k1, got {:?}",
+            view.field_edges
+        );
+        assert!(
+            has_join_key_from(i_right, "k2"),
+            "where_expr must drive a JoinKey edge from right.k2, got {:?}",
+            view.field_edges
+        );
+
+        // `created_at` is a non-join column present on BOTH inputs with the SAME
+        // name. The retired heuristic would have falsely tagged it a join key; the
+        // where_expr-driven path must NOT — no JoinKey edge originates from it on
+        // either side.
+        assert!(
+            !view
+                .field_edges
+                .iter()
+                .any(|e| e.kind == FieldEdgeKind::JoinKey && e.from_field == "created_at"),
+            "a same-named non-join column must get NO JoinKey edge, got {:?}",
+            view.field_edges
         );
     }
 
@@ -5125,8 +5974,13 @@ nodes:
         );
 
         // PRECISION: `emit product_code = orders.product_code` connects ONLY to
-        // the orders side, even though `product_code` also exists in products —
-        // an explicit alias pins the producer; it does not fan to every input.
+        // the orders side for its VALUE, even though `product_code` also exists in
+        // products — an explicit alias pins the value producer; it does not fan to
+        // every input. (The Combine's `where_expr`
+        // `orders.product_code == products.product_code` separately drives an
+        // INDIRECT JoinKey influence from BOTH sides per #147; this precision
+        // claim is about DIRECT value provenance, so it is scoped to value
+        // carries.)
         assert!(
             has_edge(
                 i_orders,
@@ -5142,8 +5996,9 @@ nodes:
                     && e.from_field == "product_code"
                     && e.to_node == i_enriched
                     && e.to_field == "product_code"
+                    && e.kind.nature() == EdgeNature::Direct
             }),
-            "an explicit orders.product_code copy must NOT fan an edge from products"
+            "an explicit orders.product_code copy must NOT fan a value edge from products"
         );
 
         // The node must surface SOME input-side lineage (the bug was zero edges).
@@ -5328,34 +6183,65 @@ nodes:
             from_field: field.to_string(),
             to_node: i_merged,
             to_field: field.to_string(),
-            // A CXL-less merge has no emits, so every carry is a pure Passthrough.
+            // A CXL-less merge has no emits, so every value carry is a pure
+            // Passthrough.
             kind: FieldEdgeKind::Passthrough,
         };
-        let carries_to = |field: &str| {
+        let edges_to = |field: &str, kind: FieldEdgeKind| {
             view.field_edges
                 .iter()
-                .filter(|e| e.to_node == i_merged && e.to_field == field)
+                .filter(|e| e.to_node == i_merged && e.to_field == field && e.kind == kind)
                 .count()
         };
 
-        // `id` is in all three inputs → carries from each.
+        // `id` is in all three inputs → a value carry from each. A Merge is a row
+        // UNION, never a join, so a shared column is ONLY a Passthrough carry —
+        // no JoinKey edge (#147).
         assert!(view.field_edges.contains(&carry(i_left, "id")));
         assert!(view.field_edges.contains(&carry(i_mid, "id")));
         assert!(view.field_edges.contains(&carry(i_right, "id")));
-        assert_eq!(carries_to("id"), 3, "got {:?}", view.field_edges);
+        assert_eq!(
+            edges_to("id", FieldEdgeKind::Passthrough),
+            3,
+            "got {:?}",
+            view.field_edges
+        );
 
-        // `shared` is in left + mid ONLY → carries from those two, never `right`.
+        // `shared` is in left + mid ONLY → value carries from those two, never
+        // `right`.
         assert!(view.field_edges.contains(&carry(i_left, "shared")));
         assert!(view.field_edges.contains(&carry(i_mid, "shared")));
         assert!(
             !view.field_edges.contains(&carry(i_right, "shared")),
             "must not fan out to the input that never produced the column"
         );
-        assert_eq!(carries_to("shared"), 2, "got {:?}", view.field_edges);
+        assert_eq!(
+            edges_to("shared", FieldEdgeKind::Passthrough),
+            2,
+            "got {:?}",
+            view.field_edges
+        );
 
-        // `only_right` is unique to one input → exactly one carry.
+        // `only_right` is unique to one input → exactly one value carry.
         assert!(view.field_edges.contains(&carry(i_right, "only_right")));
-        assert_eq!(carries_to("only_right"), 1, "got {:?}", view.field_edges);
+        assert_eq!(
+            edges_to("only_right", FieldEdgeKind::Passthrough),
+            1,
+            "got {:?}",
+            view.field_edges
+        );
+
+        // A Merge performs no join: across the WHOLE node there is not a single
+        // JoinKey edge, regardless of how many inputs share a column.
+        assert_eq!(
+            view.field_edges
+                .iter()
+                .filter(|e| e.to_node == i_merged && e.kind == FieldEdgeKind::JoinKey)
+                .count(),
+            0,
+            "a Merge is a row UNION and must emit no JoinKey edges, got {:?}",
+            view.field_edges
+        );
     }
 
     /// Find a stage's output field row by name (test helper for the
@@ -6226,7 +7112,6 @@ nodes:
             kind: FieldKind::PassThrough,
             ty: None,
             is_correlation_key: false,
-            is_aggregate_grain: false,
         }];
 
         assert_eq!(

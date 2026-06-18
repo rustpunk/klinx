@@ -455,7 +455,6 @@ pub fn CanvasNode(
                             highlighted: highlighted.contains(field.name.as_str()),
                             temporary: temporary.contains(field.name.as_str()),
                             is_correlation_key: field.is_correlation_key,
-                            is_aggregate_grain: field.is_aggregate_grain,
                             show_input_anchor: show_field_input_anchors,
                             show_output_anchor: show_field_output_anchors,
                         }
@@ -557,9 +556,10 @@ pub fn CanvasNode(
 /// rows. Unmarked rows reserve no gutter, keeping wide-schema field names close
 /// to the left port while preserving source schema order.
 ///
-/// `is_aggregate_grain` marks Aggregate `group_by` fields, and carried copies
-/// of those fields downstream, as the grouped-record failure grain without
-/// calling them source correlation keys.
+/// The Aggregate group-by grain is no longer a per-row flag: it is represented
+/// exactly once as the INDIRECT `GroupBy` field edge (#147), revealed (dashed /
+/// ghosted) when the group-key field is selected, so this row carries no
+/// separate grain marker.
 #[component]
 fn FieldRowView(
     stage_id: String,
@@ -571,7 +571,6 @@ fn FieldRowView(
     highlighted: bool,
     temporary: bool,
     is_correlation_key: bool,
-    is_aggregate_grain: bool,
     show_input_anchor: bool,
     show_output_anchor: bool,
 ) -> Element {
@@ -609,9 +608,6 @@ fn FieldRowView(
     if is_correlation_key {
         tip.push_str(" · source correlation key");
     }
-    if is_aggregate_grain {
-        tip.push_str(" · aggregate failure grain");
-    }
     if temporary {
         tip.push_str(" · temporarily revealed");
     }
@@ -632,9 +628,6 @@ fn FieldRowView(
     }
     if is_correlation_key {
         row_class.push_str(" klinx-node-field--correlation-key");
-    }
-    if is_aggregate_grain {
-        row_class.push_str(" klinx-node-field--aggregate-grain");
     }
 
     rsx! {
