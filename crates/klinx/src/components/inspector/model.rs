@@ -1522,6 +1522,8 @@ fn edge_kind_label(kind: FieldEdgeKind) -> &'static str {
         FieldEdgeKind::GroupBy => "group by",
         FieldEdgeKind::JoinKey => "join key",
         FieldEdgeKind::Conditional => "conditional",
+        // Composition boundary crossing (#154).
+        FieldEdgeKind::Boundary => "boundary",
     }
 }
 

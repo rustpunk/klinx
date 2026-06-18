@@ -161,20 +161,32 @@ pub enum FieldEdgeKind {
     /// output. The default/fallback branch has no predicate, so emits none.
     /// OpenLineage `CONDITIONAL`.
     Conditional,
+    /// A composition boundary crossing (#154): an outer field bound to a
+    /// composition's inner port (outer input field → inner source port, or inner
+    /// output port → outer output field). The value rides across the composition
+    /// wall unchanged, so this is a DIRECT crossing — the trace follows it as part
+    /// of the value graph — distinguished from intra-scope carries/derives so the
+    /// Inspector can mark "↳ enters / ↥ exits composition X". Precision is `Exact`
+    /// when bound to a real body row, `Approximate` when the body row is missing
+    /// and it degrades to a node-level connector.
+    Boundary,
 }
 
 impl FieldEdgeKind {
     /// The [`EdgeNature`] of this kind — a pure, total match.
     ///
-    /// The first three kinds are [`EdgeNature::Direct`] (a value is carried or
-    /// derived); the four influence kinds are [`EdgeNature::Indirect`]. This is
-    /// the only place nature is decided: deriving it from the kind (rather than
-    /// storing it alongside) makes an inconsistent edge unrepresentable.
+    /// The carry/derive kinds and the composition `Boundary` crossing are
+    /// [`EdgeNature::Direct`] (a value is carried, derived, or ridden across a
+    /// composition wall unchanged); the four influence kinds are
+    /// [`EdgeNature::Indirect`]. This is the only place nature is decided: deriving
+    /// it from the kind (rather than storing it alongside) makes an inconsistent
+    /// edge unrepresentable.
     pub fn nature(self) -> EdgeNature {
         match self {
-            FieldEdgeKind::Passthrough | FieldEdgeKind::Access | FieldEdgeKind::Derive => {
-                EdgeNature::Direct
-            }
+            FieldEdgeKind::Passthrough
+            | FieldEdgeKind::Access
+            | FieldEdgeKind::Derive
+            | FieldEdgeKind::Boundary => EdgeNature::Direct,
             FieldEdgeKind::Filter
             | FieldEdgeKind::GroupBy
             | FieldEdgeKind::JoinKey
@@ -419,6 +431,37 @@ impl FieldEdge {
             kind: FieldEdgeKind::Passthrough,
             precision: Precision::Approximate,
             precision_reason: "conservative CXL-less fan-in carry",
+        }
+    }
+
+    /// Construct a composition [`FieldEdgeKind::Boundary`] crossing (#154) binding
+    /// an outer field to a composition's inner port. `approximate == false` (a real
+    /// body row backs the crossing) is [`Precision::Exact`] — the value rides across
+    /// the wall unchanged; `approximate == true` (the body row was missing and the
+    /// crossing degraded to a node-level connector) is [`Precision::Approximate`].
+    pub fn boundary(
+        from_node: usize,
+        from_field: String,
+        to_node: usize,
+        to_field: String,
+        approximate: bool,
+    ) -> FieldEdge {
+        let (precision, reason) = if approximate {
+            (
+                Precision::Approximate,
+                "composition boundary degraded: body rows unavailable",
+            )
+        } else {
+            (Precision::Exact, "composition boundary crossing")
+        };
+        FieldEdge {
+            from_node,
+            from_field,
+            to_node,
+            to_field,
+            kind: FieldEdgeKind::Boundary,
+            precision,
+            precision_reason: reason,
         }
     }
 }
@@ -1290,6 +1333,7 @@ mod tests {
             FieldEdgeKind::Passthrough,
             FieldEdgeKind::Access,
             FieldEdgeKind::Derive,
+            FieldEdgeKind::Boundary,
         ] {
             assert_eq!(kind.nature(), EdgeNature::Direct, "{kind:?} must be Direct");
         }
