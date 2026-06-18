@@ -496,6 +496,7 @@ fn CxlMentionsSection(mentions: Vec<CxlMentionView>) -> Element {
 
 #[component]
 fn TraceList(title: &'static str, entries: Vec<TraceEndpointView>, empty: &'static str) -> Element {
+    let state = use_app_state();
     rsx! {
         div {
             class: "klinx-field-trace-group",
@@ -506,10 +507,25 @@ fn TraceList(title: &'static str, entries: Vec<TraceEndpointView>, empty: &'stat
                 div {
                     class: "klinx-field-trace-list",
                     for entry in entries.iter() {
+                        // Clicking a hop selects that field on the canvas (#151):
+                        // it writes the shared `SelectedField`, which the canvas
+                        // reveal effect resolves to a node + reveals, and from
+                        // which the inspector rebuilds onto the new field. Field
+                        // selection supersedes any node selection, mirroring the
+                        // canvas field-row click.
                         div {
                             key: "{entry.stage_id}-{entry.field_name}-{entry.hop}",
-                            class: "klinx-field-trace-row",
+                            class: "klinx-field-trace-row klinx-field-trace-row--selectable",
                             "data-stage-kind": "{entry.stage_kind_attr}",
+                            onclick: {
+                                let target = entry.to_selected_field();
+                                move |_| {
+                                    let mut selected_field = state.selected_field;
+                                    let mut selected_stages = state.selected_stages;
+                                    selected_field.set(Some(target.clone()));
+                                    selected_stages.set(std::collections::HashSet::new());
+                                }
+                            },
                             span { class: "klinx-field-trace-hop", "h{entry.hop}" }
                             span { class: "klinx-field-trace-main",
                                 span { class: "klinx-field-trace-stage", "{entry.stage_label}" }

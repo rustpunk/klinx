@@ -186,6 +186,17 @@ pub struct TraceEndpointView {
     pub hop: usize,
 }
 
+impl TraceEndpointView {
+    /// The canvas field this trace hop points at. Selecting it drives the shared
+    /// [`SelectedField`] state, which both the canvas reveal effect and the
+    /// inspector read — so clicking a hop in the Inspector navigates the canvas
+    /// to that field (#151). `stage_id` + `field_name` are the field identity,
+    /// carried verbatim from the trace BFS, so no lookup is needed.
+    pub fn to_selected_field(&self) -> SelectedField {
+        SelectedField::new(self.stage_id.clone(), self.field_name.clone())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoleUsageView {
     pub stage_label: String,
@@ -1442,6 +1453,18 @@ nodes:
         let passthrough = build_field_detail(&view, None, &SelectedField::new("clean", "x"))
             .expect("field exists");
         assert_eq!(passthrough.field_kind_label, "passthrough");
+
+        // #151: an upstream trace hop round-trips to a selectable canvas field —
+        // its `to_selected_field()` carries the exact (stage_id, field_name)
+        // identity, which `build_field_detail` (what the inspector rebuilds from
+        // on selection) resolves back to that same field.
+        let hop = &emitted.upstream[0];
+        let hop_selection = hop.to_selected_field();
+        assert_eq!(hop_selection.stage_id, hop.stage_id);
+        assert_eq!(hop_selection.field_name, hop.field_name);
+        let resolved = build_field_detail(&view, None, &hop_selection)
+            .expect("trace hop resolves to a canvas field");
+        assert_eq!(resolved.selection, hop_selection);
     }
 
     #[test]
@@ -1463,5 +1486,20 @@ nodes:
             .expect("field exists");
         assert!(detail.lineage_unavailable_reason.is_some());
         assert!(build_field_detail(&view, None, &SelectedField::new("missing", "x")).is_none());
+
+        // #151: a trace hop pointing at a field absent from the current view
+        // resolves to no detail — selecting it surfaces the Missing inspector
+        // rather than stale content.
+        let stale_hop = TraceEndpointView {
+            stage_id: "missing".to_string(),
+            stage_label: "Missing".to_string(),
+            stage_kind_label: "Source",
+            stage_kind_attr: "source",
+            field_name: "x".to_string(),
+            edge_kind_label: "derive",
+            edge_kind_attr: "derive",
+            hop: 1,
+        };
+        assert!(build_field_detail(&view, None, &stale_hop.to_selected_field()).is_none());
     }
 }
