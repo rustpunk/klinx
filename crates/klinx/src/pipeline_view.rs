@@ -18,6 +18,12 @@ pub use field_lineage::{
     field_lineage_full, field_lineage_full_capped, group_endpoints_by_node, lineage_closure,
     lineage_keep_nodes,
 };
+/// Composition input-boundary marker grammar (#155), re-exported crate-internally so
+/// the Inspector's scope-aware trace builds/parses the marker through the SAME
+/// single-source-of-truth helpers `field_lineage` uses to mint it (#154).
+pub(crate) use field_lineage::{
+    composition_in_boundary_field, parse_composition_in_boundary_field,
+};
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;
 
@@ -3560,6 +3566,31 @@ fn cxl_subtitle(cxl: &str) -> String {
 /// `body.graph.edge_references()` so route, merge, and combine branches all
 /// render as the real DAG instead of a synthetic chain.
 pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) -> PipelineView {
+    // The public drill-in canvas needs laid-out coordinates, so run the barycenter
+    // pass. The signature and behavior are unchanged; the implementation now delegates
+    // to a shared core that the lineage-only [`derive_body_scope`] path reuses WITHOUT
+    // layout (#155 review item 4).
+    let (view, _idx_to_slot) = build_body_view(body, true);
+    view
+}
+
+/// Shared core for [`derive_body_view`] and [`derive_body_scope`]: build a composition
+/// body's mini-DAG view (#155 review). Returns the view plus the NodeIndex→slot map so
+/// the scope path can project the body's port→NodeIndex tables into slot space without
+/// recomputing it.
+///
+/// `with_layout` gates the barycenter [`layout_positions`] pass. The drill-in canvas
+/// needs the x/y coordinates (`true`); the Inspector's lineage trace reads only
+/// `field_edges`, the rows, and the port→slot maps, so it skips the pass (`false`) —
+/// `build_selected_inspector` is unmemoized and runs every inspector render, and the
+/// layout cost is wasted there.
+fn build_body_view(
+    body: &clinker_plan::plan::composition_body::BoundBody,
+    with_layout: bool,
+) -> (
+    PipelineView,
+    std::collections::HashMap<petgraph::graph::NodeIndex, usize>,
+) {
     use clinker_plan::plan::execution::PlanNode;
     use petgraph::Direction;
     use petgraph::graph::NodeIndex;
@@ -3675,19 +3706,23 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
 
     let field_edges = body_field_edges(body, &stages, &predecessors);
 
-    // Body rows come from the engine's body-scoped output rows. Missing row data
-    // keeps the classic [`NODE_HEIGHT`] and contributes no field edges.
-    let heights: Vec<f32> = stages
-        .iter()
-        .map(|stage| row_stack_height(stage.fields.len()))
-        .collect();
-    let positions = layout_positions(&slot_cols, &predecessors, &heights);
-    for (stage, (x, y)) in stages.iter_mut().zip(positions) {
-        stage.canvas_x = x;
-        stage.canvas_y = y;
+    if with_layout {
+        // Body rows come from the engine's body-scoped output rows. Missing row data
+        // keeps the classic [`NODE_HEIGHT`] and contributes no field edges. The
+        // lineage-only path (`with_layout == false`) leaves every `canvas_x/y` at 0.0,
+        // which the trace never reads.
+        let heights: Vec<f32> = stages
+            .iter()
+            .map(|stage| row_stack_height(stage.fields.len()))
+            .collect();
+        let positions = layout_positions(&slot_cols, &predecessors, &heights);
+        for (stage, (x, y)) in stages.iter_mut().zip(positions) {
+            stage.canvas_x = x;
+            stage.canvas_y = y;
+        }
     }
 
-    PipelineView {
+    let view = PipelineView {
         stages,
         connections,
         connection_paths: Vec::new(),
@@ -3695,6 +3730,72 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
         field_edge_paths: Vec::new(),
         role_edges: Vec::new(),
         role_edge_paths: Vec::new(),
+    };
+    (view, idx_to_slot)
+}
+
+/// A composition body's own lineage view plus the port↔slot maps the Inspector's
+/// scope-aware lineage trace (#155) needs to descend into and resurface from the
+/// body.
+///
+/// The `view` is exactly what [`derive_body_view`] produces — the body's mini-DAG
+/// in the body's own index space, where a stage's SLOT is its position in
+/// `body.topo_order` (the loop in `derive_body_view` pushes stages in that order,
+/// so slot == topo position). The two maps translate the body's declared ports to
+/// that slot space:
+///
+/// - `input_port_to_slot`: input-port name → the body slot of the node that
+///   consumes the port (from [`BoundBody::port_name_to_node_idx`]). Tracing
+///   UPSTREAM, when the in-body BFS reaches this slot it has hit the body boundary
+///   and resurfaces to the parent scope; tracing DOWNSTREAM it is the descent
+///   entry point.
+/// - `output_port_to_slot`: output-port name → the body slot of the terminal node
+///   the port surfaces (from [`BoundBody::output_port_to_node_idx`]). The mirror
+///   of the above: the UPSTREAM descent entry / DOWNSTREAM resurface boundary.
+///
+/// A port whose NodeIndex is not present in `body.topo_order` (a malformed body)
+/// is omitted from the map rather than panicking, so the trace degrades to a leaf
+/// at that crossing instead of crashing the Inspector.
+pub struct BodyScope {
+    pub view: PipelineView,
+    pub input_port_to_slot: std::collections::HashMap<String, usize>,
+    pub output_port_to_slot: std::collections::HashMap<String, usize>,
+}
+
+/// Derive a composition body's [`BodyScope`] — its lineage view plus the port→slot
+/// maps #155's scope-aware trace needs.
+///
+/// Reuses the shared [`build_body_view`] core WITHOUT the barycenter layout pass: the
+/// trace reads only `field_edges`, the rows, and the port→slot maps, never the canvas
+/// coordinates, so the layout cost is skipped on this hot (per-render, unmemoized)
+/// path. The returned NodeIndex→slot map projects the body's port→NodeIndex tables
+/// into slot space; it comes straight from the builder (slot == position in
+/// `body.topo_order`), so the scope path never recomputes it.
+pub fn derive_body_scope(body: &clinker_plan::plan::composition_body::BoundBody) -> BodyScope {
+    use petgraph::graph::NodeIndex;
+    use std::collections::HashMap;
+
+    let (view, idx_to_slot) = build_body_view(body, false);
+
+    let project = |ports: &mut HashMap<String, usize>, port: &str, idx: NodeIndex| {
+        if let Some(&slot) = idx_to_slot.get(&idx) {
+            ports.insert(port.to_string(), slot);
+        }
+    };
+
+    let mut input_port_to_slot = HashMap::new();
+    for (port, &idx) in &body.port_name_to_node_idx {
+        project(&mut input_port_to_slot, port, idx);
+    }
+    let mut output_port_to_slot = HashMap::new();
+    for (port, &idx) in &body.output_port_to_node_idx {
+        project(&mut output_port_to_slot, port, idx);
+    }
+
+    BodyScope {
+        view,
+        input_port_to_slot,
+        output_port_to_slot,
     }
 }
 
@@ -4903,6 +5004,34 @@ nodes:
                 .all(|edge| edge.from_node != first_idx && edge.to_node != first_idx),
             "missing row data should suppress field edges for that node: {:?}",
             view.field_edges
+        );
+    }
+
+    /// #155 recovery contract: `derive_body_scope` projects the body's port→NodeIndex
+    /// maps into the `derive_body_view` slot space (slot == topo position). The engine
+    /// seeds each input port as a dedicated body Source node, so the fixture body view
+    /// is `src → first → second`: `port_name_to_node_idx["src"]` is the body `src`
+    /// node (slot 0) and `output_port_to_node_idx["result"]` is `second`. These are the
+    /// boundary slots #155's descent enters at / resurfaces from.
+    #[test]
+    fn body_scope_maps_ports_to_view_slots() {
+        let body = compiled_body_fixture();
+        let scope = derive_body_scope(&body);
+
+        let src_idx = stage_idx(&scope.view, "src");
+        let second_idx = stage_idx(&scope.view, "second");
+
+        assert_eq!(
+            scope.input_port_to_slot.get("src").copied(),
+            Some(src_idx),
+            "input port `src` seeds the body `src` source node: {:?}",
+            scope.input_port_to_slot,
+        );
+        assert_eq!(
+            scope.output_port_to_slot.get("result").copied(),
+            Some(second_idx),
+            "output port `result` is surfaced by body node `second`: {:?}",
+            scope.output_port_to_slot,
         );
     }
 

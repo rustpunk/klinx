@@ -1,12 +1,17 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 use clinker_plan::config::{PipelineConfig, PipelineNode};
+use clinker_plan::plan::CompiledPlan;
+use clinker_plan::plan::composition_body::CompositionBodyId;
 
 use crate::autodoc::{CxlStatementKind, generate_stage_doc};
 use crate::notes::parse_notes;
 use crate::pipeline_view::{
-    EdgeNature, FieldEdgeKind, FieldKind, PipelineView, Precision, RoleEdge, StagePortSide,
-    StageView,
+    BodyScope, EdgeNature, FieldEdgeKind, FieldKind, PipelineView, Precision, RoleEdge, StageKind,
+    StagePortSide, StageView, composition_in_boundary_field, derive_body_scope,
+    parse_composition_in_boundary_field,
 };
 use crate::state::{ChannelViewMode, SelectedField};
 
@@ -104,6 +109,12 @@ pub struct FieldInspectorModel {
     /// degraded-precision warning. Kept distinct from precision so an `Exact` field
     /// with edges is never confused with an edgeless field.
     pub lineage_empty: bool,
+    /// The deepest composition nesting the lineage trace descended through (#155) —
+    /// the max of the upstream and downstream trees' [`max_scope_depth`]. `0` when the
+    /// trace never crossed a composition wall (flat trace, no compiled plan, or a
+    /// boundary-free field). #156 renders this as the "originated N deep" summary; it
+    /// is precomputed here so the panel needs no trace re-walk.
+    pub max_scope_depth: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -214,6 +225,29 @@ pub struct CxlMentionView {
     pub writes: String,
 }
 
+/// The composition-boundary character of a trace hop (#155), set on the hops where
+/// the lineage walk crosses a composition wall, and `None` on every intra-scope hop.
+///
+/// This is the model-level DATA #156 renders as the "↳ enters / ↥ exits / ↺
+/// recursive composition X" markers; #155 only produces it (asserted at this model
+/// level) and does not build the RSX. Each variant carries the outer composition
+/// stage's label so the marker can name the composition it crosses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BoundaryHopKind {
+    /// The walk descended INTO this composition's body (UPSTREAM: arriving at a
+    /// composition output column; DOWNSTREAM: arriving at an input port). The hop
+    /// it is set on is the first hop INSIDE the body.
+    Enter(String),
+    /// The walk resurfaced OUT of a composition body back to the parent scope
+    /// (UPSTREAM: leaving via an input port; DOWNSTREAM: leaving via an output
+    /// port). The hop it is set on is the outer-scope field the value continues at.
+    Exit(String),
+    /// A descent that would re-enter a composition already open on the current path
+    /// — a recursive / self-referential composition. The hop is a terminal leaf
+    /// (the walk does not expand it) so the trace always terminates.
+    Recursive(String),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TraceEndpointView {
     pub stage_id: String,
@@ -232,6 +266,12 @@ pub struct TraceEndpointView {
     /// an Exact carry can never mask a co-incident Approximate influence.
     pub precision: Precision,
     pub hop: usize,
+    /// The composition-boundary character of this hop (#155), or `None` for an
+    /// ordinary intra-scope hop. Set on the hops where the scope-aware trace crosses
+    /// a composition wall — `Enter`/`Exit`/`Recursive`, each naming the composition —
+    /// so #156 can render the crossing marker. A flat trace (`resolver = None`) or a
+    /// boundary-free view never sets it.
+    pub boundary: Option<BoundaryHopKind>,
 }
 
 impl TraceEndpointView {
@@ -266,17 +306,29 @@ pub struct TraceNode {
 }
 
 impl TraceNode {
-    /// Total node count in this subtree, including the node itself (#153). The
-    /// LINEAGE summary counts every traced hop, not just the direct (hop-1) ones,
-    /// so the count matches the former flat list's length.
-    fn count(&self) -> usize {
-        1 + self.children.iter().map(TraceNode::count).sum::<usize>()
+    /// Count of REAL field hops in this subtree (#155) — every hop except the
+    /// synthetic composition-boundary crossings (`Enter`/`Exit`/`Recursive`). Used by
+    /// the "N upstream / M downstream" LINEAGE figure, which means "real source /
+    /// consumer FIELDS": a boundary crossing is not a distinct upstream field, so
+    /// counting it would inflate the figure for any column carried through a
+    /// composition (a #155 regression vs the pre-composition-descent count).
+    fn count_field_hops(&self) -> usize {
+        let self_count = usize::from(self.endpoint.boundary.is_none());
+        self_count
+            + self
+                .children
+                .iter()
+                .map(TraceNode::count_field_hops)
+                .sum::<usize>()
     }
 }
 
-/// Total node count across a forest of trace trees (#153).
-pub fn count_trace_nodes(nodes: &[TraceNode]) -> usize {
-    nodes.iter().map(TraceNode::count).sum()
+/// Count of real FIELD hops across a forest, excluding synthetic composition-boundary
+/// crossings (#155). This is what the Inspector's "N upstream / M downstream" summary
+/// reports, so a column carried through a composition counts its true source/consumer
+/// fields, not the Enter/Exit markers added by the scope-aware descent.
+pub fn count_field_hops(nodes: &[TraceNode]) -> usize {
+    nodes.iter().map(TraceNode::count_field_hops).sum()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -299,6 +351,13 @@ enum TraceDirection {
 pub struct InspectorBuildContext<'a> {
     pub view: &'a PipelineView,
     pub config: Option<&'a PipelineConfig>,
+    /// The compiled plan, when one exists (#155). Threaded through to
+    /// [`build_field_detail`], which uses it to build the [`BodyScopeResolver`] the
+    /// lineage trace rides to descend into / resurface from composition bodies. When
+    /// `None`, the trace stays flat (graceful degradation) — exactly the legacy
+    /// single-view behavior. Distinct from `compiled_plan_available` (a bare bool the
+    /// node inspector reads); this carries the plan itself.
+    pub plan: Option<&'a CompiledPlan>,
     pub channel_mode: ChannelViewMode,
     pub compiled_plan_available: bool,
     pub visible_errors: &'a [String],
@@ -312,7 +371,7 @@ pub fn build_selected_inspector(
     match selection {
         InspectorSelection::Node(stage_id) => build_node_detail(&stage_id, ctx),
         InspectorSelection::Field(selection) => {
-            build_field_detail(ctx.view, ctx.config, &selection)
+            build_field_detail(ctx.view, ctx.config, ctx.plan, &selection)
                 .map(|field| SelectedInspectorModel::Field(Box::new(field)))
                 .unwrap_or_else(|| {
                     SelectedInspectorModel::Missing(MissingInspectorModel {
@@ -1009,6 +1068,7 @@ fn operator_body_section(
 fn build_field_detail(
     view: &PipelineView,
     config: Option<&PipelineConfig>,
+    plan: Option<&CompiledPlan>,
     selection: &SelectedField,
 ) -> Option<FieldInspectorModel> {
     let stage_index = view
@@ -1020,6 +1080,14 @@ fn build_field_detail(
         .fields
         .iter()
         .find(|field| field.name == selection.field_name)?;
+
+    // ONE scope resolver shared across all four traces (#155): its body→view cache is
+    // pure memoization, so resolving a body once serves every trace, while each
+    // `trace_tree` call keeps its OWN frontier/seen/stack — scope state can never leak
+    // between calls or between directions. When there is no compiled plan, the
+    // resolver is absent and every trace stays flat (graceful degradation).
+    let resolver = plan.map(BodyScopeResolver::new);
+    let resolver = resolver.as_ref();
 
     // The full trees include INDIRECT influence hops; the direct-only trees exclude
     // them (#153). Both pairs are built by the same `trace_tree` walk — the
@@ -1033,6 +1101,7 @@ fn build_field_detail(
         &selection.field_name,
         TraceDirection::Upstream,
         true,
+        resolver,
     );
     let mut downstream = trace_tree(
         view,
@@ -1040,6 +1109,7 @@ fn build_field_detail(
         &selection.field_name,
         TraceDirection::Downstream,
         true,
+        resolver,
     );
     let mut upstream_direct = trace_tree(
         view,
@@ -1047,6 +1117,7 @@ fn build_field_detail(
         &selection.field_name,
         TraceDirection::Upstream,
         false,
+        resolver,
     );
     let mut downstream_direct = trace_tree(
         view,
@@ -1054,6 +1125,7 @@ fn build_field_detail(
         &selection.field_name,
         TraceDirection::Downstream,
         false,
+        resolver,
     );
     // Attach per-hop CXL attribution (#153) where the hop's stage carries CXL
     // analysis. Walks the assembled trees with `config` in scope, reusing one
@@ -1100,8 +1172,17 @@ fn build_field_detail(
     // into Approximate. The PER-HOP badges still show each hop's own edge precision
     // (see `TraceEndpointView::precision`), so the approximation is visible exactly
     // where it occurs without painting the whole upstream cone.
-    let upstream_count = count_trace_nodes(&upstream);
-    let downstream_count = count_trace_nodes(&downstream);
+    // The LINEAGE "N upstream / M downstream" figure counts real source/consumer
+    // FIELDS, so it excludes the synthetic composition-boundary crossings #155 inserts
+    // (a carried column's Enter/Exit hops are not distinct fields). Pre-#155 there were
+    // no boundary hops, so this preserves the original meaning of the count.
+    let upstream_count = count_field_hops(&upstream);
+    let downstream_count = count_field_hops(&downstream);
+    // The deepest composition nesting either direction descended through (#155) — the
+    // "originated N deep" figure #156 surfaces. The full (indirect-included) trees are
+    // the authoritative depth: a direct-only toggle can only PRUNE crossings, never
+    // add one, so the full tree's depth is the maximum.
+    let deepest_scope = max_scope_depth(&upstream).max(max_scope_depth(&downstream));
     let lineage_empty = upstream.is_empty() && downstream.is_empty() && role_usages.is_empty();
     let lineage_precision = field.lineage_precision;
     let precision_reason = if lineage_empty {
@@ -1150,6 +1231,7 @@ fn build_field_detail(
         lineage_precision,
         precision_reason,
         lineage_empty,
+        max_scope_depth: deepest_scope,
     })
 }
 
@@ -1259,45 +1341,244 @@ struct TracedHop {
     parent: Option<usize>,
 }
 
+/// Hard backstop on how deep the scope-aware trace (#155) will descend through
+/// nested compositions. The per-path recursion guard already stops a body from
+/// re-entering itself, so this only bounds legitimately-deep nesting; it exists
+/// because the flat trace had no depth cap and recursion makes one mandatory. A
+/// descent that would exceed it is dropped silently (no terminal hop — the body it
+/// would enter is simply not expanded), which keeps a pathological pipeline's
+/// Inspector responsive without inventing a misleading marker.
+///
+/// Set ABOVE the engine's own nesting cap (`MAX_COMPOSITION_DEPTH = 50`, enforced at
+/// compile with E107/E112): any plan that compiled is already ≤ 50 deep, so this cap
+/// never truncates a legitimate trace — it is purely a defense against a malformed /
+/// future-unbounded body graph the Inspector might be handed. Keeping it strictly
+/// greater than the engine limit guarantees the trace shows every crossing of any
+/// real plan while still terminating on garbage input.
+const MAX_SCOPE_DEPTH: usize = 64;
+
+/// Memoizing resolver from a composition (by node name) to its body's [`BodyScope`]
+/// — the body's own lineage view plus the port↔slot maps the scope-aware trace
+/// (#155) rides to descend into and resurface from the body.
+///
+/// One resolver is built per [`build_field_detail`] and shared across all four
+/// `trace_tree` calls. The cache is PURE memoization (a body resolved once serves
+/// every trace and both toggle states); it carries no per-trace state, so sharing it
+/// cannot leak scope between traces — each `trace_tree` call keeps its own
+/// frontier/seen/stack.
+struct BodyScopeResolver<'a> {
+    plan: &'a CompiledPlan,
+    cache: RefCell<HashMap<CompositionBodyId, Rc<BodyScope>>>,
+}
+
+impl<'a> BodyScopeResolver<'a> {
+    fn new(plan: &'a CompiledPlan) -> Self {
+        Self {
+            plan,
+            cache: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// Resolve a composition node's body scope by the composition's NAME (#155).
+    ///
+    /// `composition_body_assignments` is keyed by composition node name globally
+    /// (top-level AND nested), so the same lookup resolves a nested composition
+    /// inside a body view. Returns the body id (for the recursion guard) and the
+    /// memoized [`BodyScope`]. `None` when the plan has no assignment / no bound body
+    /// for the name — the trace then degrades to a leaf at that crossing.
+    fn resolve(&self, comp_name: &str) -> Option<(CompositionBodyId, Rc<BodyScope>)> {
+        let body_id = *self
+            .plan
+            .artifacts()
+            .composition_body_assignments
+            .get(comp_name)?;
+        if let Some(scope) = self.cache.borrow().get(&body_id) {
+            return Some((body_id, Rc::clone(scope)));
+        }
+        let body = self.plan.body_of(body_id)?;
+        let scope = Rc::new(derive_body_scope(body));
+        self.cache.borrow_mut().insert(body_id, Rc::clone(&scope));
+        Some((body_id, scope))
+    }
+}
+
+/// One frame of the lineage trace's scope stack (#155) — a cheap `Rc` cons-list so
+/// each frontier item shares the chain of compositions it is currently inside.
+///
+/// The root frame (`body == None`) is the top-level pipeline view; each descent
+/// pushes a frame whose `body` is the entered composition's [`BodyScope`]. `id` is a
+/// per-descent unique scope id: it keys the `seen` set so a body node and an outer
+/// node that happen to share an index never collide, AND so the SAME composition
+/// entered on two sibling branches gets two distinct ids and expands both times. The
+/// recursion guard is separate — it walks the `body_id` chain — so a body re-entering
+/// ITSELF on one path is caught while sibling re-entry is allowed.
+struct ScopeFrame {
+    /// Unique per descent in one `trace_tree` call.
+    id: usize,
+    /// The entered composition's body id, or `None` at the root.
+    body_id: Option<CompositionBodyId>,
+    /// The entered composition's body scope (view + port maps), or `None` at the root.
+    body: Option<Rc<BodyScope>>,
+    /// The parent frame, or `None` at the root.
+    parent: Option<Rc<ScopeFrame>>,
+    /// How this body frame resurfaces to its parent: the composition node's index in
+    /// the PARENT scope's view, and the composition's outer label. `None` at the root.
+    comp_in_parent: Option<(usize, String)>,
+}
+
+impl ScopeFrame {
+    /// The [`PipelineView`] this frame's BFS walks: the top-level `view` at the root,
+    /// or the entered body's own view inside a composition.
+    fn view<'v>(&'v self, top: &'v PipelineView) -> &'v PipelineView {
+        match &self.body {
+            Some(scope) => &scope.view,
+            None => top,
+        }
+    }
+
+    /// Number of composition frames currently open above-and-including this one — the
+    /// descent depth, for the [`MAX_SCOPE_DEPTH`] backstop and the "originated N deep"
+    /// summary (#156 via [`max_scope_depth`]).
+    fn depth(&self) -> usize {
+        let mut depth = 0;
+        let mut frame = self;
+        while let Some(parent) = &frame.parent {
+            depth += 1;
+            frame = parent;
+        }
+        depth
+    }
+
+    /// Whether `body_id` is already open on this frame's path — the recursion guard
+    /// (modeled on `field_lineage::expand_member`'s `visiting` set). A descent into an
+    /// already-open body would loop, so it is treated as a terminal `Recursive` hop.
+    ///
+    /// Flagging ANY repeat `body_id` on the ancestor chain (not just an immediate
+    /// self-reference) is correct AND safe: the engine forbids composition `use:`
+    /// cycles at compile (E107), so a re-entered body id can only arise from a
+    /// malformed/adversarial plan — exactly what this defends against — never from a
+    /// legitimately distinct re-use, which always carries a distinct body id.
+    fn is_open(&self, body_id: CompositionBodyId) -> bool {
+        let mut frame = Some(self);
+        while let Some(f) = frame {
+            if f.body_id == Some(body_id) {
+                return true;
+            }
+            frame = f.parent.as_deref();
+        }
+        false
+    }
+}
+
+/// A queued BFS frontier item in the scope-aware trace (#155): the scope it lives in,
+/// the `(node, field)` anchor within that scope, the hop depth, and the discovering
+/// hop's index in the flat `hops` vec (or `None` for the selected root).
+struct Frontier {
+    scope: Rc<ScopeFrame>,
+    node: usize,
+    field: String,
+    hop: usize,
+    parent: Option<usize>,
+}
+
 /// Walk the field-edge graph from `(start_node, start_field)` and build a
 /// hop-by-hop trace TREE (#153). The selected field is the implicit root (hop 0);
 /// the returned `Vec<TraceNode>` is its direct (hop-1) children, each carrying its
 /// own deeper children.
 ///
-/// The BFS dedups endpoints by `(node, field)` globally, so every reachable
-/// endpoint is discovered exactly once — the discovery relation is therefore a
-/// spanning TREE, and recording each endpoint's discovering hop preserves the
-/// parent→child topology the panel renders. (CXL enrichment is attached later in
-/// [`build_field_detail`], where `config` is in scope.)
+/// The BFS dedups endpoints by `(scope, node, field)`, so every reachable endpoint is
+/// discovered exactly once PER SCOPE — the discovery relation is a spanning TREE, and
+/// recording each endpoint's discovering hop preserves the parent→child topology the
+/// panel renders. (CXL enrichment is attached later in [`build_field_detail`], where
+/// `config` is in scope.)
 ///
 /// `include_indirect` controls the Inspector's INDIRECT include/exclude toggle
-/// (#153, the deferred PR3 marker, scoped to this trace): when `false`, edges whose
-/// kind is [`EdgeNature::Indirect`](crate::pipeline_view::EdgeNature::Indirect) are
-/// skipped while walking, so an influence-only hop (and any subtree reached only
-/// through it) never appears. Default callers pass `true` so nothing regresses.
+/// (#153): when `false`, edges whose kind is
+/// [`EdgeNature::Indirect`](crate::pipeline_view::EdgeNature::Indirect) are skipped,
+/// so an influence-only hop never appears.
+///
+/// `resolver` makes the trace SCOPE-AWARE (#155). With `Some`, the walk descends INTO
+/// a composition body when it crosses a boundary (emitting an [`BoundaryHopKind::Enter`]
+/// hop) and resurfaces FROM it back to the parent scope (an [`BoundaryHopKind::Exit`]
+/// hop), following the value across composition walls; a recursive composition is
+/// stopped with a single [`BoundaryHopKind::Recursive`] terminal hop. With `None` the
+/// walk is exactly the legacy single-view flat BFS — the `seen`/sort/worst-precision
+/// behavior is unchanged and no boundary hop is ever emitted — so a boundary-free view
+/// (or a build with no compiled plan) produces byte-identical output to before #155.
 fn trace_tree(
     view: &PipelineView,
     start_node: usize,
     start_field: &str,
     direction: TraceDirection,
     include_indirect: bool,
+    resolver: Option<&BodyScopeResolver<'_>>,
 ) -> Vec<TraceNode> {
-    let mut seen = HashSet::from([(start_node, start_field.to_string())]);
-    // `(node, field, hop, parent_in_hops)` — `parent_in_hops` is the index of the
-    // discovering hop in `hops`, or `None` for the selected root.
-    let mut queue = VecDeque::from([(start_node, start_field.to_string(), 0usize, None::<usize>)]);
+    let mut next_scope_id = 0usize;
+    let root = Rc::new(ScopeFrame {
+        id: next_scope_id,
+        body_id: None,
+        body: None,
+        parent: None,
+        comp_in_parent: None,
+    });
+    next_scope_id += 1;
+
+    let mut seen: HashSet<(usize, usize, String)> =
+        HashSet::from([(root.id, start_node, start_field.to_string())]);
+    let mut queue: VecDeque<Frontier> = VecDeque::from([Frontier {
+        scope: Rc::clone(&root),
+        node: start_node,
+        field: start_field.to_string(),
+        hop: 0,
+        parent: None,
+    }]);
     let mut hops: Vec<TracedHop> = Vec::new();
 
-    while let Some((node, field, hop, parent)) = queue.pop_front() {
-        // Collect every edge leaving this anchor, grouped by the endpoint it
-        // reaches, keeping the WORST (least-precise) edge per endpoint (#148 M2).
-        // The BFS dedups endpoints by `(node, field)` only, and one endpoint can be
-        // reached by BOTH an Exact carry and an Approximate INDIRECT influence (same
-        // from/to). Picking the worst — rather than whichever edge iterates first —
-        // stops an Exact carry from masking a co-incident approximation on the hop
-        // badge. Ties on precision keep the first-iterated edge for determinism.
+    while let Some(item) = queue.pop_front() {
+        let scope_view = item.scope.view(view);
+
+        // DESCEND (#155): the dequeued anchor sits on a COMPOSITION node at one of its
+        // real columns — its output column (upstream) or an input column (downstream).
+        // The composition's "upstream"/"downstream" is its BODY, so we descend rather
+        // than scan this scope: emit the `Enter` hop and enqueue the in-body
+        // continuation. This fires for the top-level composition output column AND for
+        // every nested composition reached inside a body view (where the body view has
+        // no synthesized boundary edges — landing on the comp node IS the crossing).
+        if let Some(res) = resolver
+            && descend_into_composition(
+                &item,
+                scope_view,
+                direction,
+                res,
+                &mut next_scope_id,
+                &mut seen,
+                &mut queue,
+                &mut hops,
+            )
+        {
+            continue;
+        }
+
+        // RESURFACE (#155): inside a body scope, reaching an input port (upstream) or
+        // output port (downstream) means the value has hit the composition wall.
+        // Continue the walk in the PARENT scope, emitting an `Exit` hop on the outer
+        // field the value continues at. Checked after descent (a composition node's
+        // body takes precedence) and before the in-scope scan, so the boundary node
+        // does not sprout spurious intra-body hops.
+        if resolver.is_some()
+            && resurface_from_body(&item, view, direction, &mut seen, &mut queue, &mut hops)
+        {
+            continue;
+        }
+
+        // Collect every edge leaving this anchor in the CURRENT scope's view, grouped
+        // by the endpoint it reaches, keeping the WORST (least-precise) edge per
+        // endpoint (#148 M2). One endpoint can be reached by BOTH an Exact carry and
+        // an Approximate INDIRECT influence; picking the worst stops an Exact carry
+        // from masking a co-incident approximation on the hop badge. Ties keep the
+        // first-iterated edge for determinism.
         let mut best_to_endpoint: HashMap<TraceEndpointKey<'_>, TraceHopEdge> = HashMap::new();
-        for edge in &view.field_edges {
+        for edge in &scope_view.field_edges {
             // INDIRECT include/exclude toggle (#153): with the toggle off, an
             // influence edge is not traversed, so neither it nor any subtree it
             // uniquely reaches is surfaced. The DIRECT value graph is untouched.
@@ -1305,11 +1586,13 @@ fn trace_tree(
                 continue;
             }
             let next = match direction {
-                TraceDirection::Upstream if edge.to_node == node && edge.to_field == field => {
+                TraceDirection::Upstream
+                    if edge.to_node == item.node && edge.to_field == item.field =>
+                {
                     Some((edge.from_node, edge.from_field.as_str()))
                 }
                 TraceDirection::Downstream
-                    if edge.from_node == node && edge.from_field == field =>
+                    if edge.from_node == item.node && edge.from_field == item.field =>
                 {
                     Some((edge.to_node, edge.to_field.as_str()))
                 }
@@ -1330,16 +1613,17 @@ fn trace_tree(
         }
 
         // Emit one hop per newly-seen endpoint, sorted for deterministic sibling
-        // order (the HashMap iteration order is otherwise nondeterministic). The
-        // sort key mirrors the former flat list's tie-break — stage label then
-        // field name — and finally the node index, which is unique, so two stages
-        // that share a label AND field still order deterministically (a plain
-        // label/field key leaves them equal and at the mercy of HashMap order).
+        // order (HashMap iteration order is otherwise nondeterministic). The sort key
+        // mirrors the former flat list's tie-break — stage label, then field name,
+        // then node index (unique) — applied within the CURRENT scope's view.
         let mut endpoints: Vec<(TraceEndpointKey<'_>, TraceHopEdge)> =
             best_to_endpoint.into_iter().collect();
         endpoints.sort_by(|a, b| {
             let label = |key: &TraceEndpointKey<'_>| {
-                view.stages.get(key.0).map(|stage| stage.label.as_str())
+                scope_view
+                    .stages
+                    .get(key.0)
+                    .map(|stage| stage.label.as_str())
             };
             label(&a.0)
                 .cmp(&label(&b.0))
@@ -1347,28 +1631,554 @@ fn trace_tree(
                 .then_with(|| a.0.0.cmp(&b.0.0))
         });
         for ((next_node, next_field), (edge_kind, edge_precision)) in endpoints {
-            let endpoint = (next_node, next_field.to_string());
-            if !seen.insert(endpoint.clone()) {
+            // DOWNSTREAM INPUT-MARKER endpoint (#155): a downstream endpoint landing on
+            // a composition's synthetic `\u{2190}in:port:col` marker crosses INTO the
+            // body. The marker is NOT a real row — it must NEVER surface as a visible
+            // hop (the panel renders `field_name` verbatim, so a leaked `\u{2190}in:`
+            // would show to the user). So whenever the endpoint field is a marker we
+            // `continue` unconditionally: `try_descend_marker` emits the `Enter` hop and
+            // enqueues the in-body continuation on success; on a degrade (malformed /
+            // unresolvable body — port-slot miss, missing assignment) it returns false
+            // and we drop the marker as a clean leaf. (Other crossings — a composition
+            // reached at a real column, either direction — are handled at DEQUEUE by
+            // `descend_into_composition`, so the visible comp-column hop is kept.)
+            if let Some(res) = resolver
+                && matches!(direction, TraceDirection::Downstream)
+                && parse_composition_in_boundary_field(next_field).is_some()
+            {
+                try_descend_marker(
+                    &item,
+                    scope_view,
+                    next_node,
+                    next_field,
+                    res,
+                    &mut next_scope_id,
+                    &mut seen,
+                    &mut queue,
+                    &mut hops,
+                );
                 continue;
             }
-            if let Some(stage) = view.stages.get(next_node) {
+
+            let key = (item.scope.id, next_node, next_field.to_string());
+            if !seen.insert(key) {
+                continue;
+            }
+            if let Some(stage) = scope_view.stages.get(next_node) {
                 let index = hops.len();
                 hops.push(TracedHop {
                     endpoint: trace_endpoint(
                         stage,
-                        endpoint.1.clone(),
+                        next_field.to_string(),
                         edge_kind,
                         edge_precision,
-                        hop + 1,
+                        item.hop + 1,
+                        None,
                     ),
-                    parent,
+                    parent: item.parent,
                 });
-                queue.push_back((next_node, endpoint.1, hop + 1, Some(index)));
+                queue.push_back(Frontier {
+                    scope: Rc::clone(&item.scope),
+                    node: next_node,
+                    field: next_field.to_string(),
+                    hop: item.hop + 1,
+                    parent: Some(index),
+                });
             }
         }
     }
 
     assemble_trace_tree(hops)
+}
+
+/// Descend INTO a composition body when the dequeued anchor sits on a composition
+/// node at one of its real columns (#155).
+///
+/// Returns `true` when it descended (the caller then skips the in-scope scan), `false`
+/// when the anchor is not a composition crossing.
+///
+/// - **Upstream**: `item.node` is a Composition and `item.field` is one of its OUTPUT
+///   columns. The composition output column was already emitted as a visible hop (by
+///   whoever reached it); this enters the body at the slot the output port surfaces,
+///   emitting an `Enter` hop CHILDed under that comp-column hop.
+/// - **Downstream**: `item.node` is a Composition and `item.field` is one of its INPUT
+///   columns. Enters the body at the slot consuming the port that carries the column.
+///
+/// The recursion guard and [`MAX_SCOPE_DEPTH`] backstop are applied via the shared
+/// [`enter_body`]. A resolve/map miss returns `false` (degrade to a leaf).
+///
+/// Note (known limitation, not a bug): the in-body BFS that follows an `Enter` rides
+/// `derive_body_view`'s edges, which are CARRY-ONLY. A column carried through the body
+/// traces all the way to the outer producer/consumer; a column COMPUTED inside the
+/// body dead-ends at its in-body row because the body view draws no derive edge for it.
+/// Body-internal derive lineage is a pending follow-up; #155 surfaces every crossing
+/// correctly regardless.
+#[allow(clippy::too_many_arguments)]
+fn descend_into_composition(
+    item: &Frontier,
+    scope_view: &PipelineView,
+    direction: TraceDirection,
+    resolver: &BodyScopeResolver<'_>,
+    next_scope_id: &mut usize,
+    seen: &mut HashSet<(usize, usize, String)>,
+    queue: &mut VecDeque<Frontier>,
+    hops: &mut Vec<TracedHop>,
+) -> bool {
+    let Some(comp_stage) = scope_view.stages.get(item.node) else {
+        return false;
+    };
+    if comp_stage.kind != StageKind::Composition {
+        return false;
+    }
+    let comp_name = comp_stage.id.clone();
+    let comp_label = comp_stage.label.clone();
+
+    // The entry slot + body column this crossing descends to.
+    let (entry_slot, body_field) = match direction {
+        TraceDirection::Upstream => {
+            // The output port whose body row declares the column, → producing slot.
+            let Some((_, scope)) = resolver.resolve(&comp_name) else {
+                return false;
+            };
+            let Some(port) = output_port_for_column(resolver, &comp_name, &item.field) else {
+                return false;
+            };
+            let Some(&slot) = scope.output_port_to_slot.get(&port) else {
+                return false;
+            };
+            (slot, item.field.clone())
+        }
+        TraceDirection::Downstream => {
+            // The input port whose body row declares the column, → consuming slot.
+            let Some((_, scope)) = resolver.resolve(&comp_name) else {
+                return false;
+            };
+            let Some(port) = input_port_for_column(resolver, &comp_name, &item.field) else {
+                return false;
+            };
+            let Some(&slot) = scope.input_port_to_slot.get(&port) else {
+                return false;
+            };
+            (slot, item.field.clone())
+        }
+    };
+
+    enter_body(
+        item,
+        &comp_name,
+        &comp_label,
+        item.node,
+        entry_slot,
+        body_field,
+        item.hop + 1,
+        item.parent,
+        resolver,
+        next_scope_id,
+        seen,
+        queue,
+        hops,
+    )
+}
+
+/// Descend INTO a composition body via a DOWNSTREAM synthetic input MARKER (#155).
+///
+/// The marker `\u{2190}in:port:col` is not a real row, so no visible hop is emitted
+/// for it; the `Enter` hop attaches directly under the discovering hop's parent. Only
+/// the top-level resolved view carries these markers (body views do not), so this
+/// handles the downstream entry into a TOP-LEVEL composition; nested downstream
+/// crossings land on a real column and go through [`descend_into_composition`].
+/// Returns `true` when it descended.
+#[allow(clippy::too_many_arguments)]
+fn try_descend_marker(
+    item: &Frontier,
+    scope_view: &PipelineView,
+    next_node: usize,
+    next_field: &str,
+    resolver: &BodyScopeResolver<'_>,
+    next_scope_id: &mut usize,
+    seen: &mut HashSet<(usize, usize, String)>,
+    queue: &mut VecDeque<Frontier>,
+    hops: &mut Vec<TracedHop>,
+) -> bool {
+    let Some((port, col)) = parse_composition_in_boundary_field(next_field) else {
+        return false;
+    };
+    let Some(comp_stage) = scope_view.stages.get(next_node) else {
+        return false;
+    };
+    if comp_stage.kind != StageKind::Composition {
+        return false;
+    }
+    let comp_name = comp_stage.id.clone();
+    let comp_label = comp_stage.label.clone();
+    let Some((_, scope)) = resolver.resolve(&comp_name) else {
+        return false;
+    };
+    let Some(&slot) = scope.input_port_to_slot.get(port) else {
+        return false;
+    };
+
+    enter_body(
+        item,
+        &comp_name,
+        &comp_label,
+        next_node,
+        slot,
+        col.to_string(),
+        item.hop + 1,
+        item.parent,
+        resolver,
+        next_scope_id,
+        seen,
+        queue,
+        hops,
+    )
+}
+
+/// Shared body-entry: emit the `Enter` hop (or the terminal `Recursive` hop on a
+/// recursion-guard hit) and enqueue the in-body continuation (#155).
+///
+/// `comp_node` is the composition's index in the parent scope (carried so the child
+/// frame can resurface to it); `enter_hop` is the depth of the `Enter` hop;
+/// `enter_parent` is the flat-`hops` index the `Enter` hop attaches under. Returns
+/// `true` once it has handled the crossing (always — the caller has already
+/// determined this is a descent).
+#[allow(clippy::too_many_arguments)]
+fn enter_body(
+    item: &Frontier,
+    comp_name: &str,
+    comp_label: &str,
+    comp_node: usize,
+    entry_slot: usize,
+    body_field: String,
+    enter_hop: usize,
+    enter_parent: Option<usize>,
+    resolver: &BodyScopeResolver<'_>,
+    next_scope_id: &mut usize,
+    seen: &mut HashSet<(usize, usize, String)>,
+    queue: &mut VecDeque<Frontier>,
+    hops: &mut Vec<TracedHop>,
+) -> bool {
+    let Some((body_id, scope)) = resolver.resolve(comp_name) else {
+        return false;
+    };
+
+    // RECURSION GUARD (#155): a body already open on this path would loop. Emit a
+    // single terminal `Recursive` hop and stop — never expand it. Mirrors
+    // `field_lineage::expand_member`'s `visiting` set.
+    if item.scope.is_open(body_id) {
+        let body_stage_label = scope
+            .view
+            .stages
+            .get(entry_slot)
+            .map(|s| s.label.clone())
+            .unwrap_or_else(|| comp_label.to_string());
+        hops.push(TracedHop {
+            endpoint: recursive_endpoint(
+                body_stage_label,
+                body_field,
+                enter_hop,
+                comp_label.to_string(),
+            ),
+            parent: enter_parent,
+        });
+        return true;
+    }
+
+    // Hard depth backstop: drop a descent past the cap (no marker — see
+    // MAX_SCOPE_DEPTH). The crossing simply stops here.
+    if item.scope.depth() + 1 > MAX_SCOPE_DEPTH {
+        return true;
+    }
+
+    let child_scope = Rc::new(ScopeFrame {
+        id: *next_scope_id,
+        body_id: Some(body_id),
+        body: Some(Rc::clone(&scope)),
+        parent: Some(Rc::clone(&item.scope)),
+        comp_in_parent: Some((comp_node, comp_label.to_string())),
+    });
+    *next_scope_id += 1;
+
+    // The `Enter` hop is the first hop INSIDE the body, on the body column the crossing
+    // lands at. Mark `(child_scope, entry_slot, body_field)` seen so the body BFS does
+    // not rediscover it.
+    //
+    // `child_scope.id` is freshly minted just above (`next_scope_id`), so this insert
+    // is always a no-op `true` TODAY — the early-return on `false` is dead under the
+    // current unique-scope-id scheme. It is kept deliberately: if a future change
+    // reuses scope ids (e.g. interns identical body scopes), this guard is what stops a
+    // duplicate `Enter` hop from being emitted. Removing it would make such a change
+    // silently double-emit crossings.
+    let key = (child_scope.id, entry_slot, body_field.clone());
+    if !seen.insert(key) {
+        return true;
+    }
+    if let Some(body_stage) = scope.view.stages.get(entry_slot) {
+        let index = hops.len();
+        hops.push(TracedHop {
+            endpoint: trace_endpoint(
+                body_stage,
+                body_field.clone(),
+                FieldEdgeKind::Boundary,
+                Precision::Exact,
+                enter_hop,
+                Some(BoundaryHopKind::Enter(comp_label.to_string())),
+            ),
+            parent: enter_parent,
+        });
+        queue.push_back(Frontier {
+            scope: child_scope,
+            node: entry_slot,
+            field: body_field,
+            hop: enter_hop,
+            parent: Some(index),
+        });
+    }
+    true
+}
+
+/// Attempt to RESURFACE from a composition body to its parent scope (#155).
+///
+/// Fires when the current anchor sits on the body's boundary: UPSTREAM, an INPUT-port
+/// body node (a body source — no further intra-body upstream edges); DOWNSTREAM, an
+/// OUTPUT-port body node. The walk continues in the PARENT scope at the outer field
+/// the value flows to/from, emitting an `Exit` hop there. Returns `true` when it
+/// resurfaced (the caller skips the in-scope adjacency scan).
+///
+/// - **Upstream** resurface uses the parent view's INPUT-marker edge
+///   `producer.col \u{2192} comp.(\u{2190}in:port:col)` (from #154) to find the outer
+///   producer the value entered from, and continues at `(parent, producer, col)`.
+/// - **Downstream** resurface continues at the composition's OUTPUT column row in the
+///   parent view — `(parent, comp_node, col)` — which the parent's own edges then
+///   carry onward to the real consumer.
+fn resurface_from_body(
+    item: &Frontier,
+    view: &PipelineView,
+    direction: TraceDirection,
+    seen: &mut HashSet<(usize, usize, String)>,
+    queue: &mut VecDeque<Frontier>,
+    hops: &mut Vec<TracedHop>,
+) -> bool {
+    let Some(scope) = &item.scope.body else {
+        return false;
+    };
+    let Some(parent) = &item.scope.parent else {
+        return false;
+    };
+    let Some((comp_node, comp_label)) = &item.scope.comp_in_parent else {
+        return false;
+    };
+    let parent_view = parent.view(view);
+
+    // The port whose boundary slot equals the current body node, in the matching
+    // direction. Upstream resurfaces at the input port; downstream at the output port.
+    let port = match direction {
+        TraceDirection::Upstream => scope
+            .input_port_to_slot
+            .iter()
+            .find(|&(_, &slot)| slot == item.node)
+            .map(|(port, _)| port.clone()),
+        TraceDirection::Downstream => scope
+            .output_port_to_slot
+            .iter()
+            .find(|&(_, &slot)| slot == item.node)
+            .map(|(port, _)| port.clone()),
+    };
+    let Some(port) = port else {
+        return false;
+    };
+
+    match direction {
+        TraceDirection::Upstream => {
+            // The parent's upstream feed of the composition's input column. Two parent
+            // shapes:
+            //  - TOP-LEVEL parent: the input crossing is the synthetic
+            //    `\u{2190}in:port:col` marker edge `producer.col \u{2192}
+            //    comp.(marker)` (#154); its `from` is the outer producer.
+            //  - BODY parent (nested composition): the body view has no markers — the
+            //    nested comp node `inner` consumes its input via ORDINARY edges
+            //    `producer.col \u{2192} inner.col`, so the upstream feed is just the
+            //    parent-scope upstream neighbors of `(comp_node, col)`.
+            //
+            // The marker is rebuilt from `item.field` — the body column on the
+            // INPUT-PORT body node — via the same `composition_in_boundary_field`
+            // builder #154 minted it with. These agree because #154 mints one marker
+            // per `body.input_port_rows[port]` column, and that port row IS the row of
+            // the body's input-seed node (a pure Source seed applies no projection, so
+            // it cannot rename the port column). If a future engine change let an input
+            // node rename the seeded column, the rebuilt marker would miss the #154 edge
+            // and the `producers.is_empty()` fallback below would (correctly) try the
+            // ordinary-neighbor path; worst case the trace truncates at the wall rather
+            // than resurfacing — never a wrong producer.
+            let marker = composition_in_boundary_field(&port, &item.field);
+            let producers: Vec<(usize, String, Precision)> = parent_view
+                .field_edges
+                .iter()
+                .filter(|e| {
+                    e.kind == FieldEdgeKind::Boundary
+                        && e.to_node == *comp_node
+                        && e.to_field == marker
+                })
+                .map(|e| (e.from_node, e.from_field.clone(), e.precision))
+                .collect();
+            let producers = if producers.is_empty() {
+                // Body parent: ordinary upstream neighbors of the comp node's column.
+                parent_view
+                    .field_edges
+                    .iter()
+                    .filter(|e| e.to_node == *comp_node && e.to_field == item.field)
+                    .map(|e| (e.from_node, e.from_field.clone(), e.precision))
+                    .collect()
+            } else {
+                producers
+            };
+            if producers.is_empty() {
+                // The value entered the body from a body source with no outer binding
+                // (e.g. a body-internal constant). Stop here — nothing outer to reach.
+                return false;
+            }
+            for (out_node, out_field, precision) in producers {
+                emit_resurface_hop(
+                    item,
+                    parent_view,
+                    Rc::clone(parent),
+                    out_node,
+                    out_field,
+                    precision,
+                    comp_label.clone(),
+                    seen,
+                    queue,
+                    hops,
+                );
+            }
+            true
+        }
+        TraceDirection::Downstream => {
+            // The value leaves the body at output column `col`; continue at the parent
+            // scope's DOWNSTREAM neighbors of the composition's output column
+            // `(comp_node, col)` — its real consumers. (Continuing AT `(comp_node, col)`
+            // would re-descend into the body we just left; taking its downstream
+            // neighbors steps past the wall, symmetric to the upstream branch.) For a
+            // top-level parent these are the OUTPUT-boundary edges `comp.col \u{2192}
+            // consumer.col`; for a body parent they are the ordinary successor edges.
+            let _ = port;
+            let consumers: Vec<(usize, String, Precision)> = parent_view
+                .field_edges
+                .iter()
+                .filter(|e| e.from_node == *comp_node && e.from_field == item.field)
+                .map(|e| (e.to_node, e.to_field.clone(), e.precision))
+                .collect();
+            if consumers.is_empty() {
+                // The output column is consumed by nothing downstream (e.g. a terminal
+                // composition output never read). Stop — nothing outer to reach.
+                return false;
+            }
+            for (out_node, out_field, precision) in consumers {
+                emit_resurface_hop(
+                    item,
+                    parent_view,
+                    Rc::clone(parent),
+                    out_node,
+                    out_field,
+                    precision,
+                    comp_label.clone(),
+                    seen,
+                    queue,
+                    hops,
+                );
+            }
+            true
+        }
+    }
+}
+
+/// Emit one `Exit` resurface hop in the parent scope and enqueue its continuation
+/// (#155). Shared by both trace directions. Deduped on `(parent_scope, node, field)`.
+#[allow(clippy::too_many_arguments)]
+fn emit_resurface_hop(
+    item: &Frontier,
+    parent_view: &PipelineView,
+    parent_scope: Rc<ScopeFrame>,
+    out_node: usize,
+    out_field: String,
+    precision: Precision,
+    comp_label: String,
+    seen: &mut HashSet<(usize, usize, String)>,
+    queue: &mut VecDeque<Frontier>,
+    hops: &mut Vec<TracedHop>,
+) {
+    let key = (parent_scope.id, out_node, out_field.clone());
+    if !seen.insert(key) {
+        return;
+    }
+    let Some(stage) = parent_view.stages.get(out_node) else {
+        return;
+    };
+    let index = hops.len();
+    hops.push(TracedHop {
+        endpoint: trace_endpoint(
+            stage,
+            out_field.clone(),
+            FieldEdgeKind::Boundary,
+            precision,
+            item.hop + 1,
+            Some(BoundaryHopKind::Exit(comp_label)),
+        ),
+        parent: item.parent,
+    });
+    queue.push_back(Frontier {
+        scope: parent_scope,
+        node: out_node,
+        field: out_field,
+        hop: item.hop + 1,
+        parent: Some(index),
+    });
+}
+
+/// Which OUTPUT port of a composition declares `column` (#155), via the body's
+/// `output_port_rows`. First declaring port wins, matching
+/// `synthesize_composition_output_rows`' first-seen dedup so the descent picks the
+/// SAME port the synthesized row came from.
+fn output_port_for_column(
+    resolver: &BodyScopeResolver<'_>,
+    comp_name: &str,
+    column: &str,
+) -> Option<String> {
+    let body_id = *resolver
+        .plan
+        .artifacts()
+        .composition_body_assignments
+        .get(comp_name)?;
+    let body = resolver.plan.body_of(body_id)?;
+    for (port, row) in &body.output_port_rows {
+        if row.field_names().any(|f| f.name.as_ref() == column) {
+            return Some(port.clone());
+        }
+    }
+    None
+}
+
+/// Which INPUT port of a composition declares `column` (#155), via the body's
+/// `input_port_rows`. First declaring port wins (declaration order), mirroring
+/// [`output_port_for_column`] for the downstream descent direction.
+fn input_port_for_column(
+    resolver: &BodyScopeResolver<'_>,
+    comp_name: &str,
+    column: &str,
+) -> Option<String> {
+    let body_id = *resolver
+        .plan
+        .artifacts()
+        .composition_body_assignments
+        .get(comp_name)?;
+    let body = resolver.plan.body_of(body_id)?;
+    for (port, row) in &body.input_port_rows {
+        if row.field_names().any(|f| f.name.as_ref() == column) {
+            return Some(port.clone());
+        }
+    }
+    None
 }
 
 /// Fold the flat, BFS-ordered hops into a forest of [`TraceNode`]s (#153). Each
@@ -1423,6 +2233,7 @@ fn trace_endpoint(
     edge_kind: FieldEdgeKind,
     edge_precision: Precision,
     hop: usize,
+    boundary: Option<BoundaryHopKind>,
 ) -> TraceEndpointView {
     TraceEndpointView {
         stage_id: stage.id.clone(),
@@ -1434,7 +2245,53 @@ fn trace_endpoint(
         edge_kind_attr: edge_kind_attr(edge_kind),
         precision: edge_precision,
         hop,
+        boundary,
     }
+}
+
+/// A terminal `Recursive` boundary hop (#155): a descent into a composition already
+/// open on the path, treated as a leaf so the trace terminates. It carries no stage
+/// from a live view (the body is not expanded), so it is assembled directly from the
+/// would-be body stage's label and the column the crossing carried; `stage_id` is the
+/// body stage's id-less label (it is never navigated to — the hop is a dead end).
+fn recursive_endpoint(
+    stage_label: String,
+    field_name: String,
+    hop: usize,
+    comp_label: String,
+) -> TraceEndpointView {
+    TraceEndpointView {
+        stage_id: stage_label.clone(),
+        stage_label,
+        stage_kind_label: StageKind::Composition.badge_label(),
+        stage_kind_attr: StageKind::Composition.kind_attr(),
+        field_name,
+        edge_kind_label: edge_kind_label(FieldEdgeKind::Boundary),
+        edge_kind_attr: edge_kind_attr(FieldEdgeKind::Boundary),
+        precision: Precision::Approximate,
+        hop,
+        boundary: Some(BoundaryHopKind::Recursive(comp_label)),
+    }
+}
+
+/// The maximum composition-descent depth reached anywhere in a trace forest (#155) —
+/// the "originated N deep" figure #156 renders as a summary. A flat (boundary-free)
+/// trace returns 0; each `Enter`/`Recursive` crossing on a path increases the depth
+/// of the hops below it. Computed by walking the assembled tree and counting the
+/// crossings on the deepest path.
+pub fn max_scope_depth(nodes: &[TraceNode]) -> usize {
+    fn walk(node: &TraceNode, depth: usize) -> usize {
+        let depth = match node.endpoint.boundary {
+            Some(BoundaryHopKind::Enter(_)) | Some(BoundaryHopKind::Recursive(_)) => depth + 1,
+            _ => depth,
+        };
+        node.children
+            .iter()
+            .map(|child| walk(child, depth))
+            .max()
+            .unwrap_or(depth)
+    }
+    nodes.iter().map(|node| walk(node, 0)).max().unwrap_or(0)
 }
 
 /// Whether `field_name` on stage `stage_index` is part of an Aggregate group-by
@@ -1596,9 +2453,10 @@ fn reshape_rule_actions(rule: &clinker_plan::config::pipeline_node::ReshapeRule)
 mod tests {
     use super::*;
     use crate::pipeline_view::{
-        FieldEdge, FieldRow, RoleEdge, StageKind, StagePortKind, StagePortRow, derive_pipeline_view,
+        FieldEdge, FieldRow, RoleEdge, StageKind, StagePortKind, StagePortRow,
+        derive_pipeline_view, derive_resolved_pipeline_view,
     };
-    use clinker_plan::config::parse_config;
+    use clinker_plan::config::{CompileContext, parse_config};
 
     const VARIANT_PIPELINE: &str = r#"
 pipeline:
@@ -1692,6 +2550,7 @@ nodes:
             InspectorBuildContext {
                 view,
                 config: Some(config),
+                plan: None,
                 channel_mode: ChannelViewMode::Raw,
                 compiled_plan_available: false,
                 visible_errors: &[],
@@ -1921,7 +2780,7 @@ nodes:
             ..Default::default()
         };
 
-        let emitted = build_field_detail(&view, None, &SelectedField::new("clean", "x2"))
+        let emitted = build_field_detail(&view, None, None, &SelectedField::new("clean", "x2"))
             .expect("field exists");
         assert_eq!(emitted.field_kind_label, "emitted");
         // The upstream trace is a TREE; `clean.x2` has one direct (hop-1) parent,
@@ -1931,11 +2790,11 @@ nodes:
         assert_eq!(emitted.upstream[0].endpoint.hop, 1);
         assert_eq!(emitted.role_usages.len(), 1);
 
-        let declared =
-            build_field_detail(&view, None, &SelectedField::new("src", "x")).expect("field exists");
+        let declared = build_field_detail(&view, None, None, &SelectedField::new("src", "x"))
+            .expect("field exists");
         assert!(declared.badges.contains(&"correlation key".to_string()));
 
-        let passthrough = build_field_detail(&view, None, &SelectedField::new("clean", "x"))
+        let passthrough = build_field_detail(&view, None, None, &SelectedField::new("clean", "x"))
             .expect("field exists");
         assert_eq!(passthrough.field_kind_label, "passthrough");
 
@@ -1947,7 +2806,7 @@ nodes:
         let hop_selection = hop.to_selected_field();
         assert_eq!(hop_selection.stage_id, hop.stage_id);
         assert_eq!(hop_selection.field_name, hop.field_name);
-        let resolved = build_field_detail(&view, None, &hop_selection)
+        let resolved = build_field_detail(&view, None, None, &hop_selection)
             .expect("trace hop resolves to a canvas field");
         assert_eq!(resolved.selection, hop_selection);
     }
@@ -1996,15 +2855,17 @@ nodes:
             ..Default::default()
         };
 
-        let group_key = build_field_detail(&view, None, &SelectedField::new("rollup", "region"))
-            .expect("field exists");
+        let group_key =
+            build_field_detail(&view, None, None, &SelectedField::new("rollup", "region"))
+                .expect("field exists");
         assert!(
             group_key.badges.contains(&"aggregate grain".to_string()),
             "the GroupBy edge target row wears the grain badge"
         );
 
-        let upstream_driver = build_field_detail(&view, None, &SelectedField::new("src", "region"))
-            .expect("field exists");
+        let upstream_driver =
+            build_field_detail(&view, None, None, &SelectedField::new("src", "region"))
+                .expect("field exists");
         assert!(
             upstream_driver
                 .badges
@@ -2013,7 +2874,7 @@ nodes:
         );
 
         let aggregate_value =
-            build_field_detail(&view, None, &SelectedField::new("rollup", "total"))
+            build_field_detail(&view, None, None, &SelectedField::new("rollup", "total"))
                 .expect("field exists");
         assert!(
             !aggregate_value
@@ -2038,7 +2899,7 @@ nodes:
             ..Default::default()
         };
 
-        let detail = build_field_detail(&view, None, &SelectedField::new("src", "lonely"))
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("src", "lonely"))
             .expect("field exists");
         // #148: the empty-state is now surfaced through the precision fields, but
         // the original "no field-level lineage edges" message MUST be preserved
@@ -2052,7 +2913,9 @@ nodes:
             "No field-level lineage edges mention this field in the current view.",
             "the original empty-state message must be preserved verbatim"
         );
-        assert!(build_field_detail(&view, None, &SelectedField::new("missing", "x")).is_none());
+        assert!(
+            build_field_detail(&view, None, None, &SelectedField::new("missing", "x")).is_none()
+        );
 
         // #151: a trace hop pointing at a field absent from the current view
         // resolves to no detail — selecting it surfaces the Missing inspector
@@ -2067,8 +2930,9 @@ nodes:
             edge_kind_attr: "derive",
             precision: Precision::Exact,
             hop: 1,
+            boundary: None,
         };
-        assert!(build_field_detail(&view, None, &stale_hop.to_selected_field()).is_none());
+        assert!(build_field_detail(&view, None, None, &stale_hop.to_selected_field()).is_none());
     }
 
     /// #148: a field whose row precision is Approximate surfaces that tier on the
@@ -2125,7 +2989,7 @@ nodes:
             ..Default::default()
         };
 
-        let detail = build_field_detail(&view, None, &SelectedField::new("keep", "kept"))
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("keep", "kept"))
             .expect("field exists");
         assert!(!detail.lineage_empty, "an edged field is not empty");
         assert_eq!(
@@ -2183,7 +3047,7 @@ nodes:
             field_edges: vec![FieldEdge::derive(0, "a".into(), 1, "y".into(), false)],
             ..Default::default()
         };
-        let detail = build_field_detail(&view, None, &SelectedField::new("calc", "y"))
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("calc", "y"))
             .expect("field exists");
         assert!(!detail.lineage_empty);
         assert_eq!(detail.lineage_precision, Precision::Exact);
@@ -2235,7 +3099,7 @@ nodes:
 
         // The PRISTINE source field reads Exact (its own row precision), NOT
         // Approximate — it is not dragged down by the downstream Filter hop.
-        let src_detail = build_field_detail(&view, None, &SelectedField::new("src", "flag"))
+        let src_detail = build_field_detail(&view, None, None, &SelectedField::new("src", "flag"))
             .expect("source field exists");
         assert_eq!(
             src_detail.lineage_precision,
@@ -2293,8 +3157,8 @@ nodes:
             ..Default::default()
         };
 
-        let detail =
-            build_field_detail(&view, None, &SelectedField::new("j", "k")).expect("field exists");
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("j", "k"))
+            .expect("field exists");
         // Exactly ONE upstream hop to (src, k) — the endpoint is deduped — and it
         // surfaces the WORST precision (Approximate), not the first-iterated Exact.
         let hops: Vec<_> = detail
@@ -2354,7 +3218,7 @@ nodes:
             ..Default::default()
         };
 
-        let detail = build_field_detail(&view, None, &SelectedField::new("sink", "z"))
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("sink", "z"))
             .expect("field exists");
 
         // Hop-1: exactly one direct parent, `mid.y`, at the root of the forest.
@@ -2380,8 +3244,10 @@ nodes:
             "the chain terminates at the source"
         );
 
-        // The summary counts EVERY traced node, not just the direct hops.
-        assert_eq!(count_trace_nodes(&detail.upstream), 2);
+        // The summary counts EVERY traced field hop, not just the direct hops (this
+        // boundary-free view has no composition crossings, so the field-hop count is
+        // the whole tree).
+        assert_eq!(count_field_hops(&detail.upstream), 2);
     }
 
     /// #153: a BRANCHING upstream trace keeps each deeper hop under the CORRECT
@@ -2451,7 +3317,7 @@ nodes:
             ..Default::default()
         };
 
-        let detail = build_field_detail(&view, None, &SelectedField::new("sink", "z"))
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("sink", "z"))
             .expect("field exists");
 
         // Two hop-1 parents in (stage-label) order: midA before midB.
@@ -2471,8 +3337,9 @@ nodes:
         // midB has no deeper hop (its `b` is a declared root).
         assert!(detail.upstream[1].children.is_empty());
 
-        // Every endpoint reached exactly once: 2 hop-1 + 2 hop-2 = 4 nodes.
-        assert_eq!(count_trace_nodes(&detail.upstream), 4);
+        // Every endpoint reached exactly once: 2 hop-1 + 2 hop-2 = 4 field hops (no
+        // composition crossings in this view).
+        assert_eq!(count_field_hops(&detail.upstream), 4);
     }
 
     /// #153: each hop names its transform — the edge-kind label and per-hop
@@ -2514,8 +3381,9 @@ nodes:
 
         // Downstream of `src.x`: a hop lands on the DERIVED `clean.y`, a CXL stage,
         // so it carries the `emit y = x + 1` statement that produced it.
-        let src_detail = build_field_detail(&view, Some(&config), &SelectedField::new("src", "x"))
-            .expect("source field exists");
+        let src_detail =
+            build_field_detail(&view, Some(&config), None, &SelectedField::new("src", "x"))
+                .expect("source field exists");
         let derived_hop = src_detail
             .downstream
             .iter()
@@ -2537,9 +3405,13 @@ nodes:
         // Upstream of `clean.y`: the hop-1 node lands on `src.x`, a Source — no CXL
         // analysis — so it attaches NO statement; the edge kind/precision is the
         // attribution there.
-        let clean_detail =
-            build_field_detail(&view, Some(&config), &SelectedField::new("clean", "y"))
-                .expect("transform field exists");
+        let clean_detail = build_field_detail(
+            &view,
+            Some(&config),
+            None,
+            &SelectedField::new("clean", "y"),
+        )
+        .expect("transform field exists");
         let src_hop = clean_detail
             .upstream
             .iter()
@@ -2600,7 +3472,7 @@ nodes:
             ..Default::default()
         };
 
-        let detail = build_field_detail(&view, None, &SelectedField::new("keep", "kept"))
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("keep", "kept"))
             .expect("field exists");
 
         // Default (toggle ON): BOTH hops are present — the DIRECT carry to `src.kept`
@@ -2684,7 +3556,7 @@ nodes:
             ..Default::default()
         };
 
-        let detail = build_field_detail(&view, None, &SelectedField::new("sink", "v"))
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("sink", "v"))
             .expect("field exists");
         let order: Vec<_> = detail
             .upstream
@@ -2737,8 +3609,8 @@ nodes:
             ..Default::default()
         };
 
-        let detail =
-            build_field_detail(&view, None, &SelectedField::new("out", "k")).expect("field exists");
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("out", "k"))
+            .expect("field exists");
 
         // Full tree: the merged hop is tagged with the worst (INDIRECT JoinKey) edge.
         assert_eq!(
@@ -2792,5 +3664,791 @@ nodes:
                 "{kind:?} data-kind slug must contain no whitespace, got {attr:?}"
             );
         }
+    }
+
+    // ─── #155: scope-aware lineage trace (descend into / resurface from
+    // composition bodies) ───────────────────────────────────────────────────
+
+    /// A scratch workspace dir under the temp dir, unique per call.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "klinx-155-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create scratch workspace");
+        root
+    }
+
+    /// Compile the canonical #154/#155 fixture: `src(a,b) → comp[body first→second,
+    /// out port result = second] → out`. `first` emits `c = a + 1`, `second` emits
+    /// `d = c + 1`. `a`/`b` are CARRIED across the body (so they round-trip to the
+    /// outer source); `c`/`d` are computed inside the body. Returns the compiled plan.
+    fn compiled_single_composition() -> CompiledPlan {
+        let root = scratch_dir("single");
+        std::fs::write(
+            root.join("body_lineage.comp.yaml"),
+            r#"_compose:
+  name: body_lineage
+  inputs:
+    src:
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+  outputs:
+    result: second
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: first
+    input: src
+    config:
+      cxl: |
+        emit c = a + 1
+  - type: transform
+    name: second
+    input: first
+    config:
+      cxl: |
+        emit d = c + 1
+"#,
+        )
+        .expect("write body fixture");
+        let pipeline = r#"
+pipeline:
+  name: single_comp
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+  - type: composition
+    name: comp
+    input: src
+    use: ./body_lineage.comp.yaml
+    inputs:
+      src: src
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("pipeline parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("pipeline compiles");
+        let _ = std::fs::remove_dir_all(root);
+        plan
+    }
+
+    /// Compile an `n`-level nested composition that carries one column `v` straight
+    /// through every level back to the source. Each level `i` is a composition file
+    /// `levelN.comp.yaml`; the innermost is a passthrough transform. The single
+    /// carried column lets the upstream trace resurface through every level to the
+    /// outer source, so `max_scope_depth` equals `n`.
+    fn compiled_nested_composition(n: usize) -> CompiledPlan {
+        assert!(n >= 1, "need at least one composition level");
+        let root = scratch_dir(&format!("nested-{n}"));
+
+        // The innermost level wraps a plain passthrough transform; every other level
+        // wraps the next-deeper composition. A composition body needs at least one
+        // node, so the deepest body is a transform that carries `v` through.
+        for level in 0..n {
+            let inner_ref = if level + 1 < n {
+                // Wrap the next composition.
+                format!(
+                    r#"  - type: composition
+    name: inner
+    input: src
+    use: ./level{}.comp.yaml
+    inputs:
+      src: src"#,
+                    level + 1
+                )
+            } else {
+                // Innermost: a passthrough transform reading `v`.
+                r#"  - type: transform
+    name: inner
+    input: src
+    config:
+      cxl: |
+        emit v = v"#
+                    .to_string()
+            };
+            std::fs::write(
+                root.join(format!("level{level}.comp.yaml")),
+                format!(
+                    r#"_compose:
+  name: level{level}
+  inputs:
+    src:
+      schema:
+        - {{ name: v, type: int }}
+  outputs:
+    result: inner
+  config_schema: {{}}
+
+nodes:
+{inner_ref}
+"#,
+                ),
+            )
+            .expect("write nested level fixture");
+        }
+
+        let pipeline = r#"
+pipeline:
+  name: nested_comp
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: v, type: int }
+  - type: composition
+    name: comp
+    input: src
+    use: ./level0.comp.yaml
+    inputs:
+      src: src
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("nested pipeline parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("nested pipeline compiles");
+        let _ = std::fs::remove_dir_all(root);
+        plan
+    }
+
+    /// Flatten a trace forest to `(field_name, boundary)` in BFS-ish order for
+    /// assertions.
+    fn collect_boundaries(nodes: &[TraceNode]) -> Vec<(String, Option<BoundaryHopKind>)> {
+        let mut out = Vec::new();
+        fn walk(nodes: &[TraceNode], out: &mut Vec<(String, Option<BoundaryHopKind>)>) {
+            for node in nodes {
+                out.push((
+                    node.endpoint.field_name.clone(),
+                    node.endpoint.boundary.clone(),
+                ));
+                walk(&node.children, out);
+            }
+        }
+        walk(nodes, &mut out);
+        out
+    }
+
+    /// Does the forest contain a hop on `field` with the given boundary kind?
+    fn has_boundary(nodes: &[TraceNode], field: &str, want: &BoundaryHopKind) -> bool {
+        collect_boundaries(nodes)
+            .iter()
+            .any(|(f, b)| f == field && b.as_ref() == Some(want))
+    }
+
+    /// #155 acceptance: tracing UPSTREAM from a composition's carried output column
+    /// descends INTO the body (Enter hop) and resurfaces FROM it (Exit hop) back to
+    /// the outer source producer — returning the correct origin field. The carried
+    /// column `a` rides straight through `second ← first ← src` inside the body, so
+    /// the trace reaches the body input port and resurfaces to outer `src.a`.
+    #[test]
+    fn upstream_descends_into_and_resurfaces_from_composition() {
+        let plan = compiled_single_composition();
+        let view = derive_resolved_pipeline_view(&plan);
+
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "a"))
+            .expect("out.a exists");
+
+        // Enter hop on the body column `a` naming composition `comp`.
+        assert!(
+            has_boundary(
+                &detail.upstream,
+                "a",
+                &BoundaryHopKind::Enter("comp".to_string())
+            ),
+            "upstream from out.a must Enter composition `comp`: {:?}",
+            collect_boundaries(&detail.upstream),
+        );
+        // Exit hop resurfacing to the outer source column `a`.
+        assert!(
+            has_boundary(
+                &detail.upstream,
+                "a",
+                &BoundaryHopKind::Exit("comp".to_string())
+            ),
+            "upstream from out.a must Exit composition `comp` back to the parent: {:?}",
+            collect_boundaries(&detail.upstream),
+        );
+        // The resurfaced Exit hop lands on the outer source `src.a` — the origin.
+        let exit_to_src = find_hop(&detail.upstream, |hop| {
+            hop.boundary == Some(BoundaryHopKind::Exit("comp".to_string()))
+                && hop.stage_id == "src"
+                && hop.field_name == "a"
+        });
+        assert!(
+            exit_to_src,
+            "the Exit hop must resurface to the outer producer src.a: {:?}",
+            collect_boundaries(&detail.upstream),
+        );
+        // One composition was crossed → depth 1.
+        assert_eq!(max_scope_depth(&detail.upstream), 1);
+
+        // A computed body column still descends (Enter), then dead-ends inside the body
+        // because `derive_body_view` is CARRY-ONLY (it draws no in-body derive edges —
+        // body-internal lineage fidelity is a pending follow-up, NOT a #155 bug). The
+        // crossing is still surfaced correctly; only the deeper in-body origin of a
+        // computed column is absent until the body view gains derive edges.
+        let computed =
+            build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "c"))
+                .expect("out.c exists");
+        assert!(
+            has_boundary(
+                &computed.upstream,
+                "c",
+                &BoundaryHopKind::Enter("comp".to_string())
+            ),
+            "upstream from out.c must Enter composition `comp`: {:?}",
+            collect_boundaries(&computed.upstream),
+        );
+    }
+
+    /// Whether any hop in the forest satisfies `pred`.
+    fn find_hop(nodes: &[TraceNode], pred: impl Fn(&TraceEndpointView) -> bool + Copy) -> bool {
+        nodes
+            .iter()
+            .any(|node| pred(&node.endpoint) || find_hop(&node.children, pred))
+    }
+
+    /// #155 acceptance: a trace through ≥2 NESTED compositions returns the correct
+    /// origin with crossings marked at each level. The 2-level fixture carries `v`
+    /// straight through both bodies to the source, so the upstream trace Enters twice
+    /// (depth 2) and resurfaces all the way to outer `src.v`.
+    #[test]
+    fn upstream_through_nested_compositions_marks_each_level() {
+        let plan = compiled_nested_composition(2);
+        let view = derive_resolved_pipeline_view(&plan);
+
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "v"))
+            .expect("out.v exists");
+
+        assert_eq!(
+            max_scope_depth(&detail.upstream),
+            2,
+            "two nested compositions → max scope depth 2: {:?}",
+            collect_boundaries(&detail.upstream),
+        );
+        // At least two Enter crossings and two Exit crossings on `v`.
+        let boundaries = collect_boundaries(&detail.upstream);
+        let enters = boundaries
+            .iter()
+            .filter(|(_, b)| matches!(b, Some(BoundaryHopKind::Enter(_))))
+            .count();
+        let exits = boundaries
+            .iter()
+            .filter(|(_, b)| matches!(b, Some(BoundaryHopKind::Exit(_))))
+            .count();
+        assert!(
+            enters >= 2,
+            "expected ≥2 Enter crossings, got {enters}: {boundaries:?}"
+        );
+        assert!(
+            exits >= 2,
+            "expected ≥2 Exit crossings, got {exits}: {boundaries:?}"
+        );
+        // The deepest origin is the outer source column `v`.
+        assert!(
+            find_hop(&detail.upstream, |hop| hop.stage_id == "src"
+                && hop.field_name == "v"),
+            "nested trace must resurface to the outer origin src.v: {boundaries:?}",
+        );
+    }
+
+    /// #155 acceptance: a composition appearing on two SIBLING branches (not nested)
+    /// expands BOTH times. A diamond — `src → compL`/`compR → out`, where `compL` and
+    /// `compR` are two instances of the same composition body — has the body open on
+    /// two independent paths; each must descend. (The per-descent unique scope id, not
+    /// the body id, keys `seen`, so sibling expansion is allowed while the recursion
+    /// guard still blocks self-nesting.)
+    #[test]
+    fn sibling_compositions_expand_both_times() {
+        let root = scratch_dir("siblings");
+        std::fs::write(
+            root.join("passthru.comp.yaml"),
+            r#"_compose:
+  name: passthru
+  inputs:
+    src:
+      schema:
+        - { name: v, type: int }
+  outputs:
+    result: only
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: only
+    input: src
+    config:
+      cxl: |
+        emit v = v
+"#,
+        )
+        .expect("write sibling body");
+        // Two composition nodes (compL, compR) using the SAME body file, both fed by
+        // `src`, both merged into `out`. `merge` unions rows, so `out.v` traces
+        // upstream to BOTH compL.v and compR.v.
+        let pipeline = r#"
+pipeline:
+  name: sibling_comp
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: v, type: int }
+  - type: composition
+    name: compL
+    input: src
+    use: ./passthru.comp.yaml
+    inputs:
+      src: src
+  - type: composition
+    name: compR
+    input: src
+    use: ./passthru.comp.yaml
+    inputs:
+      src: src
+  - type: merge
+    name: out
+    inputs: [compL, compR]
+"#;
+        let config = parse_config(pipeline).expect("sibling pipeline parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("sibling pipeline compiles");
+        let _ = std::fs::remove_dir_all(root);
+
+        let view = derive_resolved_pipeline_view(&plan);
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "v"))
+            .expect("out.v exists");
+
+        let boundaries = collect_boundaries(&detail.upstream);
+        assert!(
+            has_boundary(
+                &detail.upstream,
+                "v",
+                &BoundaryHopKind::Enter("compL".to_string())
+            ),
+            "the left sibling composition must expand: {boundaries:?}",
+        );
+        assert!(
+            has_boundary(
+                &detail.upstream,
+                "v",
+                &BoundaryHopKind::Enter("compR".to_string())
+            ),
+            "the right sibling composition must ALSO expand: {boundaries:?}",
+        );
+    }
+
+    /// #155 acceptance: scope state does not leak — running UPSTREAM then DOWNSTREAM
+    /// over the same boundary yields independent trees. Each `trace_tree` call builds
+    /// its own frontier/seen/stack; only the resolver's memoization cache is shared.
+    /// The upstream tree from `out.a` must Enter `comp`; the downstream tree from
+    /// `src.a` must independently Enter `comp` too — neither leaves residue that
+    /// suppresses the other.
+    #[test]
+    fn scope_state_does_not_leak_between_directions() {
+        let plan = compiled_single_composition();
+        let view = derive_resolved_pipeline_view(&plan);
+
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "a"))
+            .expect("out.a exists");
+        assert!(
+            has_boundary(
+                &detail.upstream,
+                "a",
+                &BoundaryHopKind::Enter("comp".to_string())
+            ),
+            "upstream tree must descend into comp independently",
+        );
+
+        // Downstream from the outer source column `a`: it crosses INTO comp (the input
+        // marker), descends, and the in-body walk carries it toward the output.
+        let src_detail =
+            build_field_detail(&view, None, Some(&plan), &SelectedField::new("src", "a"))
+                .expect("src.a exists");
+        assert!(
+            has_boundary(
+                &src_detail.downstream,
+                "a",
+                &BoundaryHopKind::Enter("comp".to_string())
+            ),
+            "downstream tree must descend into comp independently of the upstream run: {:?}",
+            collect_boundaries(&src_detail.downstream),
+        );
+
+        // And the two directions on the SAME field are independent: build the field
+        // detail twice and confirm identical results (no cross-call residue).
+        let again = build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "a"))
+            .expect("out.a exists");
+        assert_eq!(
+            detail.upstream, again.upstream,
+            "re-running the same trace must be deterministic (no leaked scope state)",
+        );
+    }
+
+    /// #155 regression guard: `trace_tree(view, …, None)` (no resolver) reproduces the
+    /// legacy flat output on a boundary-free view — no boundary hop is ever emitted,
+    /// and the tree matches the `Some`-resolver run on a view that happens to have no
+    /// compositions (the resolver simply never fires).
+    #[test]
+    fn flat_trace_without_resolver_matches_legacy() {
+        // A plain 3-stage carry/derive view with NO composition.
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "x".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        let transform = stage(
+            "calc",
+            StageKind::Transform,
+            vec![FieldRow {
+                name: "y".to_string(),
+                kind: FieldKind::Emitted,
+                ..Default::default()
+            }],
+        );
+        let view = PipelineView {
+            stages: vec![source, transform],
+            field_edges: vec![FieldEdge {
+                from_node: 0,
+                from_field: "x".to_string(),
+                to_node: 1,
+                to_field: "y".to_string(),
+                kind: FieldEdgeKind::Derive,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let flat = trace_tree(&view, 1, "y", TraceDirection::Upstream, true, None);
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].endpoint.field_name, "x");
+        assert_eq!(flat[0].endpoint.boundary, None);
+        assert_eq!(
+            max_scope_depth(&flat),
+            0,
+            "a boundary-free flat trace is depth 0"
+        );
+
+        // The full field model with `plan: None` produces the same trees (graceful
+        // degradation): no boundary hops anywhere.
+        let detail = build_field_detail(&view, None, None, &SelectedField::new("calc", "y"))
+            .expect("calc.y exists");
+        assert!(
+            collect_boundaries(&detail.upstream)
+                .iter()
+                .all(|(_, b)| b.is_none()),
+            "with no plan, no hop carries a boundary marker",
+        );
+    }
+
+    /// #155: the depth-cap arithmetic of the scope stack is correct. A hand-built
+    /// frame chain of `MAX_SCOPE_DEPTH` open frames reports depth `MAX_SCOPE_DEPTH`,
+    /// so `depth() + 1 > MAX_SCOPE_DEPTH` (the `try_descend` backstop) fires for the
+    /// next descent. This proves the pathological-nesting backstop terminates without
+    /// needing a `MAX_SCOPE_DEPTH`-deep compiled pipeline (engine caps nesting at 50;
+    /// the unit check pins the boundary exactly).
+    #[test]
+    fn scope_depth_cap_terminates_pathological_nesting() {
+        let mut frame = Rc::new(ScopeFrame {
+            id: 0,
+            body_id: None,
+            body: None,
+            parent: None,
+            comp_in_parent: None,
+        });
+        assert_eq!(frame.depth(), 0, "root frame is depth 0");
+
+        for level in 1..=MAX_SCOPE_DEPTH {
+            frame = Rc::new(ScopeFrame {
+                id: level,
+                body_id: Some(CompositionBodyId(level as u32)),
+                body: None,
+                parent: Some(Rc::clone(&frame)),
+                comp_in_parent: Some((0, format!("c{level}"))),
+            });
+            assert_eq!(frame.depth(), level, "depth tracks open frame count");
+        }
+        // At MAX_SCOPE_DEPTH open frames, one more descent would exceed the cap.
+        assert!(
+            frame.depth() + 1 > MAX_SCOPE_DEPTH,
+            "the next descent past MAX_SCOPE_DEPTH must be rejected by the backstop",
+        );
+    }
+
+    /// #155: the recursion guard detects a body already open on the path and the
+    /// terminal `Recursive` hop is well-formed. The engine forbids `use:`-cycles at
+    /// compile time (E107), so a recursive `CompiledPlan` cannot exist; the guard is a
+    /// defensive backstop, exercised here at the model level the way
+    /// `field_lineage::resolve_support_guards_cycles` exercises its `visiting` set with
+    /// a hand-built cycle. `ScopeFrame::is_open` is the guard's decision; a `Recursive`
+    /// hop assembled by `recursive_endpoint` is what the BFS emits on a hit.
+    #[test]
+    fn recursion_guard_detects_open_body_and_emits_terminal_hop() {
+        let outer_id = CompositionBodyId(7);
+        let root = Rc::new(ScopeFrame {
+            id: 0,
+            body_id: None,
+            body: None,
+            parent: None,
+            comp_in_parent: None,
+        });
+        let open = Rc::new(ScopeFrame {
+            id: 1,
+            body_id: Some(outer_id),
+            body: None,
+            parent: Some(Rc::clone(&root)),
+            comp_in_parent: Some((1, "rec".to_string())),
+        });
+        // Re-entering the SAME body id that is already open → recursion.
+        assert!(
+            open.is_open(outer_id),
+            "an open body id is detected on the path"
+        );
+        // A DIFFERENT body id on a sibling/child is NOT recursion.
+        assert!(
+            !open.is_open(CompositionBodyId(99)),
+            "an unrelated body id is not treated as recursion",
+        );
+
+        // The terminal hop the guard emits is a leaf Recursive crossing naming the
+        // composition, with no children (the BFS does not expand it).
+        let endpoint = recursive_endpoint(
+            "rec_body".to_string(),
+            "v".to_string(),
+            3,
+            "rec".to_string(),
+        );
+        assert_eq!(
+            endpoint.boundary,
+            Some(BoundaryHopKind::Recursive("rec".to_string())),
+            "the Recursive hop names the composition `rec` for #156's marker",
+        );
+        assert_eq!(endpoint.field_name, "v");
+        // A `Recursive` crossing counts toward scope depth in the summary.
+        let forest = vec![TraceNode {
+            endpoint,
+            cxl_mentions: Vec::new(),
+            children: Vec::new(),
+        }];
+        assert_eq!(max_scope_depth(&forest), 1);
+    }
+
+    /// #155 review item 1: a `\u{2190}in:` synthetic marker must NEVER surface as a
+    /// visible hop, even on the degrade path where descent fails. Here a hand-built
+    /// downstream view has a marker edge `src.a \u{2192} ghost.(\u{2190}in:p:a)` into a
+    /// Composition node `ghost` that has NO body assignment in the plan, so
+    /// `try_descend_marker` returns false — the marker must be dropped as a clean leaf,
+    /// not emitted/enqueued. The whole tree is asserted free of any `\u{2190}` field
+    /// name.
+    #[test]
+    fn unresolvable_downstream_marker_never_leaks_to_a_hop() {
+        // A real resolver (its plan has `comp`, but NOT `ghost`).
+        let plan = compiled_single_composition();
+
+        let src = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "a".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        // A Composition-kind node whose id is unknown to the plan, so `resolve` misses.
+        let ghost = stage("ghost", StageKind::Composition, Vec::new());
+        let marker = composition_in_boundary_field("p", "a");
+        let view = PipelineView {
+            stages: vec![src, ghost],
+            field_edges: vec![FieldEdge::boundary(
+                0,
+                "a".to_string(),
+                1,
+                marker.clone(),
+                false,
+            )],
+            ..Default::default()
+        };
+
+        let resolver = BodyScopeResolver::new(&plan);
+        let down = trace_tree(
+            &view,
+            0,
+            "a",
+            TraceDirection::Downstream,
+            true,
+            Some(&resolver),
+        );
+
+        // The unresolvable marker descent fails → the marker is dropped; the tree is
+        // empty (no other downstream edge), and crucially carries no `\u{2190}` field.
+        let names: Vec<String> = collect_boundaries(&down)
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            names.iter().all(|f| !f.contains('\u{2190}')),
+            "a synthetic input marker must never reach a hop's field_name, got {names:?}",
+        );
+        assert!(
+            down.is_empty(),
+            "the only downstream endpoint was an unresolvable marker, dropped as a leaf: {:?}",
+            collect_boundaries(&down),
+        );
+
+        // Belt-and-braces: even on a REAL composition plan, no `\u{2190}` ever surfaces
+        // in any direction (the descend path emits the Enter hop on the real column).
+        let real_view = derive_resolved_pipeline_view(&plan);
+        for field in ["a", "b", "c", "d"] {
+            for sel in [
+                SelectedField::new("out", field),
+                SelectedField::new("src", field),
+            ] {
+                if let Some(detail) = build_field_detail(&real_view, None, Some(&plan), &sel) {
+                    for tree in [
+                        &detail.upstream,
+                        &detail.downstream,
+                        &detail.upstream_direct,
+                        &detail.downstream_direct,
+                    ] {
+                        assert!(
+                            collect_boundaries(tree)
+                                .iter()
+                                .all(|(f, _)| !f.contains('\u{2190}')),
+                            "no synthetic marker may surface for {sel:?}: {:?}",
+                            collect_boundaries(tree),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// #155 review item 2: the "N upstream / M downstream" LINEAGE figure counts real
+    /// source/consumer FIELDS, excluding the synthetic Enter/Exit boundary crossings.
+    /// A column carried through one composition would otherwise report inflated counts.
+    /// Asserts that `count_field_hops` + the boundary-crossing count partitions the
+    /// whole tree, and that the model's `lineage` fact reports only the real fields.
+    #[test]
+    fn lineage_count_excludes_boundary_crossings() {
+        let plan = compiled_single_composition();
+        let view = derive_resolved_pipeline_view(&plan);
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "a"))
+            .expect("out.a exists");
+
+        // The upstream tree has boundary crossings (Enter + Exit on `a`), so the raw
+        // node count is strictly greater than the field-hop count.
+        let boundary_hops = collect_boundaries(&detail.upstream)
+            .iter()
+            .filter(|(_, b)| b.is_some())
+            .count();
+        assert!(
+            boundary_hops >= 2,
+            "the carried column crosses comp in and out: {:?}",
+            collect_boundaries(&detail.upstream),
+        );
+        let field_hops = count_field_hops(&detail.upstream);
+        let all_hops = collect_boundaries(&detail.upstream).len();
+        assert_eq!(
+            field_hops + boundary_hops,
+            all_hops,
+            "field hops + boundary crossings must partition the tree",
+        );
+
+        // The `lineage` context fact uses the field-hop count, so it never includes a
+        // boundary crossing.
+        let lineage_fact = detail
+            .context
+            .iter()
+            .find(|f| f.label == "lineage")
+            .expect("lineage fact present");
+        let upstream_reported: usize = lineage_fact
+            .value
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("lineage fact starts with the upstream count");
+        assert_eq!(
+            upstream_reported, field_hops,
+            "the lineage fact reports field hops, not boundary-inflated counts: {:?}",
+            lineage_fact.value,
+        );
+    }
+
+    /// #155 review item 3: tracing DOWNSTREAM descends INTO a composition (Enter) and
+    /// resurfaces FROM it (Exit) to the outer CONSUMER. The carried column `a` enters
+    /// `comp` at its input port, rides the body to the output port, and resurfaces to
+    /// `out.a` — exercising the `TraceDirection::Downstream` arm of
+    /// `resurface_from_body` and its `emit_resurface_hop` path.
+    #[test]
+    fn downstream_descends_and_resurfaces_to_outer_consumer() {
+        let plan = compiled_single_composition();
+        let view = derive_resolved_pipeline_view(&plan);
+
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("src", "a"))
+            .expect("src.a exists");
+
+        // Enter hop on the carried body column `a` naming `comp`.
+        assert!(
+            has_boundary(
+                &detail.downstream,
+                "a",
+                &BoundaryHopKind::Enter("comp".to_string())
+            ),
+            "downstream from src.a must Enter composition `comp`: {:?}",
+            collect_boundaries(&detail.downstream),
+        );
+        // Exit hop resurfacing to the outer consumer `out.a`.
+        let exit_to_out = find_hop(&detail.downstream, |hop| {
+            hop.boundary == Some(BoundaryHopKind::Exit("comp".to_string()))
+                && hop.stage_id == "out"
+                && hop.field_name == "a"
+        });
+        assert!(
+            exit_to_out,
+            "downstream must Exit composition `comp` and resurface to the outer consumer out.a: {:?}",
+            collect_boundaries(&detail.downstream),
+        );
+        assert_eq!(max_scope_depth(&detail.downstream), 1);
     }
 }

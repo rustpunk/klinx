@@ -479,6 +479,8 @@ impl FieldEdge {
 /// This naming convention is the contract #155 (descent into composition bodies)
 /// relies on to detect "an outer column enters the body at port `port` as column
 /// `col`", so it is a documented `pub(crate)` helper rather than an inline literal.
+/// [`parse_composition_in_boundary_field`] is its inverse — the SINGLE source of truth
+/// for the grammar lives here, so the builder and parser cannot drift (#155 review).
 ///
 /// The OUTPUT side has no synthetic-marker analogue: a composition's output columns
 /// are materialized as real [`FieldRow`]s on the node (synthesized from the body's
@@ -487,7 +489,28 @@ impl FieldEdge {
 /// port for `comp.col` from the body's `output_port_rows` (which port declares
 /// `col`) and `output_port_to_node_idx` (that port's terminal body NodeIndex).
 pub(crate) fn composition_in_boundary_field(port: &str, col: &str) -> String {
+    // The grammar splits on the FIRST `:` after the prefix to recover `(port, col)`
+    // (see `parse_composition_in_boundary_field`). A port name cannot contain `:` (it
+    // is a composition-signature identifier — letters/digits/underscores), so the split
+    // is unambiguous; a `col` carrying `:` would round-trip into the `col` half intact.
+    // Debug-guard the port invariant so a future grammar change can't silently corrupt
+    // the round-trip.
+    debug_assert!(
+        !port.contains(':'),
+        "composition input-port name must not contain the `:` marker separator: {port:?}",
+    );
     format!("\u{2190}in:{port}:{col}")
+}
+
+/// Parse a synthetic `\u{2190}in:{port}:{col}` input-boundary marker field back into
+/// its `(port, col)` halves (#155), or `None` when `field` is not such a marker.
+///
+/// Inverse of [`composition_in_boundary_field`] — both live here so the round-trip is
+/// defined in one place. Splits on the FIRST `:` after the `\u{2190}in:` prefix: the
+/// port half cannot contain `:`, so this recovers the exact port the builder minted;
+/// `col` keeps any (rare) remaining colons verbatim.
+pub(crate) fn parse_composition_in_boundary_field(field: &str) -> Option<(&str, &str)> {
+    field.strip_prefix("\u{2190}in:")?.split_once(':')
 }
 
 /// Resolve the let-expanded input-column support of a single `emit`
@@ -1341,6 +1364,33 @@ mod tests {
 
     fn program(src: &str) -> Program {
         parse_clean(src).expect("fixture CXL parses cleanly")
+    }
+
+    /// #155 review item 5: `composition_in_boundary_field` and
+    /// `parse_composition_in_boundary_field` are exact inverses (single source of truth
+    /// for the `\u{2190}in:port:col` grammar). The round-trip recovers the exact
+    /// `(port, col)`; a `col` carrying `:` survives intact; a non-marker string parses
+    /// to `None`.
+    #[test]
+    fn composition_in_boundary_field_round_trips() {
+        for (port, col) in [("src", "amount"), ("left", "k"), ("p", "a:b:c")] {
+            let marker = composition_in_boundary_field(port, col);
+            assert!(
+                marker.starts_with('\u{2190}'),
+                "marker carries the arrow prefix"
+            );
+            assert_eq!(
+                parse_composition_in_boundary_field(&marker),
+                Some((port, col)),
+                "round-trip must recover the exact (port, col) for {marker:?}",
+            );
+        }
+        // A real column name is never mistaken for a marker.
+        assert_eq!(parse_composition_in_boundary_field("amount"), None);
+        assert_eq!(
+            parse_composition_in_boundary_field("\u{2190}in:no_colon"),
+            None
+        );
     }
 
     fn cols(names: &[&str]) -> Vec<String> {
