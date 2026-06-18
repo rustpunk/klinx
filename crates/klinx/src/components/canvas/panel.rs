@@ -111,6 +111,13 @@ const FIT_MARGIN: f32 = 60.0;
 /// off-screen card just clear of the canvas↔Inspector boundary rather than
 /// reframing the whole graph.
 const REVEAL_MARGIN: f32 = 40.0;
+/// Pointer travel (client px) past which a background mouse gesture counts as a
+/// pan, not a click. A pan ends with a DOM `click` on the panel (mousedown and
+/// mouseup land on the same element regardless of movement), and the background
+/// `onclick` deselects the field/node (#75); without this slop a pan would clear
+/// the selection and close the lineage view. Sized to the conventional click
+/// tolerance so hand jitter on a genuine click still deselects.
+const CLICK_DRAG_SLOP_PX: f32 = 4.0;
 /// Fallback viewport dimensions used before the panel reports its real size
 /// (the `onmounted` measurement is async). Sized to a typical canvas pane so a
 /// fit triggered on the very first frame still produces a sane transform.
@@ -737,6 +744,16 @@ struct DragState {
     start_pan_x: f32,
     /// Pan Y at drag start.
     start_pan_y: f32,
+    /// Set once the pointer travels past [`CLICK_DRAG_SLOP_PX`] during a drag, so
+    /// the trailing background `click` can tell a pan from a genuine click and
+    /// skip the deselect (#75). Reset at each `mousedown`.
+    moved: bool,
+}
+
+/// Whether a gesture's pointer travel marks it a drag (pan) rather than a click.
+/// Compared squared to avoid a `sqrt`.
+fn is_drag_beyond_slop(dx: f32, dy: f32) -> bool {
+    dx * dx + dy * dy > CLICK_DRAG_SLOP_PX * CLICK_DRAG_SLOP_PX
 }
 
 /// The infinite-canvas panel rendering the pipeline node graph.
@@ -1416,6 +1433,7 @@ pub fn CanvasPanel() -> Element {
                 let pos = e.client_coordinates();
                 let mut d = drag.borrow_mut();
                 d.active = true;
+                d.moved = false;
                 d.start_x = pos.x as f32;
                 d.start_y = pos.y as f32;
                 d.start_pan_x = *pan_x.peek();
@@ -1427,11 +1445,14 @@ pub fn CanvasPanel() -> Element {
     let drag_move = {
         let drag = drag.clone();
         move |e: MouseEvent| {
-            let d = drag.borrow();
+            let mut d = drag.borrow_mut();
             if d.active {
                 let pos = e.client_coordinates();
                 let dx = pos.x as f32 - d.start_x;
                 let dy = pos.y as f32 - d.start_y;
+                if is_drag_beyond_slop(dx, dy) {
+                    d.moved = true;
+                }
                 pan_x.set(d.start_pan_x + dx);
                 pan_y.set(d.start_pan_y + dy);
             }
@@ -1444,6 +1465,10 @@ pub fn CanvasPanel() -> Element {
             drag.borrow_mut().active = false;
         }
     };
+
+    // Clone for the background `onclick` deselect, which consults the drag's
+    // `moved` flag to ignore the trailing click a pan emits.
+    let drag_click = drag.clone();
 
     let on_wheel = move |e: WheelEvent| {
         // Compute a zoom multiplier from the wheel delta.
@@ -1750,8 +1775,22 @@ pub fn CanvasPanel() -> Element {
             ondoubleclick: move |_| fit_to_view(pan_x, pan_y, zoom),
             // Clicking empty canvas deselects any selected node AND clears a pinned
             // field lineage (#75). Node and field-row clicks call stop_propagation(),
-            // so this only fires on empty space.
+            // so this only fires on empty space. A pan also ends with a background
+            // click here (mousedown+mouseup on the same element), so skip the
+            // deselect when the gesture actually moved — otherwise panning would
+            // clear the selection and close the lineage view. Consume the flag
+            // here (and reset it on the next mousedown in `drag_down`) so a pan's
+            // single trailing click is ignored without stranding the latch. The
+            // reset must NOT live in `drag_up`: the `click` fires after `mouseup`,
+            // so clearing it there would let the pan's trailing click deselect.
             onclick: move |_| {
+                {
+                    let mut d = drag_click.borrow_mut();
+                    if d.moved {
+                        d.moved = false;
+                        return;
+                    }
+                }
                 let mut sel = state.selected_stages;
                 sel.set(std::collections::HashSet::new());
                 let mut pinned = pinned_field;
@@ -1983,11 +2022,23 @@ mod tests {
         ConnectorEndpoints, ConnectorObstacle, obstacle_aware_channel_paths,
     };
     use super::{
-        FIELD_ROW_CAP, FieldDisplayState, FieldProjectionContext, FieldRankSignals,
-        GlobalNodeDisplayMode, GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP, ResolvedNodeDisplayMode,
-        field_matches_by_node, preview_rank, project_stage_fields, rendered_card_height,
-        resolve_node_display_mode, text_matches_query,
+        CLICK_DRAG_SLOP_PX, FIELD_ROW_CAP, FieldDisplayState, FieldProjectionContext,
+        FieldRankSignals, GlobalNodeDisplayMode, GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP,
+        ResolvedNodeDisplayMode, field_matches_by_node, is_drag_beyond_slop, preview_rank,
+        project_stage_fields, rendered_card_height, resolve_node_display_mode, text_matches_query,
     };
+
+    #[test]
+    fn drag_slop_distinguishes_click_from_pan() {
+        // A still click and sub-slop hand jitter are NOT a drag (deselect fires).
+        assert!(!is_drag_beyond_slop(0.0, 0.0));
+        assert!(!is_drag_beyond_slop(CLICK_DRAG_SLOP_PX - 0.5, 0.0));
+        assert!(!is_drag_beyond_slop(2.0, 2.0)); // 2²+2²=8 < 4²=16
+        // Travel past the slop in any direction IS a pan (deselect suppressed).
+        assert!(is_drag_beyond_slop(CLICK_DRAG_SLOP_PX + 0.5, 0.0));
+        assert!(is_drag_beyond_slop(0.0, -10.0));
+        assert!(is_drag_beyond_slop(3.0, 3.0)); // 3²+3²=18 > 16
+    }
 
     fn wide_stage(count: usize) -> StageView {
         StageView {
