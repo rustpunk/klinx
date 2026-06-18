@@ -31,6 +31,12 @@ Read first: [docs/ai/00_READ_THIS_FIRST.md](docs/ai/00_READ_THIS_FIRST.md). Deta
 - Dependency policy: `cargo deny check`
 - Run desktop app: `dx serve --package klinx --platform desktop`
 - Desktop bundle: `dx build --package klinx --platform desktop`
+- Headless UI screenshot (no physical display needed): `cargo build --package klinx` then
+  `scripts/shot.sh <out.png> <workspace-dir>` (e.g. `scripts/shot.sh /tmp/shot.png ./examples/pipelines`).
+  Renders the real wry/WebKitGTK app under Xvfb with software GL and grabs the root window via
+  ImageMagick `import`; drive interaction (hover/click/pan) with `xdotool` against the Xvfb display,
+  then re-shot/crop. There is no Playwright/web target — this is the visual-verification path.
+  Requires `xvfb-run`, ImageMagick, and mesa software GL. See `scripts/shot.sh`.
 
 ## GitHub Agent Workflow Helpers
 
