@@ -8,9 +8,9 @@ use dioxus::prelude::*;
 use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
 use crate::pipeline_view::{
     CanvasConnectorPath, EdgeNature, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow,
-    NODE_WIDTH, Precision, RoleEdge, StagePortSide, StageView, field_lineage_full,
+    LayoutBounds, NODE_WIDTH, Precision, RoleEdge, StagePortSide, StageView, field_lineage_full,
     field_lineage_full_capped, fit_transform, group_endpoints_by_node, layout_bounds,
-    lineage_closure, lineage_keep_nodes,
+    lineage_closure, lineage_keep_nodes, pan_to_reveal,
 };
 use crate::state::{ChannelViewMode, LineageRevealMode, current_pipeline_view, use_app_state};
 
@@ -106,6 +106,11 @@ const ZOOM_STEP_LINE: f32 = 1.10;
 const ZOOM_STEP_PIXEL: f32 = 0.001;
 /// Screen-space padding kept around the node graph when fitting it to view.
 const FIT_MARGIN: f32 = 60.0;
+/// Breathing room kept on each edge when auto-panning a freshly selected field's
+/// node into view (#163). Smaller than [`FIT_MARGIN`] — this nudges a single
+/// off-screen card just clear of the canvas↔Inspector boundary rather than
+/// reframing the whole graph.
+const REVEAL_MARGIN: f32 = 40.0;
 /// Fallback viewport dimensions used before the panel reports its real size
 /// (the `onmounted` measurement is async). Sized to a typical canvas pane so a
 /// fit triggered on the very first frame still produces a sane transform.
@@ -1024,6 +1029,62 @@ pub fn CanvasPanel() -> Element {
     let field_displays: Vec<FieldDisplayInfo> =
         projected.iter().map(|p| p.display.clone()).collect();
     let stages: Vec<StageView> = projected.into_iter().map(|p| p.stage).collect();
+
+    // #163: keep a freshly selected field's node fully on-screen. Selecting a
+    // field opens the Inspector panel, which shrinks the canvas column; cards are
+    // absolutely positioned and do NOT reflow, so a node near the right edge gets
+    // clipped at the canvas↔Inspector boundary — the lineage edges light up but
+    // the target card itself is out of view. Resolve the SELECTED node's
+    // world-space rect (rendered height, matching what is drawn) once here; the
+    // scan runs only while a field is selected, so an unselected canvas pays
+    // nothing for the reveal machinery.
+    let selected_reveal_rect: Option<LayoutBounds> =
+        state.selected_field.read().as_ref().and_then(|selection| {
+            stages
+                .iter()
+                .zip(field_displays.iter())
+                .find(|(stage, _)| stage.id == selection.stage_id)
+                .map(|(stage, display)| LayoutBounds {
+                    min_x: stage.canvas_x,
+                    min_y: stage.canvas_y,
+                    max_x: stage.canvas_x + NODE_WIDTH,
+                    max_y: stage.canvas_y + rendered_card_height(stage, display),
+                })
+        });
+    // When the selection (or the measured viewport) changes, pan — WITHOUT
+    // touching zoom — so the selected node's card is fully visible. The effect
+    // reads `selected_field` (re-run on a retarget while the Inspector is already
+    // open) and `viewport_w/h` (re-run after the canvas-column resize the
+    // Inspector triggers — which animates over the `.klinx-main` flex transition,
+    // so the final, settled width is what frames the node; this also keeps the
+    // selected node visible across later pane/window resizes). Pan/zoom are
+    // PEEKED, not subscribed: a user pan never retriggers the reveal, and the
+    // effect's own pan write cannot loop (pan transforms the inner viewport under
+    // an `overflow:hidden` panel, so the measured panel size is pan-invariant).
+    use_effect(move || {
+        // Read for subscription so the reveal re-runs on a same-size retarget.
+        let _selection = state.selected_field.read();
+        let viewport_w = *viewport_w.read();
+        let viewport_h = *viewport_h.read();
+        let Some(node) = selected_reveal_rect else {
+            return;
+        };
+        if let Some((px, py)) = pan_to_reveal(
+            node,
+            *pan_x.peek(),
+            *pan_y.peek(),
+            *zoom.peek(),
+            viewport_w,
+            viewport_h,
+            REVEAL_MARGIN,
+        ) {
+            let mut pan_x = pan_x;
+            let mut pan_y = pan_y;
+            pan_x.set(px);
+            pan_y.set(py);
+        }
+    });
+
     let connector_obstacles = stages
         .iter()
         .zip(field_displays.iter())
