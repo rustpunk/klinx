@@ -14,8 +14,8 @@ mod field_lineage;
 pub mod layout_model;
 
 pub use field_lineage::{
-    EdgeNature, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, compact_type, field_lineage_full,
-    group_endpoints_by_node, lineage_closure,
+    EdgeNature, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, Precision, compact_type,
+    field_lineage_full, group_endpoints_by_node, lineage_closure,
 };
 pub const NODE_HEIGHT: f32 = 92.0;
 pub const NODE_WIDTH: f32 = 160.0;
@@ -1282,6 +1282,7 @@ fn declared_rows(
             kind: FieldKind::Declared,
             ty: Some(compact_type(&c.ty)),
             is_correlation_key: ck_fields.contains(c.name.as_str()),
+            ..Default::default()
         })
         .collect()
 }
@@ -1477,7 +1478,8 @@ impl EdgeKey {
 /// both as separate `&mut` parameters) keeps the influence-edge helpers'
 /// signatures small. Insertion order in `edges` is unchanged — `seen` only gates
 /// whether a candidate is appended. DIRECT derive/carry edges that cannot collide
-/// by construction are pushed straight onto `edges` instead.
+/// by construction go through [`EdgeAccumulator::push_direct`] instead, which
+/// bypasses `seen` so the can't-collide contract is expressed by the type.
 struct EdgeAccumulator {
     edges: Vec<FieldEdge>,
     /// Dedup index keyed by the full-identity hash → the owned keys that hash
@@ -1530,6 +1532,23 @@ impl EdgeAccumulator {
         bucket.push(EdgeKey::from_ref(&key_ref));
         self.edges.push(edge);
     }
+
+    /// Push a DIRECT derive/carry edge that CANNOT collide by construction,
+    /// bypassing the dedup index.
+    ///
+    /// The transform pass emits each derive/identity-carry edge from a distinct
+    /// `(producer, target)` pairing within a single node sweep, so two such pushes
+    /// can never share the full identity tuple — re-probing `seen` would be wasted
+    /// work. Exposing the bypass as a method (rather than poking a public `edges`
+    /// field directly) makes the "can't-collide" contract part of the type's
+    /// surface: a caller asserts collision-freedom by *choosing* `push_direct`, so
+    /// the dedup invariant is expressed by the type, not by doc-comment convention.
+    /// The pushed edge is NOT recorded in `seen`; a later `push_deduped` of the
+    /// same identity would not observe it, which is correct precisely because the
+    /// construction guarantees that never happens.
+    fn push_direct(&mut self, edge: FieldEdge) {
+        self.edges.push(edge);
+    }
 }
 
 /// Emit INDIRECT *predicate* influence edges for one control-flow node (#147):
@@ -1566,13 +1585,15 @@ fn emit_predicate_influence_edges(
     for member in &support {
         for (p, from_field) in resolve_support_anchors(member, producers_of, input_aliases) {
             for row in surviving_rows {
-                acc.push_deduped(FieldEdge {
-                    from_node: p,
-                    from_field: from_field.clone(),
-                    to_node: idx,
-                    to_field: row.name.clone(),
+                // INDIRECT influence edges are always Approximate (#148): the
+                // predicate column states which rows survive, not a value.
+                acc.push_deduped(FieldEdge::influence(
+                    p,
+                    from_field.clone(),
+                    idx,
+                    row.name.clone(),
                     kind,
-                });
+                ));
             }
         }
     }
@@ -1653,6 +1674,43 @@ fn emit_indirect_influence_edges(
     }
 }
 
+/// Emit the INDIRECT `GroupBy` field edge AND its semantic-role-port edge for one
+/// Aggregate group key (#147), resolving the key to each producing input.
+///
+/// Both lineage paths ([`compute_field_lineage`] and
+/// [`resolved_pipeline_field_lineage`]) need the identical group-key emission;
+/// extracting it here (PR1's deferred cleanup, folded into #148) keeps the two
+/// from drifting — a group key defines the grouped-record grain, the single honest
+/// representation of the post-Aggregate grain that retired the former
+/// `is_aggregate_grain` row flag. The field edge dedups (a key resolved from two
+/// inputs, or repeated across paths, must not double); the matching role edge is
+/// appended verbatim because role edges carry no dedup index.
+fn emit_group_by_edges(
+    acc: &mut EdgeAccumulator,
+    role_edges: &mut Vec<RoleEdge>,
+    idx: usize,
+    group_key: &str,
+    producers_of: &std::collections::HashMap<String, Vec<usize>>,
+    input_aliases: &std::collections::HashMap<String, usize>,
+) {
+    for (p, from_field) in resolve_support_anchors(group_key, producers_of, input_aliases) {
+        acc.push_deduped(FieldEdge::influence(
+            p,
+            from_field.clone(),
+            idx,
+            group_key.to_string(),
+            FieldEdgeKind::GroupBy,
+        ));
+        role_edges.push(RoleEdge {
+            from_node: p,
+            from_field,
+            to_node: idx,
+            to_port: aggregate_group_key_port_id(group_key),
+            kind: FieldEdgeKind::GroupBy,
+        });
+    }
+}
+
 /// Stamp carried metadata onto pass-through rows.
 ///
 /// Normal pass-through rows use exact field names. Aggregate group keys may be
@@ -1675,6 +1733,73 @@ fn stamp_passthrough_metadata(
         if let Some(meta) = meta {
             row.ty = meta.ty.clone();
             row.is_correlation_key = meta.is_ck;
+        }
+    }
+}
+
+/// Mark every row of a node `Unknown` precision because the node's CXL failed
+/// [`field_lineage::parse_clean`] (#148).
+///
+/// A parse failure suppresses the node's lineage edges entirely (a garbled AST
+/// yields wrong edges, worse than none), so there is no edge to carry the
+/// degradation — it lives on the rows. The shared reason makes the Inspector badge
+/// explain *why* provenance is missing rather than silently showing an empty
+/// trace. Applied to BOTH lineage paths' parse-fail arms so the two stay aligned.
+fn mark_rows_unknown(rows: &mut [FieldRow]) {
+    for row in rows {
+        row.lineage_precision = Precision::Unknown;
+        row.precision_reason = "CXL did not parse; lineage edges suppressed";
+    }
+}
+
+/// Fold each output row's lineage precision from the edges that PRODUCE it (#148).
+///
+/// Run as a post-pass once every node's edges exist. A row already marked
+/// [`Precision::Unknown`] by [`mark_rows_unknown`] (its node's CXL failed to parse)
+/// keeps that verdict — there is no incident edge to reconsider. Every other row's
+/// precision is the WORST tier among the edges arriving INTO it (`(to_node,
+/// to_field)`), defaulting to [`Precision::Exact`] when no degraded edge feeds it.
+///
+/// Only the CONSUMER (`to`) side is folded, deliberately: a row's precision
+/// describes how faithfully *its own* provenance is known, which is decided by the
+/// edges that produce/influence it. A clean source column that merely FEEDS a
+/// downstream filter is itself exact — the approximation is in how it is used
+/// downstream, and that degradation correctly lands on the downstream consumer
+/// row (which is the `to` endpoint there), not back on the pristine producer.
+fn derive_row_precision(out_fields: &mut [Vec<FieldRow>], edges: &[FieldEdge]) {
+    // Per (node, field) worst producing-edge precision, folded in one pass over
+    // edges so the cost is O(edges) rather than O(rows × edges). The `&'static str`
+    // reason is copied from the edge whose precision currently wins, so the worst
+    // tier's explanation is kept; no allocation, since the reason is static.
+    let mut worst: std::collections::HashMap<(usize, &str), (Precision, &'static str)> =
+        std::collections::HashMap::new();
+    for edge in edges {
+        let entry = worst
+            .entry((edge.to_node, edge.to_field.as_str()))
+            .or_insert((Precision::Exact, edge.precision_reason));
+        // `worst` keeps the less-precise tier; update the stored reason only when
+        // this edge is strictly worse so the winning tier's explanation survives.
+        if edge.precision.worst(entry.0) != entry.0 {
+            *entry = (edge.precision, edge.precision_reason);
+        }
+    }
+    for (node, rows) in out_fields.iter_mut().enumerate() {
+        for row in rows.iter_mut() {
+            // An `Unknown` row (its node's CXL failed to parse) keeps that verdict:
+            // there is no incident edge to reconsider.
+            if row.lineage_precision == Precision::Unknown {
+                continue;
+            }
+            if let Some((precision, reason)) = worst.get(&(node, row.name.as_str())) {
+                row.lineage_precision = *precision;
+                // `Exact` carries no degraded reason, so clear any stale one; a
+                // degraded tier keeps its producing edge's explanation.
+                row.precision_reason = if *precision == Precision::Exact {
+                    ""
+                } else {
+                    *reason
+                };
+            }
         }
     }
 }
@@ -1734,7 +1859,7 @@ fn compute_field_lineage(
     let mut out_fields: Vec<Vec<FieldRow>> = vec![Vec::new(); total];
     // Edge list + its O(1) dedup index (see [`EdgeAccumulator`]). The predicate
     // fan pushes through `push_deduped`; DIRECT derive/carry edges that cannot
-    // collide by construction are pushed straight onto `acc.edges`.
+    // collide by construction push through `push_direct` (bypassing dedup).
     let mut acc = EdgeAccumulator::new();
     let mut role_edges: Vec<RoleEdge> = Vec::new();
 
@@ -1830,31 +1955,26 @@ fn compute_field_lineage(
                         .map(|row| row.name.clone())
                         .collect();
                     // Group keys define the grouped-record grain — an INDIRECT
-                    // GROUP_BY influence, not a value derive (#147). This is the
-                    // single honest representation of the post-Aggregate grain
-                    // (it retired the duplicate `is_aggregate_grain` row flag).
+                    // GROUP_BY influence, not a value derive (#147), always
+                    // Approximate (#148). This is the single honest representation
+                    // of the post-Aggregate grain (it retired the duplicate
+                    // `is_aggregate_grain` row flag). Emitted via the shared helper
+                    // so both lineage paths cannot drift.
                     for group_key in group_keys {
-                        for (p, from_field) in
-                            resolve_support_anchors(&group_key, &producers_of, aliases)
-                        {
-                            acc.push_deduped(FieldEdge {
-                                from_node: p,
-                                from_field: from_field.clone(),
-                                to_node: idx,
-                                to_field: group_key.clone(),
-                                kind: FieldEdgeKind::GroupBy,
-                            });
-                            role_edges.push(RoleEdge {
-                                from_node: p,
-                                from_field,
-                                to_node: idx,
-                                to_port: aggregate_group_key_port_id(&group_key),
-                                kind: FieldEdgeKind::GroupBy,
-                            });
-                        }
+                        emit_group_by_edges(
+                            &mut acc,
+                            &mut role_edges,
+                            idx,
+                            &group_key,
+                            &producers_of,
+                            aliases,
+                        );
                     }
 
                     let supports = field_lineage::emit_supports(&program);
+                    // An aggregate emit fanned out by `emit each` loses per-element
+                    // provenance, so its derive edges are Approximate (#148).
+                    let fanned = field_lineage::emit_each_fanned_targets(&program);
                     let mut emitted_so_far: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
                     for (target, support) in &supports {
@@ -1863,37 +1983,48 @@ fn compute_field_lineage(
                         {
                             continue;
                         }
+                        let target_fanned = fanned.contains(target.as_str());
                         for member in support {
                             let col = bare_column(member);
                             let anchors = resolve_support_anchors(member, &producers_of, aliases);
                             if !anchors.is_empty() {
                                 for (p, from_field) in anchors {
-                                    acc.edges.push(FieldEdge {
-                                        from_node: p,
+                                    acc.push_direct(FieldEdge::derive(
+                                        p,
                                         from_field,
-                                        to_node: idx,
-                                        to_field: target.clone(),
-                                        kind: FieldEdgeKind::Derive,
-                                    });
+                                        idx,
+                                        target.clone(),
+                                        target_fanned,
+                                    ));
                                 }
                             } else if emitted_so_far.contains(col) && output_names.contains(col) {
-                                acc.edges.push(FieldEdge {
-                                    from_node: idx,
-                                    from_field: col.to_string(),
-                                    to_node: idx,
-                                    to_field: target.clone(),
-                                    kind: FieldEdgeKind::Derive,
-                                });
+                                acc.push_direct(FieldEdge::derive(
+                                    idx,
+                                    col.to_string(),
+                                    idx,
+                                    target.clone(),
+                                    target_fanned,
+                                ));
                             }
                         }
                         emitted_so_far.insert(target.as_str());
                     }
                 }
-                Some(None) | None => {
-                    // Group keys are config-derived and safe to show even when
-                    // CXL emits are unavailable. Edges are still skipped to
-                    // preserve the existing "parse errors do not infer field
-                    // edges" invariant for the whole node.
+                Some(None) => {
+                    // CXL present but it failed to parse: group keys are
+                    // config-derived and safe to show, but edges are suppressed —
+                    // a garbled AST can't be trusted to infer lineage. With no edge
+                    // to annotate, the degradation lives on the rows as `Unknown`
+                    // precision (#148).
+                    out_fields[idx] =
+                        field_lineage::aggregate_group_key_output_fields(&config.group_by);
+                    mark_rows_unknown(&mut out_fields[idx]);
+                }
+                None => {
+                    // No CXL block at all (not a parse failure): show the
+                    // config-derived group keys; edges are skipped because emit
+                    // analysis is unavailable, but precision stays at the default
+                    // Exact — there is no degraded inference, just absent CXL.
                     out_fields[idx] =
                         field_lineage::aggregate_group_key_output_fields(&config.group_by);
                 }
@@ -1967,6 +2098,9 @@ fn compute_field_lineage(
                 // A support column that is neither resolves to nothing (it names
                 // no producible field — e.g. an accept-any input).
                 let aliases = &input_aliases[idx];
+                // Targets fanned out by an `emit each`: their derives lose
+                // per-element provenance, so they are Approximate (#148).
+                let fanned = field_lineage::emit_each_fanned_targets(&program);
                 let mut emitted_so_far: std::collections::HashSet<&str> =
                     std::collections::HashSet::new();
                 for (target, support) in &supports {
@@ -1974,39 +2108,32 @@ fn compute_field_lineage(
                     // edge is a carry (Passthrough/Access); a computed or renamed
                     // emit derives its target.
                     let carried = copies.contains(target.as_str());
+                    let target_fanned = fanned.contains(target.as_str());
                     for member in support {
                         // Resolve the (possibly alias-qualified) support member to
                         // its bare column on the right predecessor(s); `col` is the
                         // bare name so the carry/Access split and the edge's
                         // `from_field` both read the column, not the dotted ref.
                         let col = bare_column(member);
-                        let kind = if carried {
-                            carry_kind(col)
-                        } else {
-                            FieldEdgeKind::Derive
-                        };
                         let anchors = resolve_support_anchors(member, &producers_of, aliases);
+                        // A carry edge is Exact (identity reproduces the value); a
+                        // derive edge is Exact unless fanned by `emit each` (#148).
+                        let mk = |p: usize, from_field: String, to: usize| {
+                            if carried {
+                                FieldEdge::carry(p, from_field, to, target.clone(), carry_kind(col))
+                            } else {
+                                FieldEdge::derive(p, from_field, to, target.clone(), target_fanned)
+                            }
+                        };
                         if !anchors.is_empty() {
                             // A support column present in several inputs derives
                             // its target from each of them (#67); an alias-qualified
                             // ref resolves to its single declared port.
                             for (p, from_field) in anchors {
-                                acc.edges.push(FieldEdge {
-                                    from_node: p,
-                                    from_field,
-                                    to_node: idx,
-                                    to_field: target.clone(),
-                                    kind,
-                                });
+                                acc.push_direct(mk(p, from_field, idx));
                             }
                         } else if emitted_so_far.contains(col) {
-                            acc.edges.push(FieldEdge {
-                                from_node: idx,
-                                from_field: col.to_string(),
-                                to_node: idx,
-                                to_field: target.clone(),
-                                kind,
-                            });
+                            acc.push_direct(mk(idx, col.to_string(), idx));
                         }
                     }
                     emitted_so_far.insert(target.as_str());
@@ -2021,16 +2148,16 @@ fn compute_field_lineage(
                     {
                         // An unshadowed carried column is a pure Passthrough
                         // unless it also feeds a computed emit, which makes it an
-                        // Access carry (#72).
+                        // Access carry (#72). A clean-CXL identity carry is Exact.
                         let kind = carry_kind(col);
                         for &p in producers {
-                            acc.edges.push(FieldEdge {
-                                from_node: p,
-                                from_field: col.clone(),
-                                to_node: idx,
-                                to_field: col.clone(),
+                            acc.push_direct(FieldEdge::carry(
+                                p,
+                                col.clone(),
+                                idx,
+                                col.clone(),
                                 kind,
-                            });
+                            ));
                         }
                     }
                 }
@@ -2038,8 +2165,10 @@ fn compute_field_lineage(
             Some(None) => {
                 // CXL present but it failed to parse: render passthrough rows so
                 // the card still shows its shape, but emit NO lineage edges — a
-                // garbled AST can't be trusted to compute lineage.
+                // garbled AST can't be trusted to compute lineage. With no edge to
+                // carry the degradation, the rows are marked `Unknown` (#148).
                 out_fields[idx] = field_lineage::passthrough_output_fields(&input_cols);
+                mark_rows_unknown(&mut out_fields[idx]);
             }
             None => {
                 // No CXL block at all: the node forwards its input columns. Both
@@ -2048,16 +2177,26 @@ fn compute_field_lineage(
                 for col in &input_cols {
                     // A CXL-less fan-in (Merge) carries a shared column from every
                     // input that produced it (#67). With no emits on the node,
-                    // every carry is a pure pass-through (#72).
+                    // every carry is a pure pass-through (#72). A shared column with
+                    // MORE THAN ONE producer is a conservative join-key fan-in: we
+                    // cannot confirm from absent CXL that it rides through
+                    // unchanged, so it is Approximate; a single-producer carry is
+                    // an honest Exact passthrough (#148).
                     if let Some(producers) = producers_of.get(col) {
+                        let conservative = producers.len() > 1;
                         for &p in producers {
-                            acc.edges.push(FieldEdge {
-                                from_node: p,
-                                from_field: col.clone(),
-                                to_node: idx,
-                                to_field: col.clone(),
-                                kind: FieldEdgeKind::Passthrough,
-                            });
+                            let edge = if conservative {
+                                FieldEdge::conservative_fan_in(p, col.clone(), idx, col.clone())
+                            } else {
+                                FieldEdge::carry(
+                                    p,
+                                    col.clone(),
+                                    idx,
+                                    col.clone(),
+                                    FieldEdgeKind::Passthrough,
+                                )
+                            };
+                            acc.push_direct(edge);
                         }
                     }
                 }
@@ -2089,6 +2228,10 @@ fn compute_field_lineage(
             &input_aliases[idx],
         );
     }
+
+    // Fold each row's precision from the edges now incident to it (#148), once all
+    // edges exist. Rows already marked `Unknown` (parse-fail nodes) are preserved.
+    derive_row_precision(&mut out_fields, &acc.edges);
 
     (out_fields, acc.edges, role_edges)
 }
@@ -2151,6 +2294,7 @@ fn composition_field_lineage(
             // An output port is a synthetic boundary label, not a source
             // column, so it never drives a correlation key.
             is_correlation_key: false,
+            ..Default::default()
         }]));
     }
 
@@ -2199,20 +2343,20 @@ fn composition_field_lineage(
             continue;
         };
         // A same-named port surfaces its producer column unchanged (a pure
-        // pass-through — a port reads nothing, so never an Access carry); a
-        // differently-named port is a rename → derive.
-        let kind = if producer_field == *port {
-            FieldEdgeKind::Passthrough
+        // pass-through — a port reads nothing, so never an Access carry → Exact);
+        // a differently-named port is a clean rename → Exact derive.
+        let edge = if producer_field == *port {
+            FieldEdge::carry(
+                producer,
+                producer_field,
+                out_idx,
+                port.to_string(),
+                FieldEdgeKind::Passthrough,
+            )
         } else {
-            FieldEdgeKind::Derive
+            FieldEdge::derive(producer, producer_field, out_idx, port.to_string(), false)
         };
-        field_edges.push(FieldEdge {
-            from_node: producer,
-            from_field: producer_field,
-            to_node: out_idx,
-            to_field: port.to_string(),
-            kind,
-        });
+        field_edges.push(edge);
     }
 
     (out_fields, field_edges, role_edges)
@@ -2350,32 +2494,28 @@ fn resolved_pipeline_field_lineage(
             _ => std::collections::HashSet::new(),
         };
 
-        if let Some(_program) = parsed {
+        if let Some(program) = &parsed {
             let aliases = &input_aliases[idx];
             // Group keys define the grouped-record grain — an INDIRECT GROUP_BY
-            // influence, not a value derive (#147). Single honest representation
-            // of the grain (retired the `is_aggregate_grain` row flag).
+            // influence, not a value derive (#147), always Approximate (#148).
+            // Emitted via the shared helper so the raw and resolved paths cannot
+            // drift on the grain representation (retired `is_aggregate_grain`).
             for group_key in &aggregate_group_keys {
                 if !output_names.contains(group_key) {
                     continue;
                 }
-                for (p, from_field) in resolve_support_anchors(group_key, &producers_of, aliases) {
-                    acc.push_deduped(FieldEdge {
-                        from_node: p,
-                        from_field: from_field.clone(),
-                        to_node: idx,
-                        to_field: group_key.clone(),
-                        kind: FieldEdgeKind::GroupBy,
-                    });
-                    role_edges.push(RoleEdge {
-                        from_node: p,
-                        from_field,
-                        to_node: idx,
-                        to_port: aggregate_group_key_port_id(group_key),
-                        kind: FieldEdgeKind::GroupBy,
-                    });
-                }
+                emit_group_by_edges(
+                    &mut acc,
+                    &mut role_edges,
+                    idx,
+                    group_key,
+                    &producers_of,
+                    aliases,
+                );
             }
+            // Targets fanned out by an `emit each` lose per-element provenance, so
+            // their derive edges are Approximate (#148).
+            let fanned = field_lineage::emit_each_fanned_targets(program);
             let mut emitted_so_far: std::collections::HashSet<&str> =
                 std::collections::HashSet::new();
             for (target, support) in &supports {
@@ -2384,32 +2524,23 @@ fn resolved_pipeline_field_lineage(
                     continue;
                 }
                 let carried = copies.contains(target.as_str());
+                let target_fanned = fanned.contains(target.as_str());
                 for member in support {
                     let col = bare_column(member);
-                    let kind = if carried {
-                        carry_kind(col)
-                    } else {
-                        FieldEdgeKind::Derive
+                    let mk = |p: usize, from_field: String, to: usize| {
+                        if carried {
+                            FieldEdge::carry(p, from_field, to, target.clone(), carry_kind(col))
+                        } else {
+                            FieldEdge::derive(p, from_field, to, target.clone(), target_fanned)
+                        }
                     };
                     let anchors = resolve_support_anchors(member, &producers_of, aliases);
                     if !anchors.is_empty() {
                         for (p, from_field) in anchors {
-                            acc.edges.push(FieldEdge {
-                                from_node: p,
-                                from_field,
-                                to_node: idx,
-                                to_field: target.clone(),
-                                kind,
-                            });
+                            acc.push_direct(mk(p, from_field, idx));
                         }
                     } else if emitted_so_far.contains(col) && output_names.contains(col) {
-                        acc.edges.push(FieldEdge {
-                            from_node: idx,
-                            from_field: col.to_string(),
-                            to_node: idx,
-                            to_field: target.clone(),
-                            kind,
-                        });
+                        acc.push_direct(mk(idx, col.to_string(), idx));
                     }
                 }
                 emitted_so_far.insert(target.as_str());
@@ -2423,13 +2554,7 @@ fn resolved_pipeline_field_lineage(
                 {
                     let kind = carry_kind(col);
                     for &p in producers {
-                        acc.edges.push(FieldEdge {
-                            from_node: p,
-                            from_field: col.clone(),
-                            to_node: idx,
-                            to_field: col.clone(),
-                            kind,
-                        });
+                        acc.push_direct(FieldEdge::carry(p, col.clone(), idx, col.clone(), kind));
                     }
                 }
             }
@@ -2438,17 +2563,30 @@ fn resolved_pipeline_field_lineage(
                 if output_names.contains(col)
                     && let Some(producers) = producers_of.get(col)
                 {
+                    // A shared column with several producers is a conservative
+                    // CXL-less join-key fan-in → Approximate; a single-producer
+                    // carry is an honest Exact passthrough (#148).
+                    let conservative = producers.len() > 1;
                     for &p in producers {
-                        acc.edges.push(FieldEdge {
-                            from_node: p,
-                            from_field: col.clone(),
-                            to_node: idx,
-                            to_field: col.clone(),
-                            kind: FieldEdgeKind::Passthrough,
-                        });
+                        let edge = if conservative {
+                            FieldEdge::conservative_fan_in(p, col.clone(), idx, col.clone())
+                        } else {
+                            FieldEdge::carry(
+                                p,
+                                col.clone(),
+                                idx,
+                                col.clone(),
+                                FieldEdgeKind::Passthrough,
+                            )
+                        };
+                        acc.push_direct(edge);
                     }
                 }
             }
+        } else if parsed.is_none() && node_cxl(node).is_some() {
+            // CXL present but it failed to parse: edges were suppressed (no derive
+            // analysis), so the degradation lives on the rows as `Unknown` (#148).
+            mark_rows_unknown(&mut out_fields[idx]);
         }
 
         // INDIRECT influence edges (#147): Route's `Conditional` and Cull's
@@ -2464,6 +2602,10 @@ fn resolved_pipeline_field_lineage(
             &input_aliases[idx],
         );
     }
+
+    // Fold each row's precision from its incident edges (#148); `Unknown` rows
+    // (parse-fail nodes) are preserved.
+    derive_row_precision(&mut out_fields, &acc.edges);
 
     (out_fields, acc.edges, role_edges)
 }
@@ -2509,6 +2651,7 @@ fn resolved_row_fields(
                 kind,
                 ty: Some(compact_type(ty)),
                 is_correlation_key,
+                ..Default::default()
             })
         })
         .collect()
@@ -3213,6 +3356,7 @@ fn body_row_fields(row: &cxl::typecheck::Row) -> Vec<FieldRow> {
             kind: FieldKind::Declared,
             ty: Some(compact_type(ty)),
             is_correlation_key: false,
+            ..Default::default()
         })
         .collect()
 }
@@ -3261,13 +3405,15 @@ fn body_field_edges(
                 if source_fields.contains(field.name.as_str())
                     && seen.insert((from, field.name.clone(), to))
                 {
-                    edges.push(FieldEdge {
-                        from_node: from,
-                        from_field: field.name.clone(),
-                        to_node: to,
-                        to_field: field.name.clone(),
-                        kind: FieldEdgeKind::Passthrough,
-                    });
+                    // A best-effort same-name carry: an honest identity passthrough
+                    // → Exact (#148).
+                    edges.push(FieldEdge::carry(
+                        from,
+                        field.name.clone(),
+                        to,
+                        field.name.clone(),
+                        FieldEdgeKind::Passthrough,
+                    ));
                 }
             }
         }
@@ -3748,6 +3894,7 @@ nodes:
                     to_node: second_idx,
                     to_field: field.to_string(),
                     kind: FieldEdgeKind::Passthrough,
+                    ..Default::default()
                 }),
                 "expected body carry edge for {field}, got {:?}",
                 view.field_edges
@@ -4287,6 +4434,7 @@ nodes:
             to_node: i_t,
             to_field: "c".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&derive_a_c),
@@ -4361,6 +4509,10 @@ nodes:
                     name: "department".to_string(),
                     kind: FieldKind::PassThrough,
                     ty: Some("string".to_string()),
+                    // The group key is incident to its INDIRECT GroupBy edge, so
+                    // its row precision folds down to Approximate (#148).
+                    lineage_precision: Precision::Approximate,
+                    precision_reason: "INDIRECT group-by grain influence",
                     ..Default::default()
                 },
                 FieldRow {
@@ -4393,6 +4545,7 @@ nodes:
             to_node: i_totals,
             to_field: "department".to_string(),
             kind: FieldEdgeKind::GroupBy,
+            ..Default::default()
         };
         let total_edge = FieldEdge {
             from_node: i_orders,
@@ -4400,6 +4553,7 @@ nodes:
             to_node: i_totals,
             to_field: "total".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&group_key_edge),
@@ -4534,6 +4688,7 @@ nodes:
                 to_node: i_aggregate,
                 to_field: "user_id".to_string(),
                 kind: FieldEdgeKind::GroupBy,
+                ..Default::default()
             }],
             "merged user_id should have exactly one downstream edge into the aggregate group key"
         );
@@ -4796,11 +4951,27 @@ nodes:
             to_node: i_grouped,
             to_field: "source_b.field".to_string(),
             kind: FieldEdgeKind::GroupBy,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&edge),
             "qualified group key should draw a GroupBy edge from source_b.field, got {:?}",
             view.field_edges
+        );
+
+        // #148 S2: the grain row name (`source_b.field`) and the GroupBy edge's
+        // `to_field` (`source_b.field`) agree in the raw path — both are the
+        // qualified key — so `derive_row_precision` folds the grain row to
+        // Approximate. A bare/qualified mismatch would leave it Exact (the bug S2
+        // guards against).
+        assert_eq!(
+            group_key.lineage_precision,
+            Precision::Approximate,
+            "the qualified grain row must fold to Approximate from its GroupBy edge"
+        );
+        assert_eq!(
+            group_key.precision_reason,
+            "INDIRECT group-by grain influence"
         );
     }
 
@@ -4839,6 +5010,10 @@ nodes:
                 name: "department".to_string(),
                 kind: FieldKind::PassThrough,
                 ty: Some("string".to_string()),
+                // CXL failed to parse, so edges were suppressed and the row carries
+                // the degradation as Unknown precision (#148).
+                lineage_precision: Precision::Unknown,
+                precision_reason: "CXL did not parse; lineage edges suppressed",
                 ..Default::default()
             }],
             "invalid aggregate CXL should degrade to config-derived group keys"
@@ -4897,6 +5072,7 @@ nodes:
                     to_node: i_cull,
                     to_field: row.to_string(),
                     kind: FieldEdgeKind::Filter,
+                    ..Default::default()
                 }),
                 "status should Filter-influence surviving row {row}, got {:?}",
                 view.field_edges
@@ -4923,6 +5099,7 @@ nodes:
             to_node: i_cull,
             to_field: "status".to_string(),
             kind: FieldEdgeKind::Passthrough,
+            ..Default::default()
         }));
     }
 
@@ -5006,6 +5183,7 @@ nodes:
                     to_node: i_route,
                     to_field: row.to_string(),
                     kind: FieldEdgeKind::Conditional,
+                    ..Default::default()
                 }),
                 "region should Conditional-influence row {row}, got {:?}",
                 view.field_edges
@@ -5078,11 +5256,45 @@ nodes:
                     to_node: i_merge,
                     to_field: "user_id".to_string(),
                     kind: FieldEdgeKind::Passthrough,
+                    ..Default::default()
                 }),
                 "shared user_id should carry a Passthrough value edge from each input, got {:?}",
                 view.field_edges
             );
         }
+        // #148 S3(a): a CXL-less MULTI-producer fan-in carry is a conservative
+        // over-approximation → Approximate. `FieldEdge` `==` ignores precision, so
+        // the `.contains` checks above cannot catch a precision regression here —
+        // assert each carry edge's `.precision` field directly.
+        for src in [i_web, i_mobile] {
+            let edge = view
+                .field_edges
+                .iter()
+                .find(|e| {
+                    e.from_node == src
+                        && e.from_field == "user_id"
+                        && e.to_node == i_merge
+                        && e.to_field == "user_id"
+                        && e.kind == FieldEdgeKind::Passthrough
+                })
+                .expect("the fan-in carry exists");
+            assert_eq!(
+                edge.precision,
+                Precision::Approximate,
+                "a CXL-less multi-producer fan-in carry is Approximate, got {edge:?}"
+            );
+        }
+        // The merged row folds to Approximate from its conservative producing edges.
+        let merged = view.stages[i_merge]
+            .fields
+            .iter()
+            .find(|r| r.name == "user_id")
+            .expect("merged user_id row");
+        assert_eq!(
+            merged.lineage_precision,
+            Precision::Approximate,
+            "the merged fan-in row folds to Approximate"
+        );
         // A Merge performs no join, so it emits ZERO JoinKey edges — for the
         // shared column or any other.
         assert_eq!(
@@ -5336,6 +5548,7 @@ nodes:
             to_node: resolved_t,
             to_field: "c".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         assert!(
             resolved.field_edges.contains(&derive_a_c),
@@ -5481,6 +5694,7 @@ nodes:
             to_node: i_t,
             to_field: "y".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&derive_items_y),
@@ -5553,6 +5767,7 @@ nodes:
             to_node: i_first,
             to_field: "b".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         let b_to_c = FieldEdge {
             from_node: i_first,
@@ -5560,6 +5775,7 @@ nodes:
             to_node: i_second,
             to_field: "c".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         let edge_idx = |edge: &FieldEdge| {
             view.field_edges
@@ -5641,6 +5857,7 @@ nodes:
             to_node: i_joined,
             to_field: "product_code".to_string(),
             kind: FieldEdgeKind::Passthrough,
+            ..Default::default()
         };
         let carry_from_inventory = FieldEdge {
             from_node: i_inventory,
@@ -5648,6 +5865,7 @@ nodes:
             to_node: i_joined,
             to_field: "product_code".to_string(),
             kind: FieldEdgeKind::Passthrough,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&carry_from_products),
@@ -5672,6 +5890,7 @@ nodes:
             to_node: i_joined,
             to_field: "product_code".to_string(),
             kind: FieldEdgeKind::JoinKey,
+            ..Default::default()
         };
         let join_key_from_inventory = FieldEdge {
             from_node: i_inventory,
@@ -5679,6 +5898,7 @@ nodes:
             to_node: i_joined,
             to_field: "product_code".to_string(),
             kind: FieldEdgeKind::JoinKey,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&join_key_from_products),
@@ -5708,6 +5928,7 @@ nodes:
                         to_node: i_joined,
                         to_field: to_field.to_string(),
                         kind: FieldEdgeKind::JoinKey,
+                        ..Default::default()
                     }),
                     "JoinKey must fan from node {from}'s product_code to non-key row \
                      `{to_field}`, got {:?}",
@@ -5752,6 +5973,7 @@ nodes:
             to_node: i_joined,
             to_field: "available".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&derive_available),
@@ -6056,6 +6278,7 @@ nodes:
             to_node: i_t,
             to_field: tf.to_string(),
             kind,
+            ..Default::default()
         };
 
         // One edge of each kind.
@@ -6186,6 +6409,7 @@ nodes:
             // A CXL-less merge has no emits, so every value carry is a pure
             // Passthrough.
             kind: FieldEdgeKind::Passthrough,
+            ..Default::default()
         };
         let edges_to = |field: &str, kind: FieldEdgeKind| {
             view.field_edges
@@ -6624,6 +6848,7 @@ nodes:
             to_node: tn,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         // Every carried column in this chain ALSO feeds a downstream emit (`a`
         // feeds `b`, then `a`/`b` feed `c`), so each carry is an Access carry, not
@@ -6634,6 +6859,7 @@ nodes:
             to_node: tn,
             to_field: tf.to_string(),
             kind: FieldEdgeKind::Access,
+            ..Default::default()
         };
         let expected = [
             // t1: b derives from a; a carries through AND feeds b (Access).
@@ -6702,6 +6928,7 @@ nodes:
             to_node: i_t,
             to_field: "b".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         // Intra-node derive: `c` reads `b`, an EARLIER emit of the SAME node `t`.
         let b_to_c = FieldEdge {
@@ -6710,6 +6937,7 @@ nodes:
             to_node: i_t,
             to_field: "c".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&a_to_b),
@@ -6729,6 +6957,7 @@ nodes:
             to_node: i_t,
             to_field: "c".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         assert!(
             !view.field_edges.contains(&a_to_c),
@@ -6747,6 +6976,7 @@ nodes:
             to_node: i_out,
             to_field: "result".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         let closure = lineage_closure(&view.field_edges, i_t, "c");
         let idx_of = |e: &FieldEdge| view.field_edges.iter().position(|x| x == e).unwrap();
@@ -6799,6 +7029,7 @@ nodes:
             to_node: i_t,
             to_field: "y".to_string(),
             kind: FieldEdgeKind::Derive,
+            ..Default::default()
         };
         assert!(
             view.field_edges.contains(&derive_a_y),
@@ -6852,6 +7083,9 @@ nodes:
                 // CXL failed to parse (the type comes from the producer, not the
                 // emit analysis).
                 ty: Some("float".to_string()),
+                // Parse failure suppressed edges, so the row is Unknown (#148).
+                lineage_precision: Precision::Unknown,
+                precision_reason: "CXL did not parse; lineage edges suppressed",
                 ..Default::default()
             }]
         );
@@ -6861,6 +7095,335 @@ nodes:
             view.field_edges.iter().all(|e| e.to_node != i_bad),
             "a parse-error node yields no field edges at all: {:?}",
             view.field_edges
+        );
+    }
+
+    // ── #148 precision tiers (Exact / Approximate / Unknown) ─────────────────
+
+    /// Find the precision of the edge with the given identity in a view. Panics if
+    /// absent so a missing edge fails loudly rather than silently passing.
+    fn edge_precision(
+        view: &PipelineView,
+        from_node: usize,
+        from_field: &str,
+        to_node: usize,
+        to_field: &str,
+        kind: FieldEdgeKind,
+    ) -> Precision {
+        view.field_edges
+            .iter()
+            .find(|e| {
+                e.from_node == from_node
+                    && e.from_field == from_field
+                    && e.to_node == to_node
+                    && e.to_field == to_field
+                    && e.kind == kind
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected edge {from_field}->{to_field} kind {kind:?}, got {:?}",
+                    view.field_edges
+                )
+            })
+            .precision
+    }
+
+    fn field_precision(view: &PipelineView, stage_label: &str, field: &str) -> Precision {
+        let idx = stage_idx(view, stage_label);
+        view.stages[idx]
+            .fields
+            .iter()
+            .find(|row| row.name == field)
+            .unwrap_or_else(|| panic!("field {field} on {stage_label}"))
+            .lineage_precision
+    }
+
+    /// EXACT tier: a clean-CXL straight-line `Derive` edge is `Exact`, and the
+    /// output row it feeds is `Exact` (#148). A genuine break would mislabel a
+    /// faithful derive as degraded.
+    #[test]
+    fn clean_derive_edge_and_row_are_exact() {
+        let yaml = r#"
+pipeline:
+  name: exact_derive
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: amount, type: float }
+  - type: transform
+    name: scale
+    input: src
+    config:
+      cxl: |
+        emit doubled = amount * 2.0
+"#;
+        let config = parse_config(yaml).expect("exact derive fixture parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "src");
+        let i_scale = stage_idx(&view, "scale");
+
+        assert_eq!(
+            edge_precision(
+                &view,
+                i_src,
+                "amount",
+                i_scale,
+                "doubled",
+                FieldEdgeKind::Derive
+            ),
+            Precision::Exact,
+            "a clean straight-line derive edge is Exact"
+        );
+        assert_eq!(
+            field_precision(&view, "scale", "doubled"),
+            Precision::Exact,
+            "the row a clean derive feeds is Exact"
+        );
+    }
+
+    /// APPROXIMATE tier (edge + row): a Route branch condition emits a
+    /// `Conditional` INDIRECT edge classified `Approximate`, and the surviving
+    /// output row it influences folds down to `Approximate` even though the row is
+    /// a clean passthrough (#148).
+    #[test]
+    fn indirect_conditional_edge_and_row_are_approximate() {
+        let yaml = r#"
+pipeline:
+  name: route_conditional
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: region, type: string }
+        - { name: amount, type: float }
+  - type: route
+    name: split
+    input: src
+    config:
+      conditions:
+        eu: "region == 'EU'"
+      default: other
+"#;
+        let config = parse_config(yaml).expect("route fixture parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "src");
+        let i_split = stage_idx(&view, "split");
+
+        // `region` drives the branch condition → a Conditional influence edge onto
+        // every surviving row, classified Approximate.
+        assert_eq!(
+            edge_precision(
+                &view,
+                i_src,
+                "region",
+                i_split,
+                "region",
+                FieldEdgeKind::Conditional
+            ),
+            Precision::Approximate,
+            "an INDIRECT Conditional edge is Approximate"
+        );
+        // `region` survives as a passthrough row but is incident to its own
+        // Conditional influence edge, so its row precision is Approximate.
+        assert_eq!(
+            field_precision(&view, "split", "region"),
+            Precision::Approximate,
+            "a row incident to an INDIRECT edge folds to Approximate"
+        );
+    }
+
+    /// APPROXIMATE tier via Aggregate GroupBy: the group-key edge is `Approximate`
+    /// and the group-key output row folds to `Approximate` (#148) — the grain is an
+    /// influence, not a value.
+    #[test]
+    fn group_by_edge_and_grain_row_are_approximate() {
+        let yaml = r#"
+pipeline:
+  name: agg_precision
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: dept, type: string }
+        - { name: amount, type: float }
+  - type: aggregate
+    name: totals
+    input: src
+    config:
+      group_by: [dept]
+      cxl: |
+        emit total = sum(amount)
+"#;
+        let config = parse_config(yaml).expect("aggregate precision fixture parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "src");
+        let i_totals = stage_idx(&view, "totals");
+
+        assert_eq!(
+            edge_precision(
+                &view,
+                i_src,
+                "dept",
+                i_totals,
+                "dept",
+                FieldEdgeKind::GroupBy
+            ),
+            Precision::Approximate,
+            "a GroupBy grain edge is Approximate"
+        );
+        assert_eq!(
+            field_precision(&view, "totals", "dept"),
+            Precision::Approximate,
+            "the group-key grain row folds to Approximate"
+        );
+        // The aggregate value emit stays Exact — only the grain is approximate.
+        assert_eq!(
+            field_precision(&view, "totals", "total"),
+            Precision::Exact,
+            "the aggregate value derive stays Exact"
+        );
+    }
+
+    /// UNKNOWN tier: a node whose CXL fails `parse_clean` has its edges suppressed,
+    /// so the degradation lives on the row as `Unknown` (#148). The row still
+    /// renders (shape preserved) but its precision is Unknown with the parse-fail
+    /// reason.
+    #[test]
+    fn parse_fail_node_rows_are_unknown_with_no_edges() {
+        let yaml = r#"
+pipeline:
+  name: parse_fail
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: amount, type: float }
+  - type: transform
+    name: broken
+    input: src
+    config:
+      cxl: |
+        emit y = amount +
+"#;
+        let config = parse_config(yaml).expect("parse-fail fixture YAML parses");
+        let view = derive_pipeline_view(&config);
+        let i_broken = stage_idx(&view, "broken");
+
+        let row = view.stages[i_broken]
+            .fields
+            .iter()
+            .find(|r| r.name == "amount")
+            .expect("the carried column still renders");
+        assert_eq!(
+            row.lineage_precision,
+            Precision::Unknown,
+            "a parse-fail node's rows are Unknown"
+        );
+        assert_eq!(
+            row.precision_reason,
+            "CXL did not parse; lineage edges suppressed"
+        );
+        // Acceptance: no edge terminates at the parse-fail node (edges suppressed).
+        assert!(
+            view.field_edges
+                .iter()
+                .all(|e| e.to_node != i_broken && e.from_node != i_broken),
+            "a parse-fail node infers no edges"
+        );
+    }
+
+    /// Worst-of-incident-edges row aggregation: a column that is BOTH a clean
+    /// passthrough (Exact carry) AND incident to an INDIRECT influence edge folds
+    /// to the worse tier, Approximate (#148). This is the core aggregation rule —
+    /// a single degraded incident edge dominates an otherwise-Exact row.
+    #[test]
+    fn row_precision_is_worst_of_incident_edges() {
+        // A Cull keeps every input column as a passthrough (Exact carry) AND emits
+        // a Filter influence edge from the predicate column onto each surviving
+        // row, so the predicate column carries both an Exact and an Approximate
+        // incident edge — its row must read Approximate.
+        let yaml = r#"
+pipeline:
+  name: cull_worst_of
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: gid, type: string }
+        - { name: status, type: string }
+  - type: cull
+    name: prune
+    input: src
+    config:
+      partition_by: [gid]
+      removed_to: dropped
+      rules:
+        - name: drop_errored
+          drop_group_when: "sum(if status == 'error' then 1 else 0) > 0"
+"#;
+        let config = parse_config(yaml).expect("cull worst-of fixture parses");
+        let view = derive_pipeline_view(&config);
+        let i_src = stage_idx(&view, "src");
+        let i_prune = stage_idx(&view, "prune");
+
+        // Both incident edges exist on `status`: the Exact passthrough carry AND
+        // the Approximate Filter influence.
+        assert_eq!(
+            edge_precision(
+                &view,
+                i_src,
+                "status",
+                i_prune,
+                "status",
+                FieldEdgeKind::Passthrough
+            ),
+            Precision::Exact
+        );
+        assert_eq!(
+            edge_precision(
+                &view,
+                i_src,
+                "status",
+                i_prune,
+                "status",
+                FieldEdgeKind::Filter
+            ),
+            Precision::Approximate
+        );
+        // The Cull row folds to the worse tier.
+        assert_eq!(
+            field_precision(&view, "prune", "status"),
+            Precision::Approximate,
+            "a row with both an Exact and an Approximate producing edge folds to Approximate"
+        );
+        // The UPSTREAM source `status` row has no producing influence edge (it is
+        // only the `from` side of the downstream Filter), so it stays Exact: the
+        // degradation lands on the consumer, not the pristine producer.
+        assert_eq!(
+            field_precision(&view, "src", "status"),
+            Precision::Exact,
+            "a clean producer row with no degraded producing edge stays Exact"
         );
     }
 }
@@ -7112,6 +7675,7 @@ nodes:
             kind: FieldKind::PassThrough,
             ty: None,
             is_correlation_key: false,
+            ..Default::default()
         }];
 
         assert_eq!(

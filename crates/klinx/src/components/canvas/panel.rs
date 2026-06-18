@@ -1670,6 +1670,7 @@ mod tests {
                     },
                     ty: Some(if i == 99 { "customer_id" } else { "int" }.to_string()),
                     is_correlation_key: false,
+                    ..Default::default()
                 })
                 .collect(),
             branches: Vec::<RouteBranch>::new(),
@@ -2102,6 +2103,62 @@ mod tests {
                 "{selector} should set a stroke hue, got {block:?}"
             );
         }
+    }
+
+    /// #148: the lineage-precision node corner is HIDDEN by default and revealed
+    /// ONLY on selection/hover — never an always-on overlay (avoid badge fatigue).
+    /// Assert the base opacity is 0 and that BOTH the `:hover` and the `--selected`
+    /// rules — checked INDEPENDENTLY (they are separate, not comma-joined rules) —
+    /// RAISE opacity strictly above the base, so the reveal gating lives in the CSS,
+    /// not the component.
+    #[test]
+    fn precision_corner_css_reveals_only_on_selection_or_hover() {
+        let css = include_str!("../../../assets/klinx.css");
+
+        let base = css_rule_block(css, ".klinx-node-precision-corner {")
+            .expect("precision-corner base CSS rule");
+        let base_opacity = css_opacity(base).expect("base rule sets opacity");
+        assert_eq!(
+            base_opacity, 0.0,
+            "the corner must be hidden (opacity:0) by default, got {base_opacity}"
+        );
+
+        // Hover and selection are SEPARATE rules — assert each independently raises
+        // opacity above the hidden base.
+        for selector in [
+            ".klinx-node:hover .klinx-node-precision-corner {",
+            ".klinx-node--selected .klinx-node-precision-corner {",
+        ] {
+            let block = css_rule_block(css, selector)
+                .unwrap_or_else(|| panic!("missing reveal rule {selector}"));
+            let opacity = css_opacity(block)
+                .unwrap_or_else(|| panic!("{selector} must set opacity, got {block:?}"));
+            assert!(
+                opacity > base_opacity,
+                "{selector} must RAISE opacity above the base {base_opacity}, got {opacity}"
+            );
+        }
+
+        // The hatch hue is driven by `data-precision`; each tier has its own rule.
+        for selector in [
+            ".klinx-node-precision-corner[data-precision=\"exact\"]",
+            ".klinx-node-precision-corner[data-precision=\"approximate\"]",
+            ".klinx-node-precision-corner[data-precision=\"unknown\"]",
+        ] {
+            let block = css_rule_block(css, selector)
+                .unwrap_or_else(|| panic!("missing precision-corner tier rule {selector}"));
+            assert!(
+                block.contains("background-image:"),
+                "{selector} should set a hatch background-image, got {block:?}"
+            );
+        }
+    }
+
+    /// Parse the `opacity: <f32>;` value out of a CSS rule block, if present.
+    fn css_opacity(block: &str) -> Option<f32> {
+        let after = block.split("opacity:").nth(1)?;
+        let value = after.split(';').next()?.trim();
+        value.parse::<f32>().ok()
     }
 
     fn css_rule_block<'a>(css: &'a str, selector: &str) -> Option<&'a str> {

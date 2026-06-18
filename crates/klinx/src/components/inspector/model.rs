@@ -1,11 +1,11 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use clinker_plan::config::{PipelineConfig, PipelineNode};
 
 use crate::autodoc::{CxlStatementKind, generate_stage_doc};
 use crate::notes::parse_notes;
 use crate::pipeline_view::{
-    FieldEdgeKind, FieldKind, PipelineView, RoleEdge, StagePortSide, StageView,
+    FieldEdgeKind, FieldKind, PipelineView, Precision, RoleEdge, StagePortSide, StageView,
 };
 use crate::state::{ChannelViewMode, SelectedField};
 
@@ -63,7 +63,27 @@ pub struct FieldInspectorModel {
     pub upstream: Vec<TraceEndpointView>,
     pub downstream: Vec<TraceEndpointView>,
     pub role_usages: Vec<RoleUsageView>,
-    pub lineage_unavailable_reason: Option<String>,
+    /// The field's OWN lineage precision tier (#148) — the producer-side value from
+    /// `FieldRow::lineage_precision`, NOT a transitive trace fold — surfaced as the
+    /// Inspector's per-field precision badge. Reading the row's own value keeps this
+    /// badge in agreement with the canvas node-corner and the row model, and avoids
+    /// over-degrading every field upstream of a single influence edge. Per-hop
+    /// precision (`TraceEndpointView::precision`) still shows each hop's own edge
+    /// tier, so an approximation is visible exactly where it occurs. Replaced the
+    /// former binary `lineage_unavailable_reason: Option<String>`; the old "no
+    /// lineage edges" empty-state is folded into
+    /// [`FieldInspectorModel::precision_reason`] / `lineage_empty`.
+    pub lineage_precision: Precision,
+    /// Plain-language explanation for `lineage_precision`. For a field with NO
+    /// lineage edges at all this carries the preserved empty-state message ("No
+    /// field-level lineage edges mention this field in the current view."), so the
+    /// acceptance guard against regressing that message still holds.
+    pub precision_reason: String,
+    /// Whether this field has no lineage edges at all (no upstream/downstream/role
+    /// uses), so the body renders the empty-state presentation rather than a
+    /// degraded-precision warning. Kept distinct from precision so an `Exact` field
+    /// with edges is never confused with an edgeless field.
+    pub lineage_empty: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -183,6 +203,14 @@ pub struct TraceEndpointView {
     pub field_name: String,
     pub edge_kind_label: &'static str,
     pub edge_kind_attr: &'static str,
+    /// The precision tier of the lineage edge taken to reach this hop (#148),
+    /// rendered as the per-hop precision badge alongside `edge_kind_label`. Carried
+    /// as the [`Precision`] enum (not a pre-baked slug string) so the panel derives
+    /// its label/attr via `precision_label`/`precision_attr` — no lossy
+    /// string→enum round-trip. When an endpoint is reachable by several edges the
+    /// WORST (least-precise) edge's precision is kept (see [`trace_endpoints`]), so
+    /// an Exact carry can never mask a co-incident Approximate influence.
+    pub precision: Precision,
     pub hop: usize,
 }
 
@@ -975,12 +1003,25 @@ fn build_field_detail(
         .map(|analysis| cxl_mentions_for_field(&analysis.statements, &selection.field_name))
         .unwrap_or_default();
 
-    let lineage_unavailable_reason =
-        if upstream.is_empty() && downstream.is_empty() && role_usages.is_empty() {
-            Some("No field-level lineage edges mention this field in the current view.".to_string())
-        } else {
-            None
-        };
+    // Field precision (#148) is the field's OWN row precision — the producer-side
+    // value `derive_row_precision` already folded — NOT a transitive trace fold.
+    // This keeps the Inspector field badge in agreement with the canvas node-corner
+    // and the row model (all three read `FieldRow::lineage_precision`), and avoids
+    // over-degrading every field transitively upstream of a single influence edge
+    // into Approximate. The PER-HOP badges still show each hop's own edge precision
+    // (see `TraceEndpointView::precision`), so the approximation is visible exactly
+    // where it occurs without painting the whole upstream cone.
+    let lineage_empty = upstream.is_empty() && downstream.is_empty() && role_usages.is_empty();
+    let lineage_precision = field.lineage_precision;
+    let precision_reason = if lineage_empty {
+        // A field with NO lineage edges keeps the original empty-state message
+        // verbatim (acceptance forbids regressing it), folded into the surfacing.
+        "No field-level lineage edges mention this field in the current view.".to_string()
+    } else if field.precision_reason.is_empty() {
+        precision_default_reason(field.lineage_precision)
+    } else {
+        field.precision_reason.to_string()
+    };
 
     Some(FieldInspectorModel {
         selection: selection.clone(),
@@ -1013,8 +1054,22 @@ fn build_field_detail(
         upstream,
         downstream,
         role_usages,
-        lineage_unavailable_reason,
+        lineage_precision,
+        precision_reason,
+        lineage_empty,
     })
+}
+
+/// The default precision-reason for a field whose row carries no explicit reason
+/// (#148) — an un-degraded `Exact` field gets a short affirmative note rather than
+/// an empty string, so the Inspector badge always reads sensibly.
+fn precision_default_reason(precision: Precision) -> String {
+    match precision {
+        Precision::Exact => "Exact: lineage carried or derived from resolved support.",
+        Precision::Approximate => "Approximate: lineage is a sound over-approximation.",
+        Precision::Unknown => "Unknown: lineage could not be computed.",
+    }
+    .to_string()
 }
 
 fn cxl_mentions_for_field(
@@ -1043,6 +1098,14 @@ fn cxl_kind_label(kind: &CxlStatementKind) -> &'static str {
     kind.label()
 }
 
+/// A `(node_index, field_name)` trace endpoint, borrowing the field name from the
+/// view's edges for the duration of one BFS step.
+type TraceEndpointKey<'a> = (usize, &'a str);
+
+/// The edge chosen to represent a trace hop: its kind and precision. When several
+/// edges reach the same endpoint, the worst-precision one is kept (#148 M2).
+type TraceHopEdge = (FieldEdgeKind, Precision);
+
 fn trace_endpoints(
     view: &PipelineView,
     start_node: usize,
@@ -1055,22 +1118,46 @@ fn trace_endpoints(
     let mut out = Vec::new();
 
     while let Some((node, field, hop)) = queue.pop_front() {
+        // Collect every edge leaving this anchor, grouped by the endpoint it
+        // reaches, keeping the WORST (least-precise) edge per endpoint (#148 M2).
+        // The BFS dedups endpoints by `(node, field)` only, and one endpoint can be
+        // reached by BOTH an Exact carry and an Approximate INDIRECT influence (same
+        // from/to). Picking the worst — rather than whichever edge iterates first —
+        // stops an Exact carry from masking a co-incident approximation on the hop
+        // badge. Ties on precision keep the first-iterated edge for determinism.
+        let mut best_to_endpoint: HashMap<TraceEndpointKey<'_>, TraceHopEdge> = HashMap::new();
         for edge in &view.field_edges {
             let next = match direction {
                 TraceDirection::Upstream if edge.to_node == node && edge.to_field == field => {
-                    Some((edge.from_node, edge.from_field.as_str(), edge.kind))
+                    Some((edge.from_node, edge.from_field.as_str()))
                 }
                 TraceDirection::Downstream
                     if edge.from_node == node && edge.from_field == field =>
                 {
-                    Some((edge.to_node, edge.to_field.as_str(), edge.kind))
+                    Some((edge.to_node, edge.to_field.as_str()))
                 }
                 _ => None,
             };
-
-            let Some((next_node, next_field, edge_kind)) = next else {
+            let Some((next_node, next_field)) = next else {
                 continue;
             };
+            best_to_endpoint
+                .entry((next_node, next_field))
+                .and_modify(|(kind, precision)| {
+                    if edge.precision.worst(*precision) != *precision {
+                        *kind = edge.kind;
+                        *precision = edge.precision;
+                    }
+                })
+                .or_insert((edge.kind, edge.precision));
+        }
+
+        // Emit one hop per newly-seen endpoint, sorted for deterministic order
+        // (the HashMap iteration order is otherwise nondeterministic).
+        let mut endpoints: Vec<(TraceEndpointKey<'_>, TraceHopEdge)> =
+            best_to_endpoint.into_iter().collect();
+        endpoints.sort_by(|a, b| a.0.0.cmp(&b.0.0).then_with(|| a.0.1.cmp(b.0.1)));
+        for ((next_node, next_field), (edge_kind, edge_precision)) in endpoints {
             let endpoint = (next_node, next_field.to_string());
             if !seen.insert(endpoint.clone()) {
                 continue;
@@ -1080,6 +1167,7 @@ fn trace_endpoints(
                     stage,
                     endpoint.1.clone(),
                     edge_kind,
+                    edge_precision,
                     hop + 1,
                 ));
                 queue.push_back((next_node, endpoint.1, hop + 1));
@@ -1100,6 +1188,7 @@ fn trace_endpoint(
     stage: &StageView,
     field_name: String,
     edge_kind: FieldEdgeKind,
+    edge_precision: Precision,
     hop: usize,
 ) -> TraceEndpointView {
     TraceEndpointView {
@@ -1110,6 +1199,7 @@ fn trace_endpoint(
         field_name,
         edge_kind_label: edge_kind_label(edge_kind),
         edge_kind_attr: edge_kind_attr(edge_kind),
+        precision: edge_precision,
         hop,
     }
 }
@@ -1530,6 +1620,7 @@ nodes:
                 kind: FieldKind::Declared,
                 ty: Some("int".to_string()),
                 is_correlation_key: true,
+                ..Default::default()
             }],
         );
         let transform = stage(
@@ -1574,6 +1665,7 @@ nodes:
                     to_node: 1,
                     to_field: "x".to_string(),
                     kind: FieldEdgeKind::Passthrough,
+                    ..Default::default()
                 },
                 FieldEdge {
                     from_node: 0,
@@ -1581,6 +1673,7 @@ nodes:
                     to_node: 1,
                     to_field: "x2".to_string(),
                     kind: FieldEdgeKind::Derive,
+                    ..Default::default()
                 },
             ],
             role_edges: vec![RoleEdge {
@@ -1659,6 +1752,7 @@ nodes:
                 to_node: 1,
                 to_field: "region".to_string(),
                 kind: FieldEdgeKind::GroupBy,
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -1707,7 +1801,18 @@ nodes:
 
         let detail = build_field_detail(&view, None, &SelectedField::new("src", "lonely"))
             .expect("field exists");
-        assert!(detail.lineage_unavailable_reason.is_some());
+        // #148: the empty-state is now surfaced through the precision fields, but
+        // the original "no field-level lineage edges" message MUST be preserved
+        // verbatim (acceptance forbids regressing it) and the field flagged empty.
+        assert!(
+            detail.lineage_empty,
+            "an edgeless field must be flagged empty"
+        );
+        assert_eq!(
+            detail.precision_reason,
+            "No field-level lineage edges mention this field in the current view.",
+            "the original empty-state message must be preserved verbatim"
+        );
         assert!(build_field_detail(&view, None, &SelectedField::new("missing", "x")).is_none());
 
         // #151: a trace hop pointing at a field absent from the current view
@@ -1721,9 +1826,245 @@ nodes:
             field_name: "x".to_string(),
             edge_kind_label: "derive",
             edge_kind_attr: "derive",
+            precision: Precision::Exact,
             hop: 1,
         };
         assert!(build_field_detail(&view, None, &stale_hop.to_selected_field()).is_none());
+    }
+
+    /// #148: a field whose row precision is Approximate surfaces that tier on the
+    /// inspector model, AND each trace hop carries the precision of the edge taken
+    /// to reach it. The Approximate INDIRECT (Filter) hop reads `approximate`; the
+    /// Exact carry hop reads `exact`. A genuine break would mislabel a hop's tier.
+    #[test]
+    fn field_precision_and_per_hop_precision_surface() {
+        // src.flag --Filter(Approximate)--> kept.kept  (INDIRECT influence)
+        // src.kept --Passthrough(Exact)---> kept.kept  (DIRECT carry)
+        // The downstream `kept.kept` row is built Approximate (its producing Filter
+        // edge degrades it); selecting it shows an upstream Filter hop reading
+        // approximate and an upstream passthrough hop reading exact.
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![
+                FieldRow {
+                    name: "flag".to_string(),
+                    kind: FieldKind::Declared,
+                    ..Default::default()
+                },
+                FieldRow {
+                    name: "kept".to_string(),
+                    kind: FieldKind::Declared,
+                    ..Default::default()
+                },
+            ],
+        );
+        let cull = stage(
+            "keep",
+            StageKind::Cull,
+            vec![FieldRow {
+                name: "kept".to_string(),
+                kind: FieldKind::PassThrough,
+                // Row built Approximate by its producing Filter edge (#148).
+                lineage_precision: Precision::Approximate,
+                precision_reason: "INDIRECT filter predicate influence",
+                ..Default::default()
+            }],
+        );
+        let view = PipelineView {
+            stages: vec![source, cull],
+            field_edges: vec![
+                FieldEdge::influence(0, "flag".into(), 1, "kept".into(), FieldEdgeKind::Filter),
+                FieldEdge::carry(
+                    0,
+                    "kept".into(),
+                    1,
+                    "kept".into(),
+                    FieldEdgeKind::Passthrough,
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let detail = build_field_detail(&view, None, &SelectedField::new("keep", "kept"))
+            .expect("field exists");
+        assert!(!detail.lineage_empty, "an edged field is not empty");
+        assert_eq!(
+            detail.lineage_precision,
+            Precision::Approximate,
+            "the field's precision reflects its Approximate row + Filter hop"
+        );
+
+        // Per-hop precision (#148 M2 carries the enum): the two upstream edges land
+        // on DISTINCT endpoints (`src.flag` via Filter, `src.kept` via Passthrough),
+        // so both hops emit — the Filter hop is Approximate, the carry hop Exact.
+        let filter_hop = detail
+            .upstream
+            .iter()
+            .find(|hop| hop.edge_kind_attr == "filter")
+            .expect("a Filter upstream hop");
+        assert_eq!(filter_hop.precision, Precision::Approximate);
+        let carry_hop = detail
+            .upstream
+            .iter()
+            .find(|hop| hop.edge_kind_attr == "passthrough")
+            .expect("a passthrough upstream hop");
+        assert_eq!(carry_hop.precision, Precision::Exact);
+    }
+
+    /// #148: an Exact field with lineage edges is NOT flagged empty and reports
+    /// `exact` — distinguishing it from the edgeless empty-state, which keeps the
+    /// preserved "no lineage edges" message (covered by
+    /// `field_model_reports_no_lineage_and_missing_current_view`).
+    #[test]
+    fn exact_field_with_edges_is_not_empty() {
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "a".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        let derived = stage(
+            "calc",
+            StageKind::Transform,
+            vec![FieldRow {
+                name: "y".to_string(),
+                kind: FieldKind::Emitted,
+                ..Default::default()
+            }],
+        );
+        let view = PipelineView {
+            stages: vec![source, derived],
+            field_edges: vec![FieldEdge::derive(0, "a".into(), 1, "y".into(), false)],
+            ..Default::default()
+        };
+        let detail = build_field_detail(&view, None, &SelectedField::new("calc", "y"))
+            .expect("field exists");
+        assert!(!detail.lineage_empty);
+        assert_eq!(detail.lineage_precision, Precision::Exact);
+    }
+
+    /// #148 M1: the field-level badge reflects the field's OWN provenance, NOT a
+    /// transitive trace fold. A PRISTINE source column that merely FEEDS a
+    /// downstream Cull reads Exact (matching the canvas node-corner, which reads the
+    /// same `FieldRow::lineage_precision`) — even though its downstream hop is an
+    /// Approximate Filter influence. The DOWNSTREAM hop badge still shows
+    /// Approximate, so the approximation is visible where it occurs without
+    /// painting the upstream source Approximate.
+    #[test]
+    fn field_badge_is_rows_own_precision_not_a_trace_fold() {
+        // src.flag (a clean Exact source row) --Filter--> keep.flag (downstream Cull
+        // row, degraded to Approximate by its producing Filter edge).
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "flag".to_string(),
+                kind: FieldKind::Declared,
+                // A pristine source row: Exact, no degraded producing edge.
+                ..Default::default()
+            }],
+        );
+        let cull = stage(
+            "keep",
+            StageKind::Cull,
+            vec![FieldRow {
+                name: "flag".to_string(),
+                kind: FieldKind::PassThrough,
+                lineage_precision: Precision::Approximate,
+                precision_reason: "INDIRECT filter predicate influence",
+                ..Default::default()
+            }],
+        );
+        let view = PipelineView {
+            stages: vec![source, cull],
+            field_edges: vec![FieldEdge::influence(
+                0,
+                "flag".into(),
+                1,
+                "flag".into(),
+                FieldEdgeKind::Filter,
+            )],
+            ..Default::default()
+        };
+
+        // The PRISTINE source field reads Exact (its own row precision), NOT
+        // Approximate — it is not dragged down by the downstream Filter hop.
+        let src_detail = build_field_detail(&view, None, &SelectedField::new("src", "flag"))
+            .expect("source field exists");
+        assert_eq!(
+            src_detail.lineage_precision,
+            Precision::Exact,
+            "a pristine source feeding a downstream Cull must stay Exact (matches the node-corner)"
+        );
+        // Its downstream hop still surfaces the Approximate Filter influence.
+        let down_hop = src_detail
+            .downstream
+            .iter()
+            .find(|hop| hop.edge_kind_attr == "filter")
+            .expect("a downstream Filter hop");
+        assert_eq!(
+            down_hop.precision,
+            Precision::Approximate,
+            "the approximation is shown on the hop, not folded onto the source field"
+        );
+    }
+
+    /// #148 M2: when a trace endpoint is reachable by BOTH an Exact carry and an
+    /// Approximate INDIRECT edge (same from/to), the single emitted hop surfaces the
+    /// WORST (least-precise) edge — the Exact carry must not mask the approximation.
+    #[test]
+    fn colliding_hop_surfaces_worst_precision() {
+        // src.k reaches keep.k by BOTH a Passthrough carry (Exact) AND a JoinKey
+        // influence (Approximate) — the value carry and its influence overlay
+        // coexist on one (from, to) endpoint.
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "k".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        let join = stage(
+            "j",
+            StageKind::Combine,
+            vec![FieldRow {
+                name: "k".to_string(),
+                kind: FieldKind::PassThrough,
+                ..Default::default()
+            }],
+        );
+        let view = PipelineView {
+            stages: vec![source, join],
+            field_edges: vec![
+                // Exact carry pushed FIRST — under naive first-wins dedup it would
+                // have masked the approximation.
+                FieldEdge::carry(0, "k".into(), 1, "k".into(), FieldEdgeKind::Passthrough),
+                FieldEdge::influence(0, "k".into(), 1, "k".into(), FieldEdgeKind::JoinKey),
+            ],
+            ..Default::default()
+        };
+
+        let detail =
+            build_field_detail(&view, None, &SelectedField::new("j", "k")).expect("field exists");
+        // Exactly ONE upstream hop to (src, k) — the endpoint is deduped — and it
+        // surfaces the WORST precision (Approximate), not the first-iterated Exact.
+        let hops: Vec<_> = detail
+            .upstream
+            .iter()
+            .filter(|h| h.field_name == "k")
+            .collect();
+        assert_eq!(hops.len(), 1, "the colliding endpoint dedups to one hop");
+        assert_eq!(
+            hops[0].precision,
+            Precision::Approximate,
+            "the hop must surface the worst (Approximate) edge, not the first-iterated Exact carry"
+        );
     }
 
     /// `edge_kind_attr` feeds the `data-kind` HTML attribute, so EVERY kind's

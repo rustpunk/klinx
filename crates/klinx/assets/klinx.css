@@ -4971,6 +4971,72 @@ input:-webkit-autofill:focus {
   stroke-opacity: 1;
 }
 
+/* Lineage-precision node-corner affordance (#148). A small hatched wedge in the
+   card's top-right, conveying the node's WORST field precision via `data-precision`
+   hue. To avoid always-on badge fatigue it is hidden by default and revealed ONLY
+   when the card is selected or hovered — the same reveal gating the field cables
+   use. The hatch is a `repeating-linear-gradient` so it reads as a distinct
+   "approximate/unknown" texture rather than a solid chip; it sits inside the card's
+   eroded top-right clip so it is not cut off. */
+.klinx-node-precision-corner {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 14px;
+  height: 14px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--klinx-text-floor) 0,
+    var(--klinx-text-floor) 1.5px,
+    transparent 1.5px,
+    transparent 4px
+  );
+}
+/* Reveal on hover OR selection — split into two rules (not comma-joined) so each
+   gate is independently testable; both raise opacity above the hidden base. */
+.klinx-node:hover .klinx-node-precision-corner {
+  opacity: 0.85;
+}
+.klinx-node--selected .klinx-node-precision-corner {
+  opacity: 0.85;
+}
+/* An Exact node's corner stays faint even when revealed — nothing is degraded, so
+   it must not read as a warning; Approximate/Unknown take louder hazard hues. */
+.klinx-node-precision-corner[data-precision="exact"] {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--klinx-verdigris) 0,
+    var(--klinx-verdigris) 1.5px,
+    transparent 1.5px,
+    transparent 4px
+  );
+}
+.klinx-node:hover .klinx-node-precision-corner[data-precision="exact"],
+.klinx-node--selected .klinx-node-precision-corner[data-precision="exact"] {
+  opacity: 0.4;
+}
+.klinx-node-precision-corner[data-precision="approximate"] {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--klinx-hazard) 0,
+    var(--klinx-hazard) 1.5px,
+    transparent 1.5px,
+    transparent 4px
+  );
+}
+.klinx-node-precision-corner[data-precision="unknown"] {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--klinx-oxide-red) 0,
+    var(--klinx-oxide-red) 2px,
+    transparent 2px,
+    transparent 4px
+  );
+}
+
 /* ── 8b. Composition nodes — dashed verdigris border ─────────────────────── */
 .klinx-node--composition {
   border: 2px dashed rgba(67, 179, 174, 0.4);
@@ -5676,6 +5742,57 @@ input:-webkit-autofill:focus {
 .klinx-field-trace-kind[data-kind="access"] {
   color: var(--klinx-hazard);
   border-color: rgba(212, 160, 23, 0.45);
+}
+
+/* Lineage-precision badges (#148). The per-field badge sits in the field summary
+   meta row; the per-hop badge follows each trace row's edge-kind chip. Both are
+   toned by `data-precision`: Exact reads calm verdigris, Approximate hazard amber,
+   Unknown oxide red, so a degraded tier draws the eye without shouting. */
+.klinx-field-precision-badge,
+.klinx-field-trace-precision {
+  font-family: var(--klinx-font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--klinx-border-subtle);
+  white-space: nowrap;
+}
+.klinx-field-trace-precision {
+  margin-left: 6px;
+}
+.klinx-field-precision-badge[data-precision="exact"],
+.klinx-field-trace-precision[data-precision="exact"] {
+  color: var(--klinx-verdigris);
+  border-color: rgba(67, 179, 174, 0.45);
+}
+.klinx-field-precision-badge[data-precision="approximate"],
+.klinx-field-trace-precision[data-precision="approximate"] {
+  color: var(--klinx-hazard);
+  border-color: rgba(212, 160, 23, 0.45);
+}
+.klinx-field-precision-badge[data-precision="unknown"],
+.klinx-field-trace-precision[data-precision="unknown"] {
+  color: var(--klinx-oxide-red);
+  border-color: rgba(183, 65, 14, 0.55);
+}
+
+/* Degraded-precision note in the LINEAGE section: a quieter inline reason for an
+   edged field whose precision is Approximate/Unknown (the edgeless empty-state
+   keeps the louder `.klinx-field-warning`). */
+.klinx-field-precision-note {
+  font-size: 11px;
+  line-height: 16px;
+  padding: 6px 16px;
+  color: var(--klinx-iron);
+}
+.klinx-field-precision-note[data-precision="approximate"] {
+  color: var(--klinx-hazard);
+}
+.klinx-field-precision-note[data-precision="unknown"] {
+  color: var(--klinx-oxide-red);
 }
 
 .klinx-inspector-chip-row {

@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::pipeline_view::Precision;
 use crate::state::{current_pipeline_view, use_app_state};
 
 use super::drawer_bar::{ActiveDrawer, DrawerToggleBar};
@@ -271,6 +272,14 @@ fn FieldInspectorBody(field: FieldInspectorModel) -> Element {
                                 tone: StatusTone::Info,
                             }
                         }
+                        // Per-field precision badge (#148): grades how faithful the
+                        // field's lineage is, toned so a degraded tier draws the eye.
+                        span {
+                            class: "klinx-field-precision-badge",
+                            "data-precision": "{field.lineage_precision.precision_attr()}",
+                            title: "{field.precision_reason}",
+                            "{field.lineage_precision.precision_label()}"
+                        }
                         for badge in field.badges.iter() {
                             StatusChipView {
                                 key: "{badge}",
@@ -302,8 +311,17 @@ fn FieldInspectorBody(field: FieldInspectorModel) -> Element {
                     span { "{field.downstream.len()} downstream" }
                     span { "{field.role_usages.len()} role uses" }
                 }
-                if let Some(reason) = field.lineage_unavailable_reason.as_ref() {
-                    div { class: "klinx-field-warning", "{reason}" }
+                // A field with no lineage edges shows the preserved empty-state
+                // message; an edged field whose precision is degraded surfaces the
+                // reason as a warning so the over-approximation is visible (#148).
+                if field.lineage_empty {
+                    div { class: "klinx-field-warning", "{field.precision_reason}" }
+                } else if field.lineage_precision != Precision::Exact {
+                    div {
+                        class: "klinx-field-precision-note",
+                        "data-precision": "{field.lineage_precision.precision_attr()}",
+                        "{field.precision_reason}"
+                    }
                 }
                 TraceList {
                     title: "UPSTREAM",
@@ -535,6 +553,14 @@ fn TraceList(title: &'static str, entries: Vec<TraceEndpointView>, empty: &'stat
                                 class: "klinx-field-trace-kind",
                                 "data-kind": "{entry.edge_kind_attr}",
                                 "{entry.edge_kind_label}"
+                            }
+                            // Per-hop precision badge (#148): the tier of the edge
+                            // taken to reach this hop, so a reader sees where the
+                            // trace becomes an over-approximation.
+                            span {
+                                class: "klinx-field-trace-precision",
+                                "data-precision": "{entry.precision.precision_attr()}",
+                                "{entry.precision.precision_label()}"
                             }
                         }
                     }
