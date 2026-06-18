@@ -690,6 +690,75 @@ pub fn fit_transform(
     (pan_x, pan_y, zoom)
 }
 
+/// Minimal pan (no zoom change) that brings `node`'s screen rect fully inside a
+/// `viewport_w` × `viewport_h` pixel viewport, keeping `margin` px of breathing
+/// room on each edge. Returns the new `(pan_x, pan_y)`, or `None` when the node
+/// is already comfortably within view so the caller can skip the pan entirely.
+///
+/// Uses the same screen mapping as the canvas transform — a world point `p` maps
+/// to screen `pan + p * zoom` (`transform-origin: 0 0`). Each axis is adjusted
+/// independently and only as far as needed: an already-visible axis is left
+/// untouched. When the node is larger than the available window on an axis, its
+/// near (left/top) edge is pinned to the margin so the node's start is visible
+/// rather than centering it with both ends clipped.
+///
+/// This is the "reveal" companion to [`fit_transform`]: `fit_transform` reframes
+/// the whole graph (changing zoom), whereas this nudges an off-screen node into
+/// view without disturbing the user's current zoom.
+pub fn pan_to_reveal(
+    node: LayoutBounds,
+    pan_x: f32,
+    pan_y: f32,
+    zoom: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+    margin: f32,
+) -> Option<(f32, f32)> {
+    let dx = axis_reveal_delta(
+        pan_x + node.min_x * zoom,
+        pan_x + node.max_x * zoom,
+        viewport_w,
+        margin,
+    );
+    let dy = axis_reveal_delta(
+        pan_y + node.min_y * zoom,
+        pan_y + node.max_y * zoom,
+        viewport_h,
+        margin,
+    );
+    if dx == 0.0 && dy == 0.0 {
+        None
+    } else {
+        Some((pan_x + dx, pan_y + dy))
+    }
+}
+
+/// Pan delta (screen px) that brings the screen interval `[lo, hi]` within
+/// `[margin, extent - margin]`, or `0.0` when it already fits. A span wider than
+/// the available window pins its low edge to the near margin. Degenerate
+/// viewports (`extent <= 2 * margin`) yield `0.0` so the caller never pans on a
+/// not-yet-measured pane.
+fn axis_reveal_delta(lo: f32, hi: f32, extent: f32, margin: f32) -> f32 {
+    let near = margin;
+    let far = extent - margin;
+    if far <= near {
+        return 0.0;
+    }
+    if lo >= near && hi <= far {
+        return 0.0;
+    }
+    if hi - lo > far - near {
+        // Larger than the window: show the start, accept the far edge clipping.
+        near - lo
+    } else if lo < near {
+        // Off the near edge: shift content toward the far edge (positive delta).
+        near - lo
+    } else {
+        // Off the far edge: shift content toward the near edge (negative delta).
+        far - hi
+    }
+}
+
 /// Compute `(canvas_x, canvas_y)` for every node from a column assignment and
 /// a predecessor relation, applying a barycenter crossing-reduction pass.
 ///
@@ -7850,5 +7919,81 @@ nodes:
         let (px, py, z) = fit_transform(b, 0.0, 0.0, 60.0, 0.25, 4.0);
         assert!(px.is_finite() && py.is_finite() && z.is_finite());
         assert!((0.25..=4.0).contains(&z));
+    }
+
+    /// One node card ([`NODE_WIDTH`] × [`NODE_HEIGHT`]) at world origin, used by
+    /// the `pan_to_reveal` cases below.
+    fn reveal_node() -> LayoutBounds {
+        LayoutBounds {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: NODE_WIDTH,
+            max_y: NODE_HEIGHT,
+        }
+    }
+
+    /// A node already inside the viewport (with margin to spare) needs no pan.
+    #[test]
+    fn pan_to_reveal_noop_when_visible() {
+        // Centered-ish in a 1000×700 viewport at zoom 1, well inside the margin.
+        assert_eq!(
+            pan_to_reveal(reveal_node(), 400.0, 300.0, 1.0, 1000.0, 700.0, 48.0),
+            None
+        );
+    }
+
+    /// A node clipped past the RIGHT edge (the #163 repro) pans left just enough
+    /// to seat its right edge at `viewport_w - margin`, leaving the other axis and
+    /// the zoom untouched.
+    #[test]
+    fn pan_to_reveal_pulls_right_clipped_node_into_view() {
+        let z = 1.0;
+        let vw = 400.0;
+        let vh = 700.0;
+        let margin = 48.0;
+        // pan_x = 320 → node spans screen-x [320, 480]; right edge past 400-48=352.
+        let node = reveal_node();
+        let (nx, ny) = pan_to_reveal(node, 320.0, 300.0, z, vw, vh, margin)
+            .expect("right-clipped node should require a pan");
+        // Vertical axis was already visible → pan_y unchanged.
+        assert!((ny - 300.0).abs() < 0.001);
+        // Right edge now sits exactly at the far margin: pan + max_x*zoom == vw-margin.
+        assert!((nx + node.max_x * z - (vw - margin)).abs() < 0.001);
+        // And the whole card is now within [margin, vw-margin].
+        assert!(nx + node.min_x * z >= margin - 0.001);
+    }
+
+    /// A node off the LEFT edge pans right so its left edge seats at the margin.
+    #[test]
+    fn pan_to_reveal_pulls_left_clipped_node_into_view() {
+        let z = 1.0;
+        let node = reveal_node();
+        // pan_x = -40 → node spans screen-x [-40, 120]; left edge past margin 48.
+        let (nx, _) = pan_to_reveal(node, -40.0, 300.0, z, 1000.0, 700.0, 48.0)
+            .expect("left-clipped node should require a pan");
+        assert!((nx + node.min_x * z - 48.0).abs() < 0.001);
+    }
+
+    /// When the node is wider than the available window, its near (left) edge is
+    /// pinned to the margin so its start is visible even though the far edge stays
+    /// clipped.
+    #[test]
+    fn pan_to_reveal_pins_near_edge_when_larger_than_window() {
+        let z = 4.0; // 160 * 4 = 640 wide, wider than a 400px viewport.
+        let node = reveal_node();
+        let (nx, _) = pan_to_reveal(node, -500.0, 300.0, z, 400.0, 700.0, 48.0)
+            .expect("oversized node off-screen should still pan");
+        // Left edge pinned at the margin.
+        assert!((nx + node.min_x * z - 48.0).abs() < 0.001);
+    }
+
+    /// A not-yet-measured / degenerate viewport (`extent <= 2*margin`) yields no
+    /// pan rather than a nonsensical jump.
+    #[test]
+    fn pan_to_reveal_noop_on_degenerate_viewport() {
+        assert_eq!(
+            pan_to_reveal(reveal_node(), 0.0, 0.0, 1.0, 1.0, 1.0, 48.0),
+            None
+        );
     }
 }
