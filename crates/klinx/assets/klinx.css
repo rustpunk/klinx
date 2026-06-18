@@ -4974,6 +4974,41 @@ input:-webkit-autofill:focus {
   stroke: var(--klinx-hazard);
 }
 
+/* Whole-path ribbons (#152). The active overlay lights the selected field's full
+   transitive path as TWO independently-toggleable ribbons distinguished by edge
+   nature (#147):
+     - `--value`     — the solid, continuous DIRECT "value lineage" ribbon: the
+       cable is fully opaque and CONTINUOUS (no dash) so a value carry/derive
+       reads as an unbroken line of provenance;
+     - `--indirect`  — the ghosted, dashed INDIRECT "influence halo" (above): a
+       column that influenced which rows survive / how they group / join / branch
+       without contributing a value.
+   `--value` and `--indirect` are mutually exclusive (one per edge, keyed off
+   `FieldEdgeKind::nature()`), so a reader can tell value from influence on sight;
+   each per-kind hue class still sets the colour. */
+.klinx-field-edge--value {
+  opacity: 1;
+}
+.klinx-field-edge--value path {
+  stroke-dasharray: none;
+}
+
+/* Precision-aware ribbon (#148/#152). An `Approximate` DIRECT (value) edge — a
+   sound but coarse over-approximation (a CXL-less fan-in carry or an `emit each`
+   derive) — is hatched with a tight dash and slightly ghosted so a reader can tell
+   a faithful (`Exact`) value carry from an approximate one WITHOUT opening the
+   Inspector. The marker is emitted only on the value ribbon: every INDIRECT edge is
+   `Approximate` by construction and already ghosted by `--indirect`, so this rule
+   never lands on an influence cable (and so cannot override the halo's dash/opacity
+   — see `field_edge_classes`). The `Unknown` tier lives on the row (no edge to
+   annotate), so it never reaches a cable. */
+.klinx-field-edge--approximate {
+  opacity: 0.7;
+}
+.klinx-field-edge--approximate path {
+  stroke-dasharray: 2 3;
+}
+
 .klinx-field-edge--spotlight {
   opacity: 1;
   filter: drop-shadow(0 0 5px currentColor);

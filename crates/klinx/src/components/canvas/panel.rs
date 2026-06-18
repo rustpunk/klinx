@@ -7,9 +7,10 @@ use dioxus::prelude::*;
 
 use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
 use crate::pipeline_view::{
-    CanvasConnectorPath, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow, NODE_WIDTH,
-    RoleEdge, StagePortSide, StageView, field_lineage_full, field_lineage_full_capped,
-    fit_transform, group_endpoints_by_node, layout_bounds, lineage_closure, lineage_keep_nodes,
+    CanvasConnectorPath, EdgeNature, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow,
+    NODE_WIDTH, Precision, RoleEdge, StagePortSide, StageView, field_lineage_full,
+    field_lineage_full_capped, fit_transform, group_endpoints_by_node, layout_bounds,
+    lineage_closure, lineage_keep_nodes,
 };
 use crate::state::{ChannelViewMode, LineageRevealMode, current_pipeline_view, use_app_state};
 
@@ -46,6 +47,9 @@ struct FieldEdgeAnchors {
     end: (f32, f32),
     kind_attr: String,
     kind: FieldEdgeKind,
+    /// The edge's precision tier (#148), threaded to the cable so an
+    /// `Approximate` over-approximation reads as a hatched/ghosted ribbon (#152).
+    precision: Precision,
     path: Option<CanvasConnectorPath>,
 }
 
@@ -66,6 +70,7 @@ fn resolve_edge_anchors(
         end: to.field_anchor_in(ti),
         kind_attr: from.kind.kind_attr().to_string(),
         kind: edge.kind,
+        precision: edge.precision,
         path: path.filter(|path| path.points.len() >= 2).cloned(),
     })
 }
@@ -84,6 +89,10 @@ fn resolve_role_edge_anchors(
         end: to.role_port_anchor_in(ti),
         kind_attr: from.kind.kind_attr().to_string(),
         kind: edge.kind,
+        // A role-port edge feeds a semantic influence input (e.g. an Aggregate
+        // group-by key), so it is an INDIRECT influence relationship — graded
+        // `Approximate` like the influence field edges it parallels (#148/#152).
+        precision: Precision::Approximate,
         path: path.filter(|path| path.points.len() >= 2).cloned(),
     })
 }
@@ -139,6 +148,21 @@ fn reveal_closure_cap(mode: LineageRevealMode, hop_cap: usize) -> Option<usize> 
     match mode {
         LineageRevealMode::Filter => Some(hop_cap),
         LineageRevealMode::Highlight => None,
+    }
+}
+
+/// Whether a ribbon cable of [`EdgeNature`] `nature` should be DRAWN given the two
+/// independent ribbon toggles (#152).
+///
+/// The dual ribbons are independent: `show_value` gates the solid DIRECT "value
+/// lineage" ribbon, `show_influence` gates the ghosted INDIRECT "influence halo".
+/// Toggling one never affects the other. This gates only the DRAWN overlay set;
+/// the dim/focus still keys off the full closure, so hiding a ribbon thins the
+/// drawn cables without un-dimming the off-path cards the path still traverses.
+fn ribbon_edge_visible(nature: EdgeNature, show_value: bool, show_influence: bool) -> bool {
+    match nature {
+        EdgeNature::Direct => show_value,
+        EdgeNature::Indirect => show_influence,
     }
 }
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -753,12 +777,27 @@ pub fn CanvasPanel() -> Element {
     // graphs. Canvas-local because it is a transient reveal control, not tab state.
     let mut hop_cap = use_signal(|| DEFAULT_HOP_CAP);
 
+    // Dual value/influence ribbon toggles (#152). Two INDEPENDENT booleans gating
+    // which of the two ribbons the active overlay draws: the solid DIRECT "value
+    // lineage" and the ghosted INDIRECT "influence halo" (the #147 edge nature).
+    // Both default ON so a fresh selection lights the whole path. Unlike `hop_cap`
+    // (a per-graph bound the view-swap effect RESETS), these are view PREFERENCES —
+    // like the reveal MODE, they intentionally PERSIST across graph/tab swaps, so the
+    // view-swap effect leaves them alone; a hidden ribbon stays hidden until the user
+    // re-enables it. They gate only the DRAWN cables — the dim/focus closure (and so
+    // which cards dim) is untouched.
+    let mut show_value_ribbon = use_signal(|| true);
+    let mut show_influence_ribbon = use_signal(|| true);
+
     let view_mode = *state.channel_view_mode.read();
     // How the active reveal treats off-path nodes: Highlight dims them (today's
     // behavior), Filter hides them (#123). Read once per render and shared by the
     // dim/hide branch below and the toolbar toggle.
     let reveal_mode = *state.lineage_reveal_mode.read();
     let active_hop_cap = *hop_cap.read();
+    // Read once per render; shared by the toolbar toggles and the overlay filter.
+    let value_ribbon_on = *show_value_ribbon.read();
+    let influence_ribbon_on = *show_influence_ribbon.read();
     let is_filter_mode = reveal_mode == LineageRevealMode::Filter;
     let closure_cap = reveal_closure_cap(reveal_mode, active_hop_cap);
     let pipeline_view = current_pipeline_view(state);
@@ -1487,18 +1526,48 @@ pub fn CanvasPanel() -> Element {
                     }
                 }
 
-                // ── Lineage reveal-mode toggle (#123) ────────────────────────
-                // Highlight dims off-path nodes (default); Filter hides them while
-                // keeping connecting paths. Shared per-tab state reused by PR5.
+                // ── Lineage reveal-mode toggle (#123, focus surface for #152) ──
+                // The persistent FOCUS control (#152): Highlight mode dims every
+                // off-path card for the SELECTED field (persistent, not hover-only
+                // — a selected field populates the same closure a hover would), so
+                // the lit ribbon stands out against a receded background; Filter
+                // mode instead HIDES off-path cards (#123, distinct). Reuses the
+                // per-tab `lineage_reveal_mode` — no parallel dim mechanism — so a
+                // field selected with Highlight active reads as a focused path.
                 button {
                     class: if is_filter_mode { "klinx-view-toggle klinx-view-toggle--active" } else { "klinx-view-toggle" },
-                    title: if is_filter_mode { "Filter mode: off-path nodes are hidden. Click to dim them instead." } else { "Highlight mode: off-path nodes are dimmed. Click to hide them instead." },
+                    title: if is_filter_mode { "Filter mode: off-path cards are hidden. Click to focus (dim off-path) instead." } else { "Focus mode: off-path cards are dimmed for the selected field's path. Click to hide them instead." },
                     onclick: move |_| {
                         let mut mode = state.lineage_reveal_mode;
                         let next = mode.read().toggled();
                         mode.set(next);
                     },
                     span { class: "klinx-view-toggle-label", "{reveal_mode.label()}" }
+                }
+
+                // ── Dual value/influence ribbon toggles (#152) ───────────────
+                // Two INDEPENDENT toggles for the whole-path ribbon: VALUE lights
+                // the solid DIRECT "value lineage" cables; INFLUENCE lights the
+                // ghosted INDIRECT "influence halo" (#147). Each gates only its own
+                // ribbon in the overlay draw; toggling one never touches the other,
+                // and neither changes the focus/dim closure. Both default ON.
+                button {
+                    class: if value_ribbon_on { "klinx-view-toggle klinx-view-toggle--active" } else { "klinx-view-toggle" },
+                    title: if value_ribbon_on { "Value lineage ribbon shown (DIRECT cables). Click to hide it." } else { "Value lineage ribbon hidden. Click to show the DIRECT cables." },
+                    onclick: move |_| {
+                        let next = !*show_value_ribbon.peek();
+                        show_value_ribbon.set(next);
+                    },
+                    span { class: "klinx-view-toggle-label", "VALUE" }
+                }
+                button {
+                    class: if influence_ribbon_on { "klinx-view-toggle klinx-view-toggle--active" } else { "klinx-view-toggle" },
+                    title: if influence_ribbon_on { "Influence halo shown (INDIRECT cables). Click to hide it." } else { "Influence halo hidden. Click to show the INDIRECT cables." },
+                    onclick: move |_| {
+                        let next = !*show_influence_ribbon.peek();
+                        show_influence_ribbon.set(next);
+                    },
+                    span { class: "klinx-view-toggle-label", "INFLUENCE" }
                 }
 
                 // ── Expand-further affordance (#123) ─────────────────────────
@@ -1769,29 +1838,54 @@ pub fn CanvasPanel() -> Element {
                 // lineage closure, never the whole field-edge set. The overlay
                 // is above default cables but below cards, so field rows mask
                 // any stroke through their interiors and keep pointer control.
+                // The dual ribbon toggles (#152) filter WHICH cables draw here by
+                // edge nature: a hidden ribbon thins the drawn set only — the
+                // closure that drives the dim/focus is unchanged. Edges keep their
+                // stable identity key (`field-{ei}`/`role-{ei}`), so toggling a
+                // ribbon adds/removes whole cables without re-keying survivors.
                 if hover_active {
                     svg {
                         class: "klinx-canvas-svg klinx-canvas-svg--active",
                         width: "{svg_w}",
                         height: "{svg_h}",
-                        for (ei, anchors) in active_field_edges {
+                        for (ei, anchors) in active_field_edges
+                            .into_iter()
+                            .filter(|(_, anchors)| {
+                                ribbon_edge_visible(
+                                    anchors.kind.nature(),
+                                    value_ribbon_on,
+                                    influence_ribbon_on,
+                                )
+                            })
+                        {
                             FieldConnector {
                                 key: "field-{ei}",
                                 start: anchors.start,
                                 end: anchors.end,
                                 kind_attr: anchors.kind_attr,
                                 kind: anchors.kind,
+                                precision: anchors.precision,
                                 path: anchors.path,
                                 spotlight: spotlight_edges.contains(&ei),
                             }
                         }
-                        for (ei, anchors) in active_role_edges {
+                        for (ei, anchors) in active_role_edges
+                            .into_iter()
+                            .filter(|(_, anchors)| {
+                                ribbon_edge_visible(
+                                    anchors.kind.nature(),
+                                    value_ribbon_on,
+                                    influence_ribbon_on,
+                                )
+                            })
+                        {
                             FieldConnector {
                                 key: "role-{ei}",
                                 start: anchors.start,
                                 end: anchors.end,
                                 kind_attr: anchors.kind_attr,
                                 kind: anchors.kind,
+                                precision: anchors.precision,
                                 path: anchors.path,
                                 spotlight: spotlight_role_edges.contains(&ei),
                             }
@@ -2563,5 +2657,484 @@ mod tests {
             self.fields.truncate(count);
             self
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // #152 — whole-path lineage ribbon + focus mode
+    //
+    // These tests pin the ribbon overlay's contract against the SELECTED field's
+    // transitive closure: it lights the full up+down path, dims off-path cards
+    // (focus), draws the two ribbons independently, and — the headline acceptance
+    // criterion — does so as a RENDER OVERLAY that never reflows the layout.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    use super::{FieldEdgeAnchors, resolve_edge_anchors, ribbon_edge_visible};
+    use crate::pipeline_view::{
+        EdgeNature, PipelineView, Precision, field_lineage_full, field_lineage_full_capped,
+    };
+
+    /// A MID-graph field whose transitive closure spans BOTH edge natures and
+    /// leaves at least one card off-path — the one fixture that exercises every
+    /// ribbon contract. In the bundled `order_fulfillment.yaml`,
+    /// `normalize_fields.product_code` has upstream producers AND downstream
+    /// consumers (a whole-path ribbon, both directions), is carried as a value
+    /// (DIRECT) while also being the Combine `JoinKey` (INDIRECT) — both ribbons —
+    /// and its closure touches 6 of the graph's 7 cards, so a card stays off-path
+    /// for the focus-dim test.
+    const RIBBON_FIXTURE: &str =
+        include_str!("../../../../../examples/pipelines/order_fulfillment.yaml");
+    const RIBBON_SELECTED_STAGE: &str = "normalize_fields";
+    const RIBBON_SELECTED_FIELD: &str = "product_code";
+
+    /// Lay out the ribbon fixture exactly as `CanvasPanel` does (derive →
+    /// port-aware Sugiyama), returning the laid-out view. The layout owns
+    /// `canvas_x`/`canvas_y` and every `*_paths`; the ribbon reads them and must
+    /// never write them.
+    fn laid_out_ribbon_view() -> PipelineView {
+        let config = parse_config(RIBBON_FIXTURE).expect("audit_join.yaml parses");
+        apply_canvas_layout(
+            derive_pipeline_view(&config),
+            CanvasLayoutEngine::PortAwareSugiyama,
+        )
+        .view
+    }
+
+    fn node_index(view: &PipelineView, stage_id: &str) -> usize {
+        view.stages
+            .iter()
+            .position(|stage| stage.id == stage_id)
+            .unwrap_or_else(|| panic!("stage {stage_id} exists in the ribbon fixture"))
+    }
+
+    /// The participating field-edge index set for selecting `(stage, field)` —
+    /// the full transitive up+down closure, mirroring the Highlight-mode reveal
+    /// (uncapped) the panel computes for a pinned/selected column.
+    fn selected_closure(view: &PipelineView, stage_id: &str, field: &str) -> HashSet<usize> {
+        let node = node_index(view, stage_id);
+        field_lineage_full(&view.field_edges, node, field)
+    }
+
+    /// Resolve a closure into the drawable overlay cables exactly as the render
+    /// path does (`resolve_edge_anchors` against the laid-out stages, reading the
+    /// precomputed `field_edge_paths`). Returns `(edge_index, anchors)` pairs for
+    /// every edge whose endpoints resolve — the eligible ribbon set.
+    fn resolve_overlay(
+        view: &PipelineView,
+        closure: &HashSet<usize>,
+    ) -> Vec<(usize, FieldEdgeAnchors)> {
+        let mut indices: Vec<usize> = closure.iter().copied().collect();
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .filter_map(|ei| {
+                let edge = &view.field_edges[ei];
+                resolve_edge_anchors(&view.stages, edge, view.field_edge_paths.get(ei))
+                    .map(|anchors| (ei, anchors))
+            })
+            .collect()
+    }
+
+    /// Acceptance: selecting a field lights its FULL transitive up+down path. The
+    /// eligible ribbon edge set equals the resolvable portion of the closure (no
+    /// edge silently dropped), and that closure genuinely spans both upstream and
+    /// downstream of the selected node.
+    #[test]
+    fn ribbon_covers_full_transitive_closure() {
+        let view = laid_out_ribbon_view();
+        let selected = node_index(&view, RIBBON_SELECTED_STAGE);
+        let closure = selected_closure(&view, RIBBON_SELECTED_STAGE, RIBBON_SELECTED_FIELD);
+
+        assert!(
+            !closure.is_empty(),
+            "selecting {RIBBON_SELECTED_STAGE}.{RIBBON_SELECTED_FIELD} must reveal a path"
+        );
+
+        // Every closure edge whose endpoints exist in the laid-out stages must be
+        // an eligible ribbon cable — the overlay covers the whole closure, not a
+        // subset. Both endpoint fields exist for every closure edge in this
+        // fixture, so the eligible set equals the closure exactly.
+        let overlay = resolve_overlay(&view, &closure);
+        let drawn: HashSet<usize> = overlay.iter().map(|(ei, _)| *ei).collect();
+        assert_eq!(
+            drawn, closure,
+            "the ribbon must cover the entire transitive closure"
+        );
+
+        // The path reaches BOTH upstream of and downstream of the selected node —
+        // it is a whole-path ribbon, not a one-directional trace.
+        let mut has_upstream = false;
+        let mut has_downstream = false;
+        for ei in &closure {
+            let edge = &view.field_edges[*ei];
+            if edge.to_node == selected {
+                has_upstream = true;
+            }
+            if edge.from_node == selected {
+                has_downstream = true;
+            }
+        }
+        assert!(
+            has_upstream && has_downstream,
+            "a selected mid-graph field's ribbon must light both upstream and downstream"
+        );
+    }
+
+    /// Acceptance (focus mode): for the SELECTED field, an off-path card is dimmed
+    /// while in-path cards are not. The dim set is the complement of the closure's
+    /// participating nodes — the exact `dimmed:` gate the panel applies in
+    /// Highlight (focus) mode, independent of any hover.
+    #[test]
+    fn focus_mode_dims_off_path_cards_only() {
+        let view = laid_out_ribbon_view();
+        let closure = selected_closure(&view, RIBBON_SELECTED_STAGE, RIBBON_SELECTED_FIELD);
+        let overlay = resolve_overlay(&view, &closure);
+
+        let mut participating: HashSet<usize> = HashSet::new();
+        for (ei, _) in &overlay {
+            let edge = &view.field_edges[*ei];
+            participating.insert(edge.from_node);
+            participating.insert(edge.to_node);
+        }
+        assert!(
+            !participating.is_empty(),
+            "a selected field's path must light at least its own card"
+        );
+
+        // The selected card is in-path (not dimmed); at least one card is off-path
+        // (dimmed). Together these prove the focus dim is a real partition, not a
+        // dim-everything or dim-nothing.
+        let selected = node_index(&view, RIBBON_SELECTED_STAGE);
+        assert!(
+            participating.contains(&selected),
+            "the selected card must be in-path (never dimmed)"
+        );
+        let off_path: Vec<usize> = (0..view.stages.len())
+            .filter(|node| !participating.contains(node))
+            .collect();
+        assert!(
+            !off_path.is_empty(),
+            "the fixture must have at least one off-path card to dim"
+        );
+        // The dim set (off-path) is exactly the complement of the bright
+        // (participating) set the panel's `dimmed: !participating.contains(node)`
+        // gate applies in focus mode: disjoint, covering, and — proven above — both
+        // non-empty. A regression that dimmed an in-path card or lit an off-path one
+        // would break this partition.
+        assert!(
+            off_path.iter().all(|n| !participating.contains(n)),
+            "no card may be both on-path (bright) and off-path (dimmed)"
+        );
+        assert_eq!(
+            off_path.len() + participating.len(),
+            view.stages.len(),
+            "every card is exactly one of on-path (bright) or off-path (dimmed)"
+        );
+        // Every bright card is genuinely incident to a revealed cable (not lit by
+        // accident), and every dimmed card is genuinely absent from the overlay — so
+        // the partition tracks real path incidence, not a blanket dim/bright.
+        for node in 0..view.stages.len() {
+            let incident_to_overlay = overlay.iter().any(|(ei, _)| {
+                let edge = &view.field_edges[*ei];
+                edge.from_node == node || edge.to_node == node
+            });
+            assert_eq!(
+                participating.contains(&node),
+                incident_to_overlay,
+                "card {node}: bright iff it is incident to a revealed lineage cable"
+            );
+        }
+    }
+
+    /// THE headline acceptance criterion: highlight is a RENDER OVERLAY — selecting
+    /// a field must NOT reflow the layout. We snapshot every node's `canvas_x`/
+    /// `canvas_y` and every `*_paths` output, then run the exact selection-reveal
+    /// computation (closure walk + `resolve_edge_anchors`, which reads the layout
+    /// paths) and assert the layout outputs are byte-for-byte unchanged. The
+    /// overlay produced real cables, so the no-op is genuine, not vacuous.
+    #[test]
+    fn selection_is_render_only_and_never_reflows_layout() {
+        let view = laid_out_ribbon_view();
+
+        // Snapshot the layout-owned outputs BEFORE the selection reveal.
+        let positions_before: Vec<(f32, f32)> = view
+            .stages
+            .iter()
+            .map(|stage| (stage.canvas_x, stage.canvas_y))
+            .collect();
+        let field_paths_before = view.field_edge_paths.clone();
+        let connection_paths_before = view.connection_paths.clone();
+        let role_paths_before = view.role_edge_paths.clone();
+
+        // Simulate the selection reveal: compute the closure and resolve every
+        // participating edge to anchors — the full render-path read of the layout.
+        let closure = selected_closure(&view, RIBBON_SELECTED_STAGE, RIBBON_SELECTED_FIELD);
+        let overlay = resolve_overlay(&view, &closure);
+        assert!(
+            !overlay.is_empty(),
+            "the selection must resolve real cables, else the no-reflow check is vacuous"
+        );
+
+        // The layout outputs the ribbon READS must be identical AFTER — the reveal
+        // wrote none of them.
+        let positions_after: Vec<(f32, f32)> = view
+            .stages
+            .iter()
+            .map(|stage| (stage.canvas_x, stage.canvas_y))
+            .collect();
+        assert_eq!(
+            positions_before, positions_after,
+            "selection must not move any node — the ribbon is a render overlay"
+        );
+        assert_eq!(
+            field_paths_before, view.field_edge_paths,
+            "selection must not rewrite field_edge_paths"
+        );
+        assert_eq!(
+            connection_paths_before, view.connection_paths,
+            "selection must not rewrite connection_paths"
+        );
+        assert_eq!(
+            role_paths_before, view.role_edge_paths,
+            "selection must not rewrite role_edge_paths"
+        );
+    }
+
+    /// Acceptance: the value (DIRECT) and influence (INDIRECT) ribbons toggle
+    /// INDEPENDENTLY. Against a closure that spans both natures: value-off drops
+    /// every DIRECT cable and keeps every INDIRECT one; influence-off drops every
+    /// INDIRECT and keeps every DIRECT; toggling one never affects the other.
+    #[test]
+    fn value_and_influence_ribbons_toggle_independently() {
+        let view = laid_out_ribbon_view();
+        let closure = selected_closure(&view, RIBBON_SELECTED_STAGE, RIBBON_SELECTED_FIELD);
+        let overlay = resolve_overlay(&view, &closure);
+
+        let direct: HashSet<usize> = overlay
+            .iter()
+            .filter(|(_, a)| a.kind.nature() == EdgeNature::Direct)
+            .map(|(ei, _)| *ei)
+            .collect();
+        let indirect: HashSet<usize> = overlay
+            .iter()
+            .filter(|(_, a)| a.kind.nature() == EdgeNature::Indirect)
+            .map(|(ei, _)| *ei)
+            .collect();
+        assert!(
+            !direct.is_empty() && !indirect.is_empty(),
+            "the fixture closure must contain both ribbon natures to test independence"
+        );
+
+        let drawn = |value_on: bool, influence_on: bool| -> HashSet<usize> {
+            overlay
+                .iter()
+                .filter(|(_, a)| ribbon_edge_visible(a.kind.nature(), value_on, influence_on))
+                .map(|(ei, _)| *ei)
+                .collect::<HashSet<usize>>()
+        };
+
+        // Both on → the whole closure.
+        assert_eq!(
+            drawn(true, true),
+            &direct | &indirect,
+            "both ribbons on draws all"
+        );
+        // Value off → only INDIRECT survives; every DIRECT cable is gone.
+        assert_eq!(
+            drawn(false, true),
+            indirect,
+            "value ribbon off must draw only INDIRECT cables"
+        );
+        // Influence off → only DIRECT survives; every INDIRECT cable is gone.
+        assert_eq!(
+            drawn(true, false),
+            direct,
+            "influence ribbon off must draw only DIRECT cables"
+        );
+        // Both off → nothing.
+        assert!(
+            drawn(false, false).is_empty(),
+            "both ribbons off draws nothing"
+        );
+
+        // Independence: flipping the influence toggle never changes the DIRECT set,
+        // and flipping the value toggle never changes the INDIRECT set.
+        assert_eq!(
+            &drawn(true, true) & &direct,
+            &drawn(true, false) & &direct,
+            "toggling influence must not change which DIRECT cables draw"
+        );
+        assert_eq!(
+            &drawn(true, true) & &indirect,
+            &drawn(false, true) & &indirect,
+            "toggling value must not change which INDIRECT cables draw"
+        );
+    }
+
+    /// `ribbon_edge_visible` is the single gating predicate the overlay filters on.
+    /// Pin its truth table so the independence guarantee can't silently invert.
+    #[test]
+    fn ribbon_edge_visible_truth_table() {
+        for (nature, value_on, influence_on, expected) in [
+            (EdgeNature::Direct, true, true, true),
+            (EdgeNature::Direct, true, false, true),
+            (EdgeNature::Direct, false, true, false),
+            (EdgeNature::Direct, false, false, false),
+            (EdgeNature::Indirect, true, true, true),
+            (EdgeNature::Indirect, true, false, false),
+            (EdgeNature::Indirect, false, true, true),
+            (EdgeNature::Indirect, false, false, false),
+        ] {
+            assert_eq!(
+                ribbon_edge_visible(nature, value_on, influence_on),
+                expected,
+                "{nature:?} value={value_on} influence={influence_on}"
+            );
+        }
+    }
+
+    /// Performance bound: the overlay's work is bounded by the SELECTED closure,
+    /// never the whole field-edge set. On the large fixture, a single field's
+    /// resolved ribbon must be a strict subset of all edges (the budget guarantee:
+    /// a selection draws its path, not the entire graph). No wall-clock timing.
+    #[test]
+    fn overlay_is_bounded_by_selected_closure_on_large_fixture() {
+        let config = parse_config(include_str!("../../../tests/fixtures/large_pipeline.yaml"))
+            .expect("large_pipeline.yaml parses");
+        let view = apply_canvas_layout(
+            derive_pipeline_view(&config),
+            CanvasLayoutEngine::PortAwareSugiyama,
+        )
+        .view;
+
+        // Pick the first node/field that has any lineage, then bound its overlay.
+        let mut checked = false;
+        'outer: for (node, stage) in view.stages.iter().enumerate() {
+            for field in &stage.fields {
+                let closure = field_lineage_full(&view.field_edges, node, &field.name);
+                if closure.is_empty() {
+                    continue;
+                }
+                let overlay = resolve_overlay(&view, &closure);
+                assert!(
+                    overlay.len() <= closure.len(),
+                    "overlay never exceeds the closure it resolves"
+                );
+                // On a large multi-source graph, no single field's closure can be
+                // the ENTIRE edge set — the overlay is genuinely scoped.
+                assert!(
+                    closure.len() < view.field_edges.len(),
+                    "a single field's ribbon must be a strict subset of all {} edges, got {}",
+                    view.field_edges.len(),
+                    closure.len()
+                );
+                checked = true;
+                break 'outer;
+            }
+        }
+        assert!(
+            checked,
+            "the large fixture must expose at least one field with lineage"
+        );
+    }
+
+    /// The Highlight-mode (focus) reveal is uncapped, so a deep selected path is
+    /// lit in full — focus never silently clips the closure it dims around. (Filter
+    /// mode's cap is #123's; focus reuses Highlight, which `reveal_closure_cap`
+    /// leaves uncapped.) Guards that focus mode and the full-path ribbon agree.
+    #[test]
+    fn focus_mode_reveal_is_uncapped() {
+        let view = laid_out_ribbon_view();
+        let node = node_index(&view, RIBBON_SELECTED_STAGE);
+        let full = field_lineage_full(&view.field_edges, node, RIBBON_SELECTED_FIELD);
+        let capped = field_lineage_full_capped(
+            &view.field_edges,
+            node,
+            RIBBON_SELECTED_FIELD,
+            super::reveal_closure_cap(
+                crate::state::LineageRevealMode::Highlight,
+                super::DEFAULT_HOP_CAP,
+            ),
+        );
+        assert_eq!(
+            capped, full,
+            "focus (Highlight) mode must light the full transitive path uncapped"
+        );
+    }
+
+    /// #152 CSS: the two ribbons read as visually distinct cables, and an
+    /// Approximate edge is hatched. Asserted via `css_rule_block` so the rendered
+    /// classes have backing rules.
+    #[test]
+    fn ribbon_and_precision_css_rules_exist() {
+        let css = include_str!("../../../assets/klinx.css");
+
+        // The DIRECT value ribbon is solid + continuous (no dash on its paths).
+        let value = css_rule_block(css, ".klinx-field-edge--value {")
+            .expect("value ribbon CSS rule (#152)");
+        assert!(
+            value.contains("opacity:"),
+            "the value ribbon should be fully present (opacity set), got {value:?}"
+        );
+        let value_path = css_rule_block(css, ".klinx-field-edge--value path")
+            .expect("value ribbon path rule (#152)");
+        assert!(
+            value_path.contains("stroke-dasharray:") && value_path.contains("none"),
+            "the value ribbon must be CONTINUOUS (no dash), got {value_path:?}"
+        );
+
+        // The INDIRECT influence halo stays ghosted + dashed (the #147 contract the
+        // dual-ribbon split builds on).
+        let indirect =
+            css_rule_block(css, ".klinx-field-edge--indirect {").expect("indirect halo CSS rule");
+        assert!(
+            indirect.contains("opacity:"),
+            "the influence halo should be ghosted (reduced opacity), got {indirect:?}"
+        );
+
+        // Precision-aware (#148): the Approximate modifier hatches the cable.
+        let approx = css_rule_block(css, ".klinx-field-edge--approximate path")
+            .expect("approximate ribbon path rule (#152)");
+        assert!(
+            approx.contains("stroke-dasharray:"),
+            "an Approximate edge must be hatched (dashed), got {approx:?}"
+        );
+    }
+
+    /// The role-edge resolver tags every cable `Approximate` — a role port is an
+    /// influence input, so the precision-aware ribbon styling applies to role
+    /// cables too. Exercised against a group-by fixture that produces role edges.
+    #[test]
+    fn role_edge_cables_are_approximate() {
+        let config = parse_config(include_str!(
+            "../../../../../examples/pipelines/invoice_daily_rollup.yaml"
+        ))
+        .expect("invoice_daily_rollup.yaml parses");
+        let view = apply_canvas_layout(
+            derive_pipeline_view(&config),
+            CanvasLayoutEngine::PortAwareSugiyama,
+        )
+        .view;
+        assert!(
+            !view.role_edges.is_empty(),
+            "the group-by fixture must produce role edges to exercise the resolver"
+        );
+
+        let mut resolved_any = false;
+        for (ei, edge) in view.role_edges.iter().enumerate() {
+            if let Some(anchors) =
+                super::resolve_role_edge_anchors(&view.stages, edge, view.role_edge_paths.get(ei))
+            {
+                assert_eq!(
+                    anchors.precision,
+                    Precision::Approximate,
+                    "a role-port (influence) cable is graded Approximate"
+                );
+                resolved_any = true;
+            }
+        }
+        assert!(
+            resolved_any,
+            "the group-by fixture must produce a resolved role cable"
+        );
     }
 }
