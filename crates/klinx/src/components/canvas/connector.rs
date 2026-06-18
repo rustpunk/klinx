@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use dioxus::prelude::*;
 
 use crate::pipeline_view::{
-    CanvasConnectorPath, CanvasPoint, EdgeNature, FieldEdgeKind, StageView,
+    CanvasConnectorPath, CanvasPoint, EdgeNature, FieldEdgeKind, Precision, StageView,
 };
 
 const CHANNEL_LANE_SPACING: f32 = 14.0;
@@ -1217,6 +1217,9 @@ pub struct FieldConnectorProps {
     /// class and therefore the stroke colour: pure carry, accessed carry, or
     /// derive.
     pub kind: FieldEdgeKind,
+    /// How faithful the edge is (#148). Drives the precision-aware `--approximate`
+    /// ribbon treatment so a coarse over-approximation reads as hatched/ghosted.
+    pub precision: Precision,
     /// Optional layout-provided route for the field edge.
     pub path: Option<CanvasConnectorPath>,
     /// Whether this edge is the current local focus inside a larger pinned
@@ -1242,14 +1245,26 @@ fn field_edge_kind_class(kind: FieldEdgeKind) -> &'static str {
 ///
 /// Each relationship kind reads as a distinct hue: a pure pass-through is the
 /// quietest, an accessed carry a warm highlight, a derive the active accent. The
-/// four INDIRECT influence kinds (#147) additionally carry the `--indirect`
-/// modifier — gated on [`FieldEdgeKind::nature`] so the value/influence split has
-/// a single source of truth — which the CSS renders ghosted/dashed so influence
-/// reads differently from value. `spotlight` adds the local-focus modifier.
-fn field_edge_classes(kind: FieldEdgeKind, spotlight: bool) -> String {
+/// nature split (#152) labels the two ribbons explicitly so the CSS — and the
+/// reader — can tell value from influence at a glance. DIRECT (value) edges carry
+/// `--value` (a solid, continuous "value lineage" ribbon); the four INDIRECT
+/// influence kinds (#147) carry `--indirect` (a ghosted, dashed "influence
+/// halo"). Both modifiers are gated on [`FieldEdgeKind::nature`], the single
+/// value/influence source of truth.
+///
+/// Precision-aware (#148): an `Approximate` edge additionally carries
+/// `--approximate` so a coarse over-approximation reads as hatched/ghosted
+/// regardless of its kind hue (`Exact` edges stay clean; `Unknown` lives on the
+/// row, never an edge, so it is unreachable here). `spotlight` adds the
+/// local-focus modifier.
+fn field_edge_classes(kind: FieldEdgeKind, precision: Precision, spotlight: bool) -> String {
     let mut classes = format!("klinx-field-edge {}", field_edge_kind_class(kind));
-    if kind.nature() == EdgeNature::Indirect {
-        classes.push_str(" klinx-field-edge--indirect");
+    match kind.nature() {
+        EdgeNature::Direct => classes.push_str(" klinx-field-edge--value"),
+        EdgeNature::Indirect => classes.push_str(" klinx-field-edge--indirect"),
+    }
+    if precision == Precision::Approximate {
+        classes.push_str(" klinx-field-edge--approximate");
     }
     if spotlight {
         classes.push_str(" klinx-field-edge--spotlight");
@@ -1261,7 +1276,7 @@ fn field_edge_classes(kind: FieldEdgeKind, spotlight: bool) -> String {
 pub fn FieldConnector(props: FieldConnectorProps) -> Element {
     let (sx, sy) = props.start;
     let (tx, ty) = props.end;
-    let extra_class = field_edge_classes(props.kind, props.spotlight);
+    let extra_class = field_edge_classes(props.kind, props.precision, props.spotlight);
 
     rsx! {
         ConnectorPath {
@@ -2026,7 +2041,7 @@ mod tests {
             FieldEdgeKind::Conditional,
         ];
         for kind in all {
-            let classes = field_edge_classes(kind, false);
+            let classes = field_edge_classes(kind, Precision::Exact, false);
             // Always the base class plus the per-kind hue class.
             assert!(
                 classes.starts_with("klinx-field-edge "),
@@ -2036,27 +2051,53 @@ mod tests {
                 classes.contains(field_edge_kind_class(kind)),
                 "{kind:?} must carry its per-kind hue class, got {classes:?}"
             );
-            // The `--indirect` modifier is present iff the kind is INDIRECT.
+            // Each edge carries EXACTLY ONE of the two ribbon modifiers (#152),
+            // chosen by nature(): a DIRECT value cable gets `--value`, an INDIRECT
+            // influence cable gets `--indirect`. They are mutually exclusive.
+            let has_value = classes.contains("klinx-field-edge--value");
+            let has_indirect = classes.contains("klinx-field-edge--indirect");
             assert_eq!(
-                classes.contains("klinx-field-edge--indirect"),
+                has_indirect,
                 kind.nature() == EdgeNature::Indirect,
                 "{kind:?}: `--indirect` presence must track nature(), got {classes:?}"
+            );
+            assert_eq!(
+                has_value,
+                kind.nature() == EdgeNature::Direct,
+                "{kind:?}: `--value` presence must track nature(), got {classes:?}"
+            );
+            assert!(
+                has_value ^ has_indirect,
+                "{kind:?}: exactly one ribbon modifier must apply, got {classes:?}"
             );
         }
         // A concrete INDIRECT case and a concrete DIRECT case, spelled out so the
         // intent is unmistakable.
         assert!(
-            field_edge_classes(FieldEdgeKind::Filter, false).contains("klinx-field-edge--indirect"),
+            field_edge_classes(FieldEdgeKind::Filter, Precision::Exact, false)
+                .contains("klinx-field-edge--indirect"),
             "a Filter edge is INDIRECT and must be ghosted"
         );
         assert!(
-            !field_edge_classes(FieldEdgeKind::Derive, false)
-                .contains("klinx-field-edge--indirect"),
-            "a Derive edge is DIRECT and must not be ghosted"
+            field_edge_classes(FieldEdgeKind::Derive, Precision::Exact, false)
+                .contains("klinx-field-edge--value"),
+            "a Derive edge is DIRECT and must read as a solid value ribbon"
         );
-        // The spotlight modifier is additive and independent of nature.
+        // Precision is orthogonal to nature (#148): `--approximate` rides on top of
+        // whichever ribbon applies, and only for the Approximate tier.
         assert!(
-            field_edge_classes(FieldEdgeKind::JoinKey, true)
+            field_edge_classes(FieldEdgeKind::Derive, Precision::Approximate, false)
+                .contains("klinx-field-edge--approximate"),
+            "an Approximate DIRECT derive must carry the approximate modifier (atop --value)"
+        );
+        assert!(
+            !field_edge_classes(FieldEdgeKind::Derive, Precision::Exact, false)
+                .contains("klinx-field-edge--approximate"),
+            "an Exact edge must NOT carry the approximate modifier"
+        );
+        // The spotlight modifier is additive and independent of nature/precision.
+        assert!(
+            field_edge_classes(FieldEdgeKind::JoinKey, Precision::Exact, true)
                 .contains("klinx-field-edge--spotlight"),
             "spotlight must add its modifier"
         );
