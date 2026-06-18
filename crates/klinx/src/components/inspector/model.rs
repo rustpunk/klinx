@@ -305,12 +305,13 @@ fn build_node_detail(stage_id: &str, ctx: InspectorBuildContext<'_>) -> Selected
         overview.push(InspectorFact::new("note", notes.stage_note.clone()));
     }
 
-    let diagnostics = node_diagnostics(
-        stage,
-        node.and_then(node_cxl_source).as_deref(),
-        ctx.visible_errors,
-        ctx.schema_warnings,
-    );
+    // Validate the node's CXL block once and share the result between the
+    // status diagnostics (which drive the node chip) and the CXL section (#141).
+    let cxl_errors = node
+        .and_then(node_cxl_source)
+        .map(|source| crate::cxl_bridge::validate_expr(&source).errors)
+        .unwrap_or_default();
+    let diagnostics = node_diagnostics(stage, &cxl_errors, ctx.visible_errors, ctx.schema_warnings);
     let mut status_chips = status_chips(
         diagnostics
             .iter()
@@ -334,7 +335,7 @@ fn build_node_detail(stage_id: &str, ctx: InspectorBuildContext<'_>) -> Selected
         fields_section(stage),
         branches_section(stage),
         role_ports_section(stage),
-        cxl_section(stage_id, node, doc.as_ref()),
+        cxl_section(stage_id, node, doc.as_ref(), &cxl_errors),
         contract_section(doc.as_ref()),
         channel_section(ctx.channel_mode, ctx.compiled_plan_available),
     ];
@@ -414,7 +415,7 @@ fn cxl_diagnostic_message(diagnostic: &crate::cxl_bridge::CxlDiagnostic) -> Stri
 
 fn node_diagnostics(
     stage: Option<&StageView>,
-    cxl_source: Option<&str>,
+    cxl_errors: &[crate::cxl_bridge::CxlDiagnostic],
     visible_errors: &[String],
     schema_warnings: &[String],
 ) -> Vec<InspectorDiagnostic> {
@@ -428,15 +429,11 @@ fn node_diagnostics(
     }
     // Edit-time CXL syntax validation: a malformed `cxl:` block surfaces as an
     // Error diagnostic, which flips the node status chip off "ok" (#141).
-    if let Some(source) = cxl_source {
-        for diagnostic in crate::cxl_bridge::validate_expr(source).errors {
-            diagnostics.push(InspectorDiagnostic {
-                label: "cxl".to_string(),
-                message: cxl_diagnostic_message(&diagnostic),
-                tone: StatusTone::Error,
-            });
-        }
-    }
+    diagnostics.extend(cxl_errors.iter().map(|diagnostic| InspectorDiagnostic {
+        label: "cxl".to_string(),
+        message: cxl_diagnostic_message(diagnostic),
+        tone: StatusTone::Error,
+    }));
     diagnostics.extend(visible_errors.iter().map(|message| InspectorDiagnostic {
         label: "parse".to_string(),
         message: message.clone(),
@@ -775,15 +772,16 @@ fn cxl_section(
     stage_id: &str,
     node: Option<&PipelineNode>,
     doc: Option<&crate::autodoc::StageDoc>,
+    cxl_errors: &[crate::cxl_bridge::CxlDiagnostic],
 ) -> InspectorSection {
     let Some(cxl_source) = node.and_then(node_cxl_source) else {
         return InspectorSection::unavailable("CXL", "This node has no top-level CXL block.");
     };
     let mut rows = Vec::new();
     // Surface syntax errors at the top of the section so a malformed block is
-    // visible even when statement analysis yields nothing (#141).
-    let validation = crate::cxl_bridge::validate_expr(&cxl_source);
-    for diagnostic in &validation.errors {
+    // visible even when statement analysis yields nothing (#141). Errors are
+    // validated once in `build_node_detail` and shared with the status chip.
+    for diagnostic in cxl_errors {
         rows.push(InspectorRow::toned(
             "error",
             cxl_diagnostic_message(diagnostic),

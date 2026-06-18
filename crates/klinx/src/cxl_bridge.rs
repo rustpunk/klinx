@@ -3,8 +3,10 @@
 /// Wraps `cxl::parser::Parser::parse()` into a UI-friendly validation result
 /// that components can render without depending on cxl types directly.
 ///
-/// Placeholder for real schema validation — currently parser-only, skipping resolver/typechecker steps.
-/// Future versions will add schema-aware validation via resolver and type checker.
+/// Scope is deliberately syntax-only: this is the edit-time validation
+/// boundary (see `docs/ai/30_DESIGN_RULES.md`). Schema-aware validation via the
+/// resolver and type checker needs an input schema the inspector does not hold,
+/// so it is intentionally left to a separate follow-up.
 use cxl::parser::Parser;
 
 /// Result of validating a CXL expression, suitable for rendering.
@@ -32,11 +34,11 @@ pub enum DiagSeverity {
     Error,
 }
 
-/// Parse a CXL expression and return UI-friendly validation diagnostics.
+/// Parse a CXL block and return UI-friendly validation diagnostics.
 ///
-/// Called synchronously on every keystroke in a CXL input field. The Pratt
-/// parser is fast enough (sub-millisecond for <200-char expressions) that
-/// no debounce is needed.
+/// Runs during inspector view-model rebuild (after a scoped-YAML edit settles),
+/// once per node render. The Pratt parser is fast enough (sub-millisecond for
+/// typical expressions) that no debounce is needed.
 pub fn validate_expr(source: &str) -> CxlValidation {
     if source.trim().is_empty() {
         return CxlValidation {
