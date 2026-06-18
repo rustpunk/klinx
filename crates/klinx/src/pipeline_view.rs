@@ -3698,6 +3698,80 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
     }
 }
 
+/// A composition body's own lineage view plus the port↔slot maps the Inspector's
+/// scope-aware lineage trace (#155) needs to descend into and resurface from the
+/// body.
+///
+/// The `view` is exactly what [`derive_body_view`] produces — the body's mini-DAG
+/// in the body's own index space, where a stage's SLOT is its position in
+/// `body.topo_order` (the loop in `derive_body_view` pushes stages in that order,
+/// so slot == topo position). The two maps translate the body's declared ports to
+/// that slot space:
+///
+/// - `input_port_to_slot`: input-port name → the body slot of the node that
+///   consumes the port (from [`BoundBody::port_name_to_node_idx`]). Tracing
+///   UPSTREAM, when the in-body BFS reaches this slot it has hit the body boundary
+///   and resurfaces to the parent scope; tracing DOWNSTREAM it is the descent
+///   entry point.
+/// - `output_port_to_slot`: output-port name → the body slot of the terminal node
+///   the port surfaces (from [`BoundBody::output_port_to_node_idx`]). The mirror
+///   of the above: the UPSTREAM descent entry / DOWNSTREAM resurface boundary.
+///
+/// A port whose NodeIndex is not present in `body.topo_order` (a malformed body)
+/// is omitted from the map rather than panicking, so the trace degrades to a leaf
+/// at that crossing instead of crashing the Inspector.
+pub struct BodyScope {
+    pub view: PipelineView,
+    pub input_port_to_slot: std::collections::HashMap<String, usize>,
+    pub output_port_to_slot: std::collections::HashMap<String, usize>,
+}
+
+/// Derive a composition body's [`BodyScope`] — its [`derive_body_view`] lineage view
+/// plus the port→slot maps #155's scope-aware trace needs.
+///
+/// Leaves [`derive_body_view`]'s signature intact: this is an additive wrapper that
+/// recomputes the NodeIndex→slot relation (slot == position in `body.topo_order`,
+/// matching how `derive_body_view` assigns slots) and projects the body's
+/// port→NodeIndex maps through it.
+pub fn derive_body_scope(body: &clinker_plan::plan::composition_body::BoundBody) -> BodyScope {
+    use petgraph::graph::NodeIndex;
+    use std::collections::HashMap;
+
+    let view = derive_body_view(body);
+
+    // `derive_body_view` pushes one stage per `body.topo_order` entry, in that order,
+    // so the slot of a NodeIndex is its position in `topo_order`. Recompute that map
+    // here (rather than threading it out of `derive_body_view`, whose signature must
+    // stay intact).
+    let idx_to_slot: HashMap<NodeIndex, usize> = body
+        .topo_order
+        .iter()
+        .enumerate()
+        .map(|(slot, &idx)| (idx, slot))
+        .collect();
+
+    let project = |ports: &mut HashMap<String, usize>, port: &str, idx: NodeIndex| {
+        if let Some(&slot) = idx_to_slot.get(&idx) {
+            ports.insert(port.to_string(), slot);
+        }
+    };
+
+    let mut input_port_to_slot = HashMap::new();
+    for (port, &idx) in &body.port_name_to_node_idx {
+        project(&mut input_port_to_slot, port, idx);
+    }
+    let mut output_port_to_slot = HashMap::new();
+    for (port, &idx) in &body.output_port_to_node_idx {
+        project(&mut output_port_to_slot, port, idx);
+    }
+
+    BodyScope {
+        view,
+        input_port_to_slot,
+        output_port_to_slot,
+    }
+}
+
 fn body_row_fields(row: &cxl::typecheck::Row) -> Vec<FieldRow> {
     row.fields()
         .map(|(field, ty)| FieldRow {
@@ -4903,6 +4977,34 @@ nodes:
                 .all(|edge| edge.from_node != first_idx && edge.to_node != first_idx),
             "missing row data should suppress field edges for that node: {:?}",
             view.field_edges
+        );
+    }
+
+    /// #155 recovery contract: `derive_body_scope` projects the body's port→NodeIndex
+    /// maps into the `derive_body_view` slot space (slot == topo position). The engine
+    /// seeds each input port as a dedicated body Source node, so the fixture body view
+    /// is `src → first → second`: `port_name_to_node_idx["src"]` is the body `src`
+    /// node (slot 0) and `output_port_to_node_idx["result"]` is `second`. These are the
+    /// boundary slots #155's descent enters at / resurfaces from.
+    #[test]
+    fn body_scope_maps_ports_to_view_slots() {
+        let body = compiled_body_fixture();
+        let scope = derive_body_scope(&body);
+
+        let src_idx = stage_idx(&scope.view, "src");
+        let second_idx = stage_idx(&scope.view, "second");
+
+        assert_eq!(
+            scope.input_port_to_slot.get("src").copied(),
+            Some(src_idx),
+            "input port `src` seeds the body `src` source node: {:?}",
+            scope.input_port_to_slot,
+        );
+        assert_eq!(
+            scope.output_port_to_slot.get("result").copied(),
+            Some(second_idx),
+            "output port `result` is surfaced by body node `second`: {:?}",
+            scope.output_port_to_slot,
         );
     }
 

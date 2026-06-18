@@ -39,13 +39,19 @@ pub fn SelectedInspector() -> Element {
         .map(|warning| format!("{warning:?}"))
         .collect::<Vec<_>>();
     let channel_mode = *state.channel_view_mode.read();
-    let compiled_plan_available = state.compiled_plan.read().is_some();
+    // Hold the compiled-plan read guard across the build (#155), mirroring the
+    // pipeline guard: the lineage trace's `BodyScopeResolver` borrows the plan to
+    // descend into composition bodies. `compiled_plan_available` (the bare bool the
+    // node inspector reads) is derived from the same guard.
+    let compiled_plan_guard = state.compiled_plan.read();
+    let compiled_plan_available = compiled_plan_guard.is_some();
     let pipeline_guard = state.pipeline.read();
     let model = build_selected_inspector(
         selection,
         InspectorBuildContext {
             view: &view,
             config: pipeline_guard.as_ref(),
+            plan: compiled_plan_guard.as_deref(),
             channel_mode,
             compiled_plan_available,
             visible_errors: &visible_errors,
@@ -53,6 +59,7 @@ pub fn SelectedInspector() -> Element {
         },
     );
     drop(pipeline_guard);
+    drop(compiled_plan_guard);
 
     let stage_id = model_stage_id(&model);
     let drawer_open = (active_drawer)() != ActiveDrawer::None;
@@ -849,6 +856,7 @@ mod tests {
                 edge_kind_attr: "derive",
                 precision: Precision::Exact,
                 hop,
+                boundary: None,
             },
             cxl_mentions: Vec::new(),
             children,
