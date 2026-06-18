@@ -114,18 +114,33 @@ const WIDE_SCHEMA_FIELD_LIMIT: usize = FIELD_ROW_CAP;
 const AUTO_COMPACT_ZOOM: f32 = 0.55;
 const AUTO_PREVIEW_ZOOM: f32 = 0.95;
 /// Default per-direction hop cap for a SELECTED field's transitive lineage reveal
-/// (#123). Bounds the closure walk so a runaway lineage on a large graph stays
-/// readable, while sitting comfortably ABOVE the deepest closure in any real
-/// pipeline — so Highlight mode is byte-for-byte unchanged for every bundled
-/// example (the deepest is 7 hops; this leaves generous headroom). Only a
-/// pathologically deep closure is clipped, and then the "expand further"
-/// affordance raises it by [`HOP_CAP_STEP`]; a cap at/beyond the lineage depth
-/// equals the uncapped walk. Hover reveals are already 1-hop and are never
-/// capped. The `default_hop_cap_does_not_clip_example_pipelines` guard locks the
-/// no-regression contract against the bundled examples.
+/// in FILTER mode (#123). Bounds the closure walk so a runaway lineage on a large
+/// graph stays readable, while sitting comfortably ABOVE the deepest closure in any
+/// bundled example (deepest 7 hops; generous headroom) so the default Filter reveal
+/// is unclipped on real examples. Only a pathologically deep closure is clipped, and
+/// then the "expand further" affordance raises it by [`HOP_CAP_STEP`]; a cap at/beyond
+/// the lineage depth equals the uncapped walk. Highlight mode is never capped (see
+/// [`reveal_closure_cap`]); hover reveals are already 1-hop and never capped. The
+/// `default_hop_cap_does_not_clip_example_pipelines` guard locks this against the
+/// bundled examples.
 const DEFAULT_HOP_CAP: usize = 16;
 /// How far each "expand further" click raises the active hop cap (#123).
 const HOP_CAP_STEP: usize = 8;
+
+/// The hop cap to apply to a selected/pinned reveal's closure for `mode` (#123).
+///
+/// Filter mode HIDES off-path cards, so a bounded closure is the readability win
+/// (and the EXPAND+ affordance un-clips it) → `Some(hop_cap)`. Highlight mode only
+/// DIMS (never hides), so it keeps the FULL, uncapped closure → `None`, preserving
+/// the pre-#123 selected-field reveal at ANY lineage depth (the "#123: Highlight
+/// preserves current selected-field behavior" acceptance criterion, honored for
+/// every pipeline, not just ones shallower than the cap).
+fn reveal_closure_cap(mode: LineageRevealMode, hop_cap: usize) -> Option<usize> {
+    match mode {
+        LineageRevealMode::Filter => Some(hop_cap),
+        LineageRevealMode::Highlight => None,
+    }
+}
 #[derive(Clone, Debug, Default, PartialEq)]
 struct FieldDisplayState {
     visible_limit: usize,
@@ -712,6 +727,7 @@ struct DragState {
 #[component]
 pub fn CanvasPanel() -> Element {
     let state = use_app_state();
+    let tab_mgr = use_context::<crate::state::TabManagerState>();
     let mut field_display_states = use_signal(HashMap::<String, FieldDisplayState>::new);
     let mut global_field_query = use_signal(String::new);
     let mut global_node_display_mode = use_signal(|| GlobalNodeDisplayMode::Auto);
@@ -743,6 +759,8 @@ pub fn CanvasPanel() -> Element {
     // dim/hide branch below and the toolbar toggle.
     let reveal_mode = *state.lineage_reveal_mode.read();
     let active_hop_cap = *hop_cap.read();
+    let is_filter_mode = reveal_mode == LineageRevealMode::Filter;
+    let closure_cap = reveal_closure_cap(reveal_mode, active_hop_cap);
     let pipeline_view = current_pipeline_view(state);
     let pipeline_view =
         apply_canvas_layout(pipeline_view, CanvasLayoutEngine::PortAwareSugiyama).view;
@@ -799,8 +817,7 @@ pub fn CanvasPanel() -> Element {
     let hover_target = hovered_field.0.read().clone();
     let (closure, role_closure): (HashSet<usize>, HashSet<usize>) = match &pinned_selection {
         Some(LineageTarget::Field(node, field)) => {
-            let field_closure =
-                field_lineage_full_capped(&field_edges, *node, field, Some(active_hop_cap));
+            let field_closure = field_lineage_full_capped(&field_edges, *node, field, closure_cap);
             let mut fields_by_node = field_endpoint_names_by_node(&field_edges, &field_closure);
             fields_by_node
                 .entry(*node)
@@ -820,7 +837,7 @@ pub fn CanvasPanel() -> Element {
                     &field_edges,
                     edge.from_node,
                     &edge.from_field,
-                    Some(active_hop_cap),
+                    closure_cap,
                 ));
             }
             (field_closure, role_closure)
@@ -1053,6 +1070,14 @@ pub fn CanvasPanel() -> Element {
         let pipeline_present = state.pipeline.read().is_some();
         let plan_present = state.compiled_plan.read().is_some();
         let partial_present = state.partial_pipeline.read().is_some();
+        // The active tab id distinguishes two DIFFERENT loaded pipelines that share
+        // the same fingerprint otherwise (both top-level, no drill, same channel
+        // mode) — without it, switching between two pipeline tabs leaves the present
+        // booleans unchanged and the effect never re-runs, carrying a stale hover /
+        // pin / hop cap onto a different graph (#123 acceptance: no stale state
+        // pointing at another graph). Tab identity lives on `TabManagerState`, not
+        // `AppState`.
+        let active_tab = *tab_mgr.active_tab_id.read();
         // Bind the fingerprint so the reads above are retained as subscriptions.
         let _ = (
             &comp_ids,
@@ -1061,6 +1086,7 @@ pub fn CanvasPanel() -> Element {
             pipeline_present,
             plan_present,
             partial_present,
+            active_tab,
         );
 
         let mut hovered = hovered_field;
@@ -1180,7 +1206,6 @@ pub fn CanvasPanel() -> Element {
             .collect::<HashMap<_, _>>();
     // Any field hovered with a non-empty closure dims the rest of the canvas.
     let hover_active = !active_field_edges.is_empty() || !active_role_edges.is_empty();
-    let is_filter_mode = reveal_mode == LineageRevealMode::Filter;
 
     // The node anchoring the active reveal — a pinned/selected column wins over a
     // hover, mirroring the closure dispatch above. Used as the Filter keep-set's
@@ -1216,20 +1241,35 @@ pub fn CanvasPanel() -> Element {
     };
 
     // Whether raising the hop cap would reveal MORE of the SELECTED column's
-    // lineage (#123). True only when a column is pinned/selected (the capped click
-    // reveal) AND its uncapped closure strictly exceeds the capped one — i.e. the
-    // cap is currently clipping the lineage. The "expand further" affordance shows
-    // only then; on a fully-revealed closure there is nothing more to expand to.
-    // Hover reveals are 1-hop and never capped, so this stays false for them.
-    let can_expand_lineage: bool = match &pinned_selection {
-        Some(LineageTarget::Field(node, field)) => {
-            let capped =
-                field_lineage_full_capped(&field_edges, *node, field, Some(active_hop_cap));
-            let uncapped = field_lineage_full(&field_edges, *node, field);
-            uncapped.len() > capped.len()
-        }
-        _ => false,
-    };
+    // lineage (#123). Only meaningful in Filter mode — Highlight keeps the full
+    // uncapped closure, so there is never anything to expand there. True when a
+    // column OR role port is pinned/selected and its uncapped closure strictly
+    // exceeds the (capped) `closure` already computed above — i.e. the cap is
+    // currently clipping. Reuses `closure`/`role_closure` rather than recomputing
+    // the capped walk; the uncapped walk runs only in this Filter+pinned case, so
+    // Highlight and idle hovers pay nothing. Hover reveals are 1-hop, never capped.
+    let can_expand_lineage: bool = is_filter_mode
+        && match &pinned_selection {
+            Some(LineageTarget::Field(node, field)) => {
+                field_lineage_full(&field_edges, *node, field).len() > closure.len()
+            }
+            Some(LineageTarget::RolePort(_, _)) => {
+                // The role-port closure is the union of its source fields' lineage;
+                // compare the uncapped union against the capped `closure`.
+                let mut uncapped: HashSet<usize> = HashSet::new();
+                for role_index in &role_closure {
+                    if let Some(edge) = role_edges.get(*role_index) {
+                        uncapped.extend(field_lineage_full(
+                            &field_edges,
+                            edge.from_node,
+                            &edge.from_field,
+                        ));
+                    }
+                }
+                uncapped.len() > closure.len()
+            }
+            None => false,
+        };
 
     // Bounding box of the current layout (None when empty). `LayoutBounds` is
     // Copy, so each fit handler captures it without cloning the stage list.
@@ -1393,8 +1433,7 @@ pub fn CanvasPanel() -> Element {
         })
         .collect();
 
-    // Channel view mode toggle state
-    let tab_mgr = use_context::<crate::state::TabManagerState>();
+    // Channel view mode toggle state (`tab_mgr` captured once at the top).
     let has_channel = tab_mgr
         .channel_state
         .read()
@@ -2228,14 +2267,34 @@ mod tests {
         );
     }
 
-    /// #123 no-regression guard: the [`DEFAULT_HOP_CAP`] must NOT clip the lineage
-    /// of any field in ANY bundled example pipeline — so the capped reveal a user
-    /// gets by default equals the uncapped (pre-#123) reveal, byte-for-byte, for
-    /// every real pipeline. The cap exists only to bound pathologically deep
-    /// closures; a regression would silently truncate a deep column's lineage in
-    /// BOTH Highlight and Filter modes. If a future example introduces a deeper
-    /// closure, this fails loudly and the constant (or a degree-based strategy)
-    /// must be revisited — never silently truncating a real reveal.
+    /// #123: the central reveal-cap invariant — Highlight is NEVER capped (full
+    /// closure at any depth, preserving the pre-#123 selected-field behavior), while
+    /// Filter caps at the active hop cap (bounded + EXPAND+ recoverable). This is the
+    /// fix for the Highlight-clips-deep-pipelines regression; a flip of the match arm
+    /// would silently re-introduce it.
+    #[test]
+    fn highlight_reveal_is_never_capped_filter_is() {
+        assert_eq!(
+            super::reveal_closure_cap(crate::state::LineageRevealMode::Highlight, 16),
+            None,
+            "Highlight mode must use the full uncapped closure at any depth"
+        );
+        assert_eq!(
+            super::reveal_closure_cap(crate::state::LineageRevealMode::Filter, 16),
+            Some(16),
+            "Filter mode bounds the closure at the active hop cap"
+        );
+    }
+
+    /// #123 guard: the [`DEFAULT_HOP_CAP`] must NOT clip the lineage of any field in
+    /// any bundled example pipeline. Highlight mode is now unconditionally UNCAPPED
+    /// (`closure_cap = None`), so it preserves the pre-#123 reveal for every pipeline
+    /// regardless of depth; the cap applies only in Filter mode. This guard keeps the
+    /// FILTER-mode default honest on the bundled examples: a default-cap Filter reveal
+    /// equals the full closure (so no example is silently hidden, and the EXPAND+
+    /// affordance does not spuriously appear on a shallow graph). If a future example
+    /// introduces a deeper closure, this fails loudly so the constant (or a
+    /// degree-based strategy) is revisited rather than silently clipping a Filter view.
     #[test]
     fn default_hop_cap_does_not_clip_example_pipelines() {
         use crate::pipeline_view::{field_lineage_full, field_lineage_full_capped};
