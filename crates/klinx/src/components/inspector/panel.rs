@@ -13,7 +13,7 @@ use super::model::{
     CxlMentionView, FieldInspectorModel, InspectorBuildContext, InspectorDiagnostic, InspectorFact,
     InspectorRow, InspectorSection, InspectorSelection, MissingInspectorModel, NodeInspectorModel,
     RoleUsageView, SelectedInspectorModel, StatusChip, StatusTone, TraceNode,
-    build_selected_inspector, count_trace_nodes, prune_indirect_trace,
+    build_selected_inspector, count_trace_nodes,
 };
 use super::scoped_yaml::ScopedYamlEditor;
 
@@ -563,35 +563,46 @@ fn LineageSection(field: FieldInspectorModel) -> Element {
     let mut expanded = use_signal(HashSet::<TraceKey>::new);
     let mut seeded_for = use_signal(|| None::<SelectedField>);
 
+    // The toggle selects between the two precomputed trees the model built (#153):
+    // the full tree (INDIRECT included) and the direct-only tree. Selecting — rather
+    // than pruning the full tree in the panel — keeps a dual-role column (carried AND
+    // an influence) visible as a DIRECT hop when the toggle is off; a prune would drop
+    // it, since the full tree's worst-precision dedup tags that hop INDIRECT.
     let upstream = use_memo(use_reactive!(|field| {
         if (include_indirect)() {
             field.upstream.clone()
         } else {
-            prune_indirect_trace(&field.upstream)
+            field.upstream_direct.clone()
         }
     }));
     let downstream = use_memo(use_reactive!(|field| {
         if (include_indirect)() {
             field.downstream.clone()
         } else {
-            prune_indirect_trace(&field.downstream)
+            field.downstream_direct.clone()
         }
     }));
 
     {
+        // Seed the default-open set from the FULL trees (toggle-independent), so the
+        // hop-1 rows are open by default regardless of the toggle's state when the
+        // field was selected — re-enabling INDIRECT never leaves a freshly-revealed
+        // hop-1 influence row collapsed. Keys for currently-pruned nodes are inert.
         let selection = field.selection.clone();
-        use_effect(use_reactive!(|selection| {
+        let seed = default_expanded(&field.upstream, &field.downstream);
+        use_effect(use_reactive!(|(selection, seed)| {
             if seeded_for.peek().as_ref() != Some(&selection) {
-                let up = upstream.peek();
-                let down = downstream.peek();
-                expanded.set(default_expanded(&up, &down));
+                expanded.set(seed.clone());
                 seeded_for.set(Some(selection));
             }
         }));
     }
 
-    let upstream_count = count_trace_nodes(&upstream.read());
-    let downstream_count = count_trace_nodes(&downstream.read());
+    // The LINEAGE summary counts the field's FULL lineage (toggle-independent), so it
+    // agrees with the `lineage` context fact and presents one source of truth; the
+    // INDIRECT toggle filters which hops the tree below DISPLAYS, not the count.
+    let upstream_count = count_trace_nodes(&field.upstream);
+    let downstream_count = count_trace_nodes(&field.downstream);
     let indirect_on = include_indirect();
 
     rsx! {
@@ -822,11 +833,10 @@ fn DrawerUnavailable(label: &'static str) -> Element {
 mod tests {
     use super::super::model::TraceEndpointView;
     use super::*;
-    use crate::pipeline_view::EdgeNature;
 
     /// A test `TraceNode` at `(stage, field, hop)` with the given children. Edge
     /// kind/precision are fixed (DIRECT derive, Exact) since these tests exercise the
-    /// flatten / expand-key / prune logic, not per-hop attribution.
+    /// flatten / expand-key logic, not per-hop attribution.
     fn node(stage: &str, field: &str, hop: usize, children: Vec<TraceNode>) -> TraceNode {
         TraceNode {
             endpoint: TraceEndpointView {
@@ -837,24 +847,12 @@ mod tests {
                 field_name: field.to_string(),
                 edge_kind_label: "derive",
                 edge_kind_attr: "derive",
-                edge_nature: EdgeNature::Direct,
                 precision: Precision::Exact,
                 hop,
             },
             cxl_mentions: Vec::new(),
             children,
         }
-    }
-
-    /// An INDIRECT-influence test node (`Filter`), so the prune path has something
-    /// to remove.
-    fn indirect_node(stage: &str, field: &str, hop: usize, children: Vec<TraceNode>) -> TraceNode {
-        let mut n = node(stage, field, hop, children);
-        n.endpoint.edge_kind_label = "filter";
-        n.endpoint.edge_kind_attr = "filter";
-        n.endpoint.edge_nature = EdgeNature::Indirect;
-        n.endpoint.precision = Precision::Approximate;
-        n
     }
 
     /// #153: the expand key is the hop's STABLE identity `(stage_id, field_name,
@@ -916,35 +914,6 @@ mod tests {
         assert!(
             !rows.iter().any(|r| r.node.endpoint.stage_id == "srcB"),
             "a collapsed branch withholds its descendants"
-        );
-    }
-
-    /// #153: pruning the built tree (the toggle-OFF path) drops an INDIRECT hop AND
-    /// the subtree reachable only through it, but keeps a DIRECT sibling and its
-    /// descendants.
-    #[test]
-    fn prune_removes_indirect_rooted_subtrees_only() {
-        let forest = vec![
-            node("carry", "k", 1, vec![node("origin", "k", 2, vec![])]),
-            indirect_node("filtered", "f", 1, vec![node("buried", "f0", 2, vec![])]),
-        ];
-        let pruned = prune_indirect_trace(&forest);
-        let roots: Vec<_> = pruned
-            .iter()
-            .map(|r| r.endpoint.stage_id.as_str())
-            .collect();
-        assert_eq!(roots, vec!["carry"], "the INDIRECT root is removed");
-        assert_eq!(
-            pruned[0].children.len(),
-            1,
-            "the DIRECT branch keeps its descendants"
-        );
-        // The node buried under the INDIRECT hop is gone with it.
-        let mut all = Vec::new();
-        flatten_trace(&pruned, &default_expanded(&pruned, &[]), 0, &mut all);
-        assert!(
-            !all.iter().any(|r| r.node.endpoint.stage_id == "buried"),
-            "a subtree reachable only through an INDIRECT hop is pruned with it"
         );
     }
 

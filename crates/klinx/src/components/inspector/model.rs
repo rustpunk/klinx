@@ -71,6 +71,17 @@ pub struct FieldInspectorModel {
     /// Downstream lineage as a hop-by-hop tree, mirroring [`Self::upstream`] in the
     /// impact direction (#153).
     pub downstream: Vec<TraceNode>,
+    /// The same upstream lineage as [`Self::upstream`], but built with INDIRECT
+    /// influence edges excluded (#153) — the tree behind the Inspector's INDIRECT
+    /// toggle in its "off" state. Built by the same `trace_tree` walk with
+    /// `include_indirect = false`, NOT by pruning [`Self::upstream`]: an endpoint
+    /// reached by BOTH a DIRECT carry and an INDIRECT influence (e.g. a Combine join
+    /// key) survives here via its carry edge, correctly tagged DIRECT, whereas
+    /// pruning the worst-precision-deduped full tree would drop it. Precomputed so the
+    /// panel toggle selects between two ready trees without holding pipeline state.
+    pub upstream_direct: Vec<TraceNode>,
+    /// Downstream counterpart of [`Self::upstream_direct`] (#153).
+    pub downstream_direct: Vec<TraceNode>,
     pub role_usages: Vec<RoleUsageView>,
     /// The field's OWN lineage precision tier (#148) — the producer-side value from
     /// `FieldRow::lineage_precision`, NOT a transitive trace fold — surfaced as the
@@ -212,13 +223,6 @@ pub struct TraceEndpointView {
     pub field_name: String,
     pub edge_kind_label: &'static str,
     pub edge_kind_attr: &'static str,
-    /// Whether the edge taken to reach this hop is a DIRECT value carry/derive or an
-    /// INDIRECT influence (#153). Derived from the edge kind's
-    /// [`FieldEdgeKind::nature`](crate::pipeline_view::FieldEdgeKind::nature) at
-    /// build time so the Inspector's INDIRECT include/exclude toggle can prune
-    /// influence-rooted subtrees from the BUILT tree without re-deriving nature from
-    /// the label slug.
-    pub edge_nature: EdgeNature,
     /// The precision tier of the lineage edge taken to reach this hop (#148),
     /// rendered as the per-hop precision badge alongside `edge_kind_label`. Carried
     /// as the [`Precision`] enum (not a pre-baked slug string) so the panel derives
@@ -273,25 +277,6 @@ impl TraceNode {
 /// Total node count across a forest of trace trees (#153).
 pub fn count_trace_nodes(nodes: &[TraceNode]) -> usize {
     nodes.iter().map(TraceNode::count).sum()
-}
-
-/// Prune every subtree rooted at an INDIRECT-influence hop from a built trace
-/// forest (#153), the panel-side half of the Inspector's INDIRECT include/exclude
-/// toggle. A node reached by an influence edge is dropped together with its whole
-/// subtree (anything reachable only THROUGH that influence vanishes with it),
-/// mirroring how `trace_tree(.., include_indirect = false)` would never have walked
-/// past it. Filtering the built tree (rather than rebuilding) keeps the model free
-/// of transient UI state.
-pub fn prune_indirect_trace(nodes: &[TraceNode]) -> Vec<TraceNode> {
-    nodes
-        .iter()
-        .filter(|node| node.endpoint.edge_nature != EdgeNature::Indirect)
-        .map(|node| TraceNode {
-            endpoint: node.endpoint.clone(),
-            cxl_mentions: node.cxl_mentions.clone(),
-            children: prune_indirect_trace(&node.children),
-        })
-        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1036,9 +1021,12 @@ fn build_field_detail(
         .iter()
         .find(|field| field.name == selection.field_name)?;
 
-    // INDIRECT influence hops are always BUILT into the model (#153); the
-    // Inspector's include/exclude toggle prunes them in the panel from the built
-    // tree, so the model stays free of transient UI state.
+    // The full trees include INDIRECT influence hops; the direct-only trees exclude
+    // them (#153). Both pairs are built by the same `trace_tree` walk — the
+    // direct-only pair with `include_indirect = false`, which (unlike a post-hoc
+    // prune of the full tree) keeps an endpoint reached by both a DIRECT carry and an
+    // INDIRECT influence, tagged by its surviving DIRECT edge. The Inspector toggle
+    // selects between the two precomputed pairs, so the model holds no UI state.
     let mut upstream = trace_tree(
         view,
         stage_index,
@@ -1053,15 +1041,32 @@ fn build_field_detail(
         TraceDirection::Downstream,
         true,
     );
+    let mut upstream_direct = trace_tree(
+        view,
+        stage_index,
+        &selection.field_name,
+        TraceDirection::Upstream,
+        false,
+    );
+    let mut downstream_direct = trace_tree(
+        view,
+        stage_index,
+        &selection.field_name,
+        TraceDirection::Downstream,
+        false,
+    );
     // Attach per-hop CXL attribution (#153) where the hop's stage carries CXL
-    // analysis. Walks the assembled trees with `config` in scope, caching each
-    // stage's `generate_stage_doc` so a stage parsed once is reused across all its
-    // hops. A stage with no CXL (Route/Aggregate/Merge) contributes nothing — the
-    // edge kind + precision badge is the attribution there.
+    // analysis. Walks the assembled trees with `config` in scope, reusing one
+    // `generate_stage_doc` cache across all four trees so a stage parsed once is
+    // reused for every hop and both toggle states. A stage with no CXL
+    // (Route/Aggregate/Merge) contributes nothing — the edge kind + precision badge
+    // is the attribution there.
     if let Some(config) = config {
         let mut cache = StageDocCache::new(config);
         enrich_trace_cxl(&mut upstream, &mut cache);
         enrich_trace_cxl(&mut downstream, &mut cache);
+        enrich_trace_cxl(&mut upstream_direct, &mut cache);
+        enrich_trace_cxl(&mut downstream_direct, &mut cache);
     }
     let role_usages = role_usages(view, stage_index, &selection.field_name);
     let mut badges = Vec::new();
@@ -1139,6 +1144,8 @@ fn build_field_detail(
         cxl_mentions,
         upstream,
         downstream,
+        upstream_direct,
+        downstream_direct,
         role_usages,
         lineage_precision,
         precision_reason,
@@ -1325,14 +1332,19 @@ fn trace_tree(
         // Emit one hop per newly-seen endpoint, sorted for deterministic sibling
         // order (the HashMap iteration order is otherwise nondeterministic). The
         // sort key mirrors the former flat list's tie-break — stage label then
-        // field name — so siblings keep a stable, readable order.
+        // field name — and finally the node index, which is unique, so two stages
+        // that share a label AND field still order deterministically (a plain
+        // label/field key leaves them equal and at the mercy of HashMap order).
         let mut endpoints: Vec<(TraceEndpointKey<'_>, TraceHopEdge)> =
             best_to_endpoint.into_iter().collect();
         endpoints.sort_by(|a, b| {
             let label = |key: &TraceEndpointKey<'_>| {
                 view.stages.get(key.0).map(|stage| stage.label.as_str())
             };
-            label(&a.0).cmp(&label(&b.0)).then_with(|| a.0.1.cmp(b.0.1))
+            label(&a.0)
+                .cmp(&label(&b.0))
+                .then_with(|| a.0.1.cmp(b.0.1))
+                .then_with(|| a.0.0.cmp(&b.0.0))
         });
         for ((next_node, next_field), (edge_kind, edge_precision)) in endpoints {
             let endpoint = (next_node, next_field.to_string());
@@ -1420,7 +1432,6 @@ fn trace_endpoint(
         field_name,
         edge_kind_label: edge_kind_label(edge_kind),
         edge_kind_attr: edge_kind_attr(edge_kind),
-        edge_nature: edge_kind.nature(),
         precision: edge_precision,
         hop,
     }
@@ -2052,7 +2063,6 @@ nodes:
             field_name: "x".to_string(),
             edge_kind_label: "derive",
             edge_kind_attr: "derive",
-            edge_nature: EdgeNature::Direct,
             precision: Precision::Exact,
             hop: 1,
         };
@@ -2540,9 +2550,9 @@ nodes:
         );
     }
 
-    /// #153: the Inspector's INDIRECT include/exclude toggle. With the toggle ON
-    /// (default), an INDIRECT influence hop is present in the built tree; pruning it
-    /// (`prune_indirect_trace`, the panel's toggle-OFF path) removes that hop AND any
+    /// #153: the Inspector's INDIRECT include/exclude toggle. The full tree
+    /// (`upstream`, toggle ON / default) carries the INDIRECT influence hop; the
+    /// direct-only tree (`upstream_direct`, toggle OFF) excludes that hop AND any
     /// subtree reachable only through it, while leaving the DIRECT value graph
     /// intact. Fixture: `src.flag --Filter--> keep.kept` (INDIRECT) coexisting with
     /// `src.kept --Passthrough--> keep.kept` (DIRECT carry).
@@ -2607,20 +2617,148 @@ nodes:
             "the DIRECT carry hop is always present, got {kinds:?}"
         );
 
-        // Toggle OFF: the Filter hop (and anything reached only through it) is pruned;
-        // the DIRECT carry survives.
-        let pruned = prune_indirect_trace(&detail.upstream);
-        let pruned_kinds: Vec<_> = pruned
+        // Toggle OFF (the direct-only tree): the Filter hop (and anything reached
+        // only through it) is excluded; the DIRECT carry survives.
+        let direct_kinds: Vec<_> = detail
+            .upstream_direct
             .iter()
             .map(|node| node.endpoint.edge_kind_attr)
             .collect();
         assert!(
-            !pruned_kinds.contains(&"filter"),
-            "the INDIRECT Filter hop must be excluded when the toggle is off, got {pruned_kinds:?}"
+            !direct_kinds.contains(&"filter"),
+            "the INDIRECT Filter hop must be excluded when the toggle is off, got {direct_kinds:?}"
         );
         assert!(
-            pruned_kinds.contains(&"passthrough"),
-            "the DIRECT carry hop must survive the prune, got {pruned_kinds:?}"
+            direct_kinds.contains(&"passthrough"),
+            "the DIRECT carry hop must survive in the direct-only tree, got {direct_kinds:?}"
+        );
+    }
+
+    /// #153 regression: two distinct sibling hops that share a stage label AND a
+    /// field name must still order deterministically. The per-level sort tie-breaks
+    /// on the unique node index after (label, field), so HashMap iteration order
+    /// cannot leak through and make the rendered sibling order (and the
+    /// default-expanded set) flip run-to-run.
+    #[test]
+    fn same_label_same_field_siblings_order_deterministically() {
+        let mut sink = stage(
+            "sink",
+            StageKind::Merge,
+            vec![FieldRow {
+                name: "v".to_string(),
+                kind: FieldKind::PassThrough,
+                ..Default::default()
+            }],
+        );
+        sink.label = "clean".to_string();
+        let mut p0 = stage(
+            "p0",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "x".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        // Two producers sharing BOTH the display label and the field name; only their
+        // (unique) node index distinguishes them.
+        p0.label = "clean".to_string();
+        let mut p1 = stage(
+            "p1",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "x".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        p1.label = "clean".to_string();
+        let view = PipelineView {
+            stages: vec![sink, p0, p1],
+            field_edges: vec![
+                FieldEdge::carry(1, "x".into(), 0, "v".into(), FieldEdgeKind::Passthrough),
+                FieldEdge::carry(2, "x".into(), 0, "v".into(), FieldEdgeKind::Passthrough),
+            ],
+            ..Default::default()
+        };
+
+        let detail = build_field_detail(&view, None, &SelectedField::new("sink", "v"))
+            .expect("field exists");
+        let order: Vec<_> = detail
+            .upstream
+            .iter()
+            .map(|node| node.endpoint.stage_id.as_str())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["p0", "p1"],
+            "same-label/same-field siblings order by node index, not HashMap order"
+        );
+    }
+
+    /// #153 regression: an endpoint reached by BOTH a DIRECT carry and an INDIRECT
+    /// influence (a dual-role column, e.g. a Combine join key that is also carried as
+    /// a value) must remain visible — correctly tagged DIRECT — when the INDIRECT
+    /// toggle is off. The full tree's worst-precision dedup tags the merged hop
+    /// INDIRECT (Approximate masks the Exact carry on the badge, per #148); a naive
+    /// prune of that built tree would then drop the column entirely. Building the
+    /// direct-only tree with `include_indirect = false` instead walks the surviving
+    /// carry edge, so the value hop is kept and re-tagged DIRECT.
+    #[test]
+    fn dual_role_endpoint_survives_direct_only_tree_as_direct() {
+        let source = stage(
+            "src",
+            StageKind::Source,
+            vec![FieldRow {
+                name: "k".to_string(),
+                kind: FieldKind::Declared,
+                ..Default::default()
+            }],
+        );
+        let out = stage(
+            "out",
+            StageKind::Combine,
+            vec![FieldRow {
+                name: "k".to_string(),
+                kind: FieldKind::PassThrough,
+                ..Default::default()
+            }],
+        );
+        // The SAME endpoint `src.k -> out.k` carries a value (Passthrough, DIRECT)
+        // and drives the join (JoinKey, INDIRECT).
+        let view = PipelineView {
+            stages: vec![source, out],
+            field_edges: vec![
+                FieldEdge::influence(0, "k".into(), 1, "k".into(), FieldEdgeKind::JoinKey),
+                FieldEdge::carry(0, "k".into(), 1, "k".into(), FieldEdgeKind::Passthrough),
+            ],
+            ..Default::default()
+        };
+
+        let detail =
+            build_field_detail(&view, None, &SelectedField::new("out", "k")).expect("field exists");
+
+        // Full tree: the merged hop is tagged with the worst (INDIRECT JoinKey) edge.
+        assert_eq!(
+            detail
+                .upstream
+                .iter()
+                .map(|node| node.endpoint.edge_kind_attr)
+                .collect::<Vec<_>>(),
+            vec!["join-key"],
+            "the worst-precision dedup tags the dual-role hop INDIRECT in the full tree"
+        );
+
+        // Direct-only tree: the value hop survives via its carry edge, tagged DIRECT —
+        // it is NOT dropped just because an influence edge also reaches it.
+        assert_eq!(
+            detail
+                .upstream_direct
+                .iter()
+                .map(|node| node.endpoint.edge_kind_attr)
+                .collect::<Vec<_>>(),
+            vec!["passthrough"],
+            "a dual-role column keeps its DIRECT carry hop when INDIRECT is off"
         );
     }
 
