@@ -1238,6 +1238,7 @@ fn field_edge_kind_class(kind: FieldEdgeKind) -> &'static str {
         FieldEdgeKind::GroupBy => "klinx-field-edge--groupby",
         FieldEdgeKind::JoinKey => "klinx-field-edge--joinkey",
         FieldEdgeKind::Conditional => "klinx-field-edge--conditional",
+        FieldEdgeKind::Boundary => "klinx-field-edge--boundary",
     }
 }
 
@@ -2046,6 +2047,7 @@ mod tests {
             FieldEdgeKind::GroupBy,
             FieldEdgeKind::JoinKey,
             FieldEdgeKind::Conditional,
+            FieldEdgeKind::Boundary,
         ];
         for kind in all {
             let classes = field_edge_classes(kind, Precision::Exact, false);

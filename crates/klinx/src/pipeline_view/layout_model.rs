@@ -1062,7 +1062,11 @@ fn field_edge(edge: &FieldEdge) -> LayoutEdge {
         FieldEdgeKind::Passthrough
         | FieldEdgeKind::Access
         | FieldEdgeKind::Derive
-        | FieldEdgeKind::GroupBy => LayoutEdgeKind::Field,
+        | FieldEdgeKind::GroupBy
+        // A composition `Boundary` crossing (#154) reinforces the producer→
+        // composition structural relationship already wired as a node-level
+        // connection, so it routes as an ordinary weighted field edge.
+        | FieldEdgeKind::Boundary => LayoutEdgeKind::Field,
     };
     LayoutEdge {
         from_node: edge.from_node,

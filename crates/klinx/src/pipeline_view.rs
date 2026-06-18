@@ -2389,7 +2389,7 @@ fn composition_field_lineage(
         input_aliases[n_in + bi] = node_input_aliases(&spanned.value, &name_to_idx);
     }
 
-    let (out_fields, mut field_edges, role_edges) =
+    let (mut out_fields, mut field_edges, role_edges) =
         compute_field_lineage(&slots, predecessors, &input_aliases);
 
     // Producer → output-port field edge, one per output port. The output port
@@ -2399,23 +2399,34 @@ fn composition_field_lineage(
     // (a clean 1:1 carry → passthrough), else the producer's LAST output field (a
     // rename → derive). A port with no resolved producer, or a producer with no
     // fields, contributes no edge (graceful, never a panic).
+    //
+    // These edges are appended AFTER `compute_field_lineage` already ran its own
+    // `derive_row_precision`, so the output-port rows have not yet folded in any
+    // degradation arriving along these edges (#154). The producer's representative
+    // ROW already carries its folded precision (`compute_field_lineage` ran the
+    // fold), so when that row is degraded the producer→port edge carries the same
+    // degradation, and the port row re-folds to reflect it via the `derive_row_precision`
+    // re-run below.
     for (oi, port) in sig.outputs.keys().enumerate() {
         let out_idx = n_in + n_body + oi;
         let Some(&producer) = predecessors[out_idx].first() else {
             continue;
         };
-        let producer_field = out_fields[producer]
+        let producer_row = out_fields[producer]
             .iter()
             .find(|r| r.name == *port)
-            .or_else(|| out_fields[producer].last())
-            .map(|r| r.name.clone());
-        let Some(producer_field) = producer_field else {
+            .or_else(|| out_fields[producer].last());
+        let Some(producer_row) = producer_row else {
             continue;
         };
+        let producer_field = producer_row.name.clone();
+        // A degraded producer column (Approximate/Unknown) makes its port crossing
+        // approximate; a clean producer column keeps the port edge Exact.
+        let producer_degraded = producer_row.lineage_precision != Precision::Exact;
         // A same-named port surfaces its producer column unchanged (a pure
-        // pass-through — a port reads nothing, so never an Access carry → Exact);
-        // a differently-named port is a clean rename → Exact derive.
-        let edge = if producer_field == *port {
+        // pass-through — a port reads nothing, so never an Access carry); a
+        // differently-named port is a clean rename → derive.
+        let mut edge = if producer_field == *port {
             FieldEdge::carry(
                 producer,
                 producer_field,
@@ -2426,8 +2437,21 @@ fn composition_field_lineage(
         } else {
             FieldEdge::derive(producer, producer_field, out_idx, port.to_string(), false)
         };
+        // Propagate the producer column's degradation onto the port crossing
+        // (precision is orthogonal to edge identity, so this never splits an edge).
+        if producer_degraded {
+            edge.precision = producer_row.lineage_precision;
+            edge.precision_reason = "composition output port surfaces a degraded producer column";
+        }
         field_edges.push(edge);
     }
+
+    // Re-fold output-port row precision over the appended producer→port edges so a
+    // degraded producer column degrades the port row it feeds — the fold that ran
+    // inside `compute_field_lineage` could not see these later-appended edges
+    // (#154). Re-running over the full edge set is idempotent for rows whose
+    // incident edges are unchanged, so only the output-port rows are updated.
+    derive_row_precision(&mut out_fields, &field_edges);
 
     (out_fields, field_edges, role_edges)
 }
@@ -2439,6 +2463,13 @@ fn composition_field_lineage(
 /// (the pipeline analogue of a composition input port); every other node becomes
 /// a [`LineageSlot::Node`] analyzed as a transform. `predecessors` is the
 /// node-index relation the caller already built.
+///
+/// SCOPE: this RAW (CXL-only) path materializes NO composition boundary edges
+/// (#154). Boundary crossings + synthesized composition output rows require the
+/// compiled `BoundBody` (output-port rows, body assignments), which exists only in
+/// the resolved path ([`resolved_pipeline_field_lineage`]); raw mode has no compiled
+/// plan. A Composition here is analyzed as an ordinary transform with no CXL — that
+/// is intended, not an omission.
 fn pipeline_field_lineage(
     nodes: &[Spanned<PipelineNode>],
     predecessors: &[Vec<usize>],
@@ -2551,6 +2582,51 @@ fn resolved_pipeline_field_lineage(
                 FieldEdgeKind::Passthrough
             }
         };
+
+        // Composition boundary handling (#154): a Composition node has no CXL of
+        // its own, so the engine puts no entry in `artifacts.typed` and
+        // `typed_output_row` returns None — its output columns are otherwise lost
+        // in this view and the value chain would skip straight from the upstream
+        // producer to the downstream consumer, never passing through the
+        // composition (which would block #155's descent). So we:
+        //   1. SYNTHESIZE the composition's output rows from the body's declared
+        //      output-port columns, set into `out_fields[idx]` here (before the
+        //      typed-row `continue`) so the DOWNSTREAM node — processed later in
+        //      topological order — sees them as real producer columns and draws
+        //      normal `comp.col → consumer.col` carry/derive edges automatically.
+        //      Those `comp → consumer` edges are re-tagged `Boundary` in a
+        //      post-loop pass (they ARE the OUTPUT boundary crossings).
+        //   2. Emit the INPUT boundary edges (outer producer column → synthetic
+        //      `\u{2190}in:port:col` marker on `comp`), reading the predecessors'
+        //      already-computed output rows (topological order guarantees they
+        //      exist) and the bound body.
+        if let PipelineNode::Composition { inputs, .. } = node {
+            // Resolve the bound body ONCE (the resolved view is rebuilt on every
+            // render, so the duplicate `composition_body_assignments` lookups across
+            // synthesize + emit-input were pure waste). A missing assignment or a
+            // `body_of` miss degrades gracefully: the composition still renders, just
+            // with no synthesized rows and no boundary edges.
+            if let Some(body) = plan
+                .artifacts()
+                .composition_body_assignments
+                .get(node.name())
+                .and_then(|&body_id| plan.body_of(body_id))
+            {
+                out_fields[idx] = synthesize_composition_output_rows(body);
+                emit_composition_input_boundary_edges(
+                    &mut acc,
+                    idx,
+                    body,
+                    inputs,
+                    &name_to_idx,
+                    &out_fields,
+                );
+            }
+            // A Composition has no typed_output_row of its own; its rows are the
+            // synthesized ones above and it runs no transform/emit analysis. Skip
+            // the rest of the per-node body (it is keyed on `typed_output_row`).
+            continue;
+        }
 
         let Some(row) = plan.typed_output_row(node.name()) else {
             continue;
@@ -2673,11 +2749,205 @@ fn resolved_pipeline_field_lineage(
         );
     }
 
+    // OUTPUT boundary crossings (#154): every edge LEAVING a Composition node is a
+    // value crossing OUT of the composition wall, so re-tag it `Boundary`. The
+    // downstream consumer drew these as ordinary carry/derive edges (it saw the
+    // composition's synthesized output rows as producer columns); re-tagging marks
+    // them as the "exit composition / descend here" crossings #155 consumes,
+    // distinguished from intra-scope carries. Approximate-ness is preserved from the
+    // original edge (a degraded producer column stays degraded across the wall).
+    let composition_nodes: std::collections::HashSet<usize> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.value, PipelineNode::Composition { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    for edge in &mut acc.edges {
+        // A `\u{2190}in:` input-marker edge ENTERS a composition (its `to_node` is
+        // the comp); it is already `Boundary` and must keep its kind. Only re-tag
+        // edges whose SOURCE is a composition (a true exit crossing).
+        if composition_nodes.contains(&edge.from_node) && edge.kind != FieldEdgeKind::Boundary {
+            let approximate = edge.precision != Precision::Exact;
+            *edge = FieldEdge::boundary(
+                edge.from_node,
+                edge.from_field.clone(),
+                edge.to_node,
+                edge.to_field.clone(),
+                approximate,
+            );
+        }
+    }
+
     // Fold each row's precision from its incident edges (#148); `Unknown` rows
     // (parse-fail nodes) are preserved.
     derive_row_precision(&mut out_fields, &acc.edges);
 
     (out_fields, acc.edges, role_edges)
+}
+
+/// Synthesize a Composition node's output [`FieldRow`]s from its bound body's
+/// declared output ports (#154).
+///
+/// The engine gives a Composition no `typed_output_row` (it has no CXL of its own),
+/// so in the resolved top-level view its output columns would otherwise be lost and
+/// the value chain would bypass the composition entirely. We rebuild them from the
+/// body's `output_port_rows`: the user-facing columns each port surfaces back to the
+/// parent scope (engine-internal `$`-columns excluded via [`is_engine_internal_column`]),
+/// unioned across ports in port-declaration order. Each row carries the engine's
+/// compact type. The rows are classified [`FieldKind::PassThrough`] — a composition
+/// surfaces its body's records to the parent unchanged at the boundary; it computes
+/// nothing at this scope.
+///
+/// **Same-named columns across two output ports (FIDELITY #8):** dedup is by name,
+/// first-seen winning. `output_port_rows` is an `IndexMap` in port-declaration
+/// order, so "first-seen" is the FIRST declared port deterministically. Two ports
+/// surfacing a same-named column therefore collapse to one row — a deliberate
+/// limitation: a `(node, field)` endpoint must be unique for the lineage graph
+/// (two rows with the same name would make the trace ambiguous), and multi-port
+/// same-name fan-out is rare. #155's descent disambiguates which port a column
+/// belongs to from the body itself.
+///
+/// **Row precision (FIDELITY #7):** synthesized rows are pinned [`Precision::Exact`].
+/// The composition surfaces its body's records unchanged at THIS scope — the
+/// crossing itself is exact. If a column is derived APPROXIMATELY inside the body
+/// (e.g. an `emit each` fan-out), that body-internal degradation is a property of
+/// the body's own lineage, which is surfaced by #155's descent INTO the body, not on
+/// the comp's own row. Computing it here would require running full body lineage
+/// (duplicative/expensive), so it is deliberately deferred to #155. (The comp→consumer
+/// crossing's approximate flag is likewise taken from the consumer-side edge, which
+/// has no body signal in this scope.)
+///
+/// #155 contract: given an output row `comp.col`, the body node + output port it
+/// descends into is recoverable from `body.output_port_rows` (which port declares
+/// `col`) and `body.output_port_to_node_idx` (that port's terminal body NodeIndex).
+fn synthesize_composition_output_rows(
+    body: &clinker_plan::plan::composition_body::BoundBody,
+) -> Vec<FieldRow> {
+    let mut rows: Vec<FieldRow> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in body.output_port_rows.values() {
+        for (field, ty) in row.fields() {
+            let col = field.name.as_ref();
+            if is_engine_internal_column(col) || !seen.insert(col.to_string()) {
+                continue;
+            }
+            rows.push(FieldRow {
+                name: col.to_string(),
+                kind: FieldKind::PassThrough,
+                ty: Some(compact_type(ty)),
+                ..Default::default()
+            });
+        }
+    }
+    rows
+}
+
+/// Materialize composition INPUT boundary edges (#154) for one Composition node.
+///
+/// In the resolved top-level view the engine gives a Composition no incoming field
+/// edges and no input-port surface. This fills the INCOMING side with
+/// [`FieldEdgeKind::Boundary`] crossings — an outer producer column entering an
+/// input port — so the Inspector can mark "↳ enters composition X" and #155 can
+/// recover the (port, column) the column flows into. The OUTGOING side is handled
+/// separately: the composition's synthesized output rows let the downstream
+/// consumer draw ordinary edges, which the caller re-tags `Boundary` post-loop.
+///
+/// It adds NO visible [`FieldRow`] to the composition for the input crossings —
+/// each lands on a synthetic `\u{2190}in:port:col` marker field (see
+/// [`field_lineage::composition_in_boundary_field`]) that can never collide with a
+/// real output column.
+///
+/// **Port → outer-node binding (correctness):** each input port is wired to a
+/// SPECIFIC outer node by the call-site `inputs:` map (`port name → outer node
+/// name`, resolved to an index via `name_to_idx`). A port's columns bind to THAT
+/// node's output rows only — not "any predecessor carrying the column name" — so two
+/// input ports that share a column name never mis-bind to each other's producer.
+///
+/// Two behaviours:
+/// - **Input crossing** (per input port × user column the bound producer surfaces):
+///   a synthetic `\u{2190}in:port:col` marker edge from the bound producer (Exact).
+///   Engine-internal `$`-prefixed columns are excluded via [`is_engine_internal_column`].
+/// - **Degrade**: a port that binds no user column (its `inputs:` mapping is missing
+///   / unresolvable, the bound producer lacks every declared column, or the port is
+///   accept-any with no user columns) contributes to a single NODE-LEVEL boundary
+///   connector (empty endpoint fields, [`Precision::Approximate`]). That connector is
+///   emitted AT MOST ONCE per composition even when several ports degrade — duplicate
+///   byte-identical node-level edges would otherwise accumulate (`push_direct` bypasses
+///   dedup).
+fn emit_composition_input_boundary_edges(
+    acc: &mut EdgeAccumulator,
+    comp_idx: usize,
+    body: &clinker_plan::plan::composition_body::BoundBody,
+    inputs: &indexmap::IndexMap<String, String>,
+    name_to_idx: &std::collections::HashMap<String, usize>,
+    out_fields: &[Vec<FieldRow>],
+) {
+    // A port degrades when its bound outer node can't be resolved or surfaces none
+    // of its declared user columns. All degrading ports share ONE node-level
+    // connector; record whether any degraded and the first available producer index
+    // to anchor it on, then emit it once after the per-port loop.
+    let mut any_port_degraded = false;
+    let mut degrade_anchor: Option<usize> = None;
+
+    // INPUT crossings: one synthetic marker per (port, user column the bound
+    // producer surfaces). Engine-internal `$`-prefixed bookkeeping columns
+    // ($widened, $source.*, $ck.*) are NOT part of the user-facing port crossing
+    // contract #155 descends along, so they are excluded (broader than the
+    // row-level `$ck.`-only filter).
+    for (port, row) in &body.input_port_rows {
+        // Resolve the outer node this port is wired to via the call-site `inputs:`
+        // map; an unmapped / unresolvable port degrades.
+        let producer = inputs
+            .get(port)
+            .and_then(|outer| name_to_idx.get(outer).copied());
+        let Some(producer) = producer else {
+            any_port_degraded = true;
+            continue;
+        };
+        if degrade_anchor.is_none() {
+            degrade_anchor = Some(producer);
+        }
+
+        // The bound producer's output columns, indexed once for O(1) membership
+        // (replacing the former O(predecessors × rows) per-column scan).
+        let producer_cols: std::collections::HashSet<&str> = out_fields
+            .get(producer)
+            .map(|rows| rows.iter().map(|r| r.name.as_str()).collect())
+            .unwrap_or_default();
+
+        let mut any_column_bound = false;
+        for field in row.field_names() {
+            let col = field.name.as_ref();
+            if is_engine_internal_column(col) || !producer_cols.contains(col) {
+                continue;
+            }
+            any_column_bound = true;
+            acc.push_direct(FieldEdge::boundary(
+                producer,
+                col.to_string(),
+                comp_idx,
+                field_lineage::composition_in_boundary_field(port, col),
+                false,
+            ));
+        }
+        // A port whose bound producer surfaces none of its declared columns (or an
+        // accept-any port with no user columns) records a degraded crossing.
+        if !any_column_bound {
+            any_port_degraded = true;
+        }
+    }
+
+    // Emit the shared node-level degrade connector at most ONCE per composition.
+    if any_port_degraded {
+        let from = degrade_anchor.unwrap_or(comp_idx);
+        acc.push_direct(FieldEdge::boundary(
+            from,
+            String::new(),
+            comp_idx,
+            String::new(),
+            true,
+        ));
+    }
 }
 
 fn resolved_row_fields(
@@ -2729,6 +2999,15 @@ fn resolved_row_fields(
 
 fn is_internal_field_name(name: &str) -> bool {
     name.starts_with("$ck.")
+}
+
+/// Whether a column name is an engine-internal bookkeeping column rather than a
+/// user-facing data column — any `$`-prefixed name (`$ck.<field>` correlation-key
+/// shadows, `$widened`, `$source.*`, etc.). Used to keep composition boundary
+/// crossings (#154) to the user-meaningful port contract #155 will descend along;
+/// broader than [`is_internal_field_name`], which suppresses only `$ck.` rows.
+fn is_engine_internal_column(name: &str) -> bool {
+    name.starts_with('$')
 }
 
 /// Synthetic boundary node for a composition input port.
@@ -3836,7 +4115,13 @@ nodes:
         }
     }
 
-    fn compiled_body_fixture() -> clinker_plan::plan::composition_body::BoundBody {
+    /// Compile the shared composition fixture pipeline (source `src`(a:int,b:string)
+    /// → composition `comp` running body `body_lineage` → output `out`) and return
+    /// the full [`CompiledPlan`]. The temporary workspace is removed before
+    /// returning; the plan owns everything the view derivation needs. Both
+    /// [`compiled_body_fixture`] (which extracts the bound body) and the #154
+    /// boundary-edge tests (which build the resolved top-level view) consume this.
+    fn compiled_plan_fixture() -> clinker_plan::plan::CompiledPlan {
         let unique = format!(
             "klinx-body-view-{}-{}",
             std::process::id(),
@@ -3908,6 +4193,12 @@ nodes:
         let plan = config
             .compile(&CompileContext::new(root.clone()))
             .expect("pipeline fixture compiles");
+        let _ = std::fs::remove_dir_all(root);
+        plan
+    }
+
+    fn compiled_body_fixture() -> clinker_plan::plan::composition_body::BoundBody {
+        let plan = compiled_plan_fixture();
         let body_id = plan
             .dag()
             .graph
@@ -3921,9 +4212,617 @@ nodes:
                 _ => None,
             })
             .expect("compiled composition body id");
-        let body = plan.body_of(body_id).expect("compiled body exists").clone();
+        plan.body_of(body_id).expect("compiled body exists").clone()
+    }
+
+    /// The composition index in the shared fixture's resolved top-level view.
+    fn comp_idx(view: &PipelineView) -> usize {
+        stage_idx(view, "comp")
+    }
+
+    /// Compile a composition whose input port declares NO schema (accept-any), so
+    /// its body input-port row carries no user columns — the #154 degrade path's
+    /// trigger. The body emits one computed output port. Returns the compiled plan.
+    fn compiled_accept_any_plan_fixture() -> clinker_plan::plan::CompiledPlan {
+        let unique = format!(
+            "klinx-accept-any-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temporary composition workspace");
+        std::fs::write(
+            root.join("accept_any.comp.yaml"),
+            r#"_compose:
+  name: accept_any
+  inputs:
+    anyin: {}
+  outputs:
+    result: only
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: only
+    input: anyin
+    config:
+      cxl: |
+        emit tag = 1
+"#,
+        )
+        .expect("write accept-any composition fixture");
+
+        let pipeline = r#"
+pipeline:
+  name: accept_any_drill
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: a, type: int }
+  - type: composition
+    name: comp
+    input: src
+    use: ./accept_any.comp.yaml
+    inputs:
+      anyin: src
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("accept-any pipeline parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("accept-any pipeline compiles");
         let _ = std::fs::remove_dir_all(root);
-        body
+        plan
+    }
+
+    /// Compile a composition with TWO accept-any input ports (`anyin`, `anyin2`),
+    /// each wired to its own outer source, so BOTH ports degrade (neither declares a
+    /// user column). Returns the compiled plan; used to prove the node-level degrade
+    /// connector is emitted at most once per composition.
+    fn compiled_two_accept_any_plan_fixture() -> clinker_plan::plan::CompiledPlan {
+        let unique = format!(
+            "klinx-two-any-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temporary composition workspace");
+        std::fs::write(
+            root.join("two_any.comp.yaml"),
+            r#"_compose:
+  name: two_any
+  inputs:
+    anyin: {}
+    anyin2: {}
+  outputs:
+    result: only
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: only
+    input: anyin
+    config:
+      cxl: |
+        emit tag = 1
+"#,
+        )
+        .expect("write two-accept-any composition fixture");
+
+        let pipeline = r#"
+pipeline:
+  name: two_any_drill
+nodes:
+  - type: source
+    name: srcA
+    config:
+      name: srcA
+      type: csv
+      path: ./a.csv
+      schema:
+        - { name: a, type: int }
+  - type: source
+    name: srcB
+    config:
+      name: srcB
+      type: csv
+      path: ./b.csv
+      schema:
+        - { name: b, type: int }
+  - type: composition
+    name: comp
+    input: srcA
+    use: ./two_any.comp.yaml
+    inputs:
+      anyin: srcA
+      anyin2: srcB
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("two-accept-any pipeline parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("two-accept-any pipeline compiles");
+        let _ = std::fs::remove_dir_all(root);
+        plan
+    }
+
+    /// Compile a composition with TWO input ports (`left`, `right`) that SHARE a
+    /// column name `k`, each wired to a DISTINCT outer source. A body Combine
+    /// consumes both. Used to prove each port's columns bind to the right producer
+    /// (the call-site `inputs:` mapping), not "any predecessor carrying the name".
+    fn compiled_two_port_shared_column_plan_fixture() -> clinker_plan::plan::CompiledPlan {
+        let unique = format!(
+            "klinx-two-port-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temporary composition workspace");
+        std::fs::write(
+            root.join("two_port.comp.yaml"),
+            r#"_compose:
+  name: two_port
+  inputs:
+    left:
+      schema:
+        - { name: k, type: int }
+        - { name: lv, type: int }
+    right:
+      schema:
+        - { name: k, type: int }
+        - { name: rv, type: int }
+  outputs:
+    result: joined
+  config_schema: {}
+
+nodes:
+  - type: combine
+    name: joined
+    input:
+      l: left
+      r: right
+    config:
+      where: "l.k == r.k"
+      match: first
+      on_miss: skip
+      propagate_ck: all
+      cxl: |
+        emit k = l.k
+        emit lv = l.lv
+        emit rv = r.rv
+"#,
+        )
+        .expect("write two-port composition fixture");
+
+        let pipeline = r#"
+pipeline:
+  name: two_port_drill
+nodes:
+  - type: source
+    name: srcL
+    config:
+      name: srcL
+      type: csv
+      path: ./l.csv
+      schema:
+        - { name: k, type: int }
+        - { name: lv, type: int }
+  - type: source
+    name: srcR
+    config:
+      name: srcR
+      type: csv
+      path: ./r.csv
+      schema:
+        - { name: k, type: int }
+        - { name: rv, type: int }
+  - type: composition
+    name: comp
+    input: srcL
+    inputs:
+      left: srcL
+      right: srcR
+    use: ./two_port.comp.yaml
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("two-port pipeline parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("two-port pipeline compiles");
+        let _ = std::fs::remove_dir_all(root);
+        plan
+    }
+
+    /// #154 (MUST-FIX 1): when 2+ input ports degrade, exactly ONE node-level
+    /// Approximate boundary connector is emitted — not one per degrading port.
+    /// `push_direct` bypasses dedup, so emitting per-port would accumulate
+    /// byte-identical duplicate edges. Both ports here are accept-any (no user
+    /// columns), so both degrade; the result must still be a single node-level edge.
+    #[test]
+    fn composition_multiple_degrading_ports_emit_single_node_level_edge() {
+        let plan = compiled_two_accept_any_plan_fixture();
+        let view = derive_resolved_pipeline_view(&plan);
+        let i_comp = comp_idx(&view);
+
+        let node_level: Vec<&FieldEdge> = view
+            .field_edges
+            .iter()
+            .filter(|e| {
+                e.kind == FieldEdgeKind::Boundary
+                    && e.to_node == i_comp
+                    && e.from_field.is_empty()
+                    && e.to_field.is_empty()
+            })
+            .collect();
+        assert_eq!(
+            node_level.len(),
+            1,
+            "two degrading input ports must yield exactly ONE node-level boundary \
+             edge (no byte-identical duplicates): {:?}",
+            view.field_edges,
+        );
+        assert_eq!(node_level[0].precision, Precision::Approximate);
+    }
+
+    /// #154 (MUST-FIX 3): each input port's columns bind to the SPECIFIC outer node
+    /// the call-site `inputs:` map wires it to — not "any predecessor carrying the
+    /// column name". Two ports share a column name `k` but are wired to distinct
+    /// producers (`left: srcL`, `right: srcR`); the shared `k` must bind once per
+    /// port to the correct producer, never cross-binding to the other side.
+    #[test]
+    fn composition_input_ports_bind_to_their_mapped_producer() {
+        let plan = compiled_two_port_shared_column_plan_fixture();
+        let view = derive_resolved_pipeline_view(&plan);
+        let i_srcl = stage_idx(&view, "srcL");
+        let i_srcr = stage_idx(&view, "srcR");
+        let i_comp = comp_idx(&view);
+
+        // `left.k` binds to srcL; `right.k` binds to srcR — the shared name does NOT
+        // cross-bind.
+        let expect_in = |from: usize, col: &str, port: &str| {
+            FieldEdge::boundary(
+                from,
+                col.to_string(),
+                i_comp,
+                field_lineage::composition_in_boundary_field(port, col),
+                false,
+            )
+        };
+        for (from, col, port) in [
+            (i_srcl, "k", "left"),
+            (i_srcl, "lv", "left"),
+            (i_srcr, "k", "right"),
+            (i_srcr, "rv", "right"),
+        ] {
+            assert!(
+                view.field_edges.contains(&expect_in(from, col, port)),
+                "expected {col} from node {from} to bind into port `{port}`; got {:?}",
+                view.field_edges,
+            );
+        }
+
+        // The shared column `k` must NOT cross-bind: srcL must not feed the `right`
+        // port, and srcR must not feed the `left` port.
+        assert!(
+            !view.field_edges.contains(&expect_in(i_srcl, "k", "right")),
+            "srcL.k must not mis-bind to the `right` port",
+        );
+        assert!(
+            !view.field_edges.contains(&expect_in(i_srcr, "k", "left")),
+            "srcR.k must not mis-bind to the `left` port",
+        );
+    }
+
+    /// #154 degrade path: a composition input port with no resolvable USER columns
+    /// (an accept-any `inputs: { anyin: {} }` port, whose body row carries only
+    /// engine-internal `$`-columns) emits a single NODE-LEVEL boundary edge
+    /// classified `Precision::Approximate` instead of per-column edges. The
+    /// node-level connector has empty endpoint fields (a producer→comp crossing
+    /// with no column granularity) — distinct from the Exact per-column crossings.
+    #[test]
+    fn composition_degrades_to_node_level_boundary_when_port_has_no_user_columns() {
+        let plan = compiled_accept_any_plan_fixture();
+        let view = derive_resolved_pipeline_view(&plan);
+        let i_src = stage_idx(&view, "src");
+        let i_comp = comp_idx(&view);
+
+        // Exactly one node-level Approximate boundary edge: src → comp, empty fields.
+        let node_level: Vec<&FieldEdge> = view
+            .field_edges
+            .iter()
+            .filter(|e| {
+                e.kind == FieldEdgeKind::Boundary
+                    && e.from_node == i_src
+                    && e.to_node == i_comp
+                    && e.from_field.is_empty()
+                    && e.to_field.is_empty()
+            })
+            .collect();
+        assert_eq!(
+            node_level.len(),
+            1,
+            "an accept-any input port degrades to exactly one node-level boundary edge: {:?}",
+            view.field_edges,
+        );
+        assert_eq!(
+            node_level[0].precision,
+            Precision::Approximate,
+            "the degraded node-level boundary edge is Approximate"
+        );
+
+        // No per-column INPUT marker was emitted for the accept-any port (it had no
+        // user columns to bind), confirming the degrade replaced the per-column path.
+        assert!(
+            !view.field_edges.iter().any(|e| {
+                e.kind == FieldEdgeKind::Boundary
+                    && e.to_node == i_comp
+                    && e.to_field.starts_with('\u{2190}')
+            }),
+            "the degraded port emits no per-column input markers: {:?}",
+            view.field_edges,
+        );
+    }
+
+    /// #154 precision-fold regression: in `composition_field_lineage` the
+    /// producer→output-port edges are appended AFTER `compute_field_lineage` already
+    /// ran `derive_row_precision`, so the output-port placeholder row never folded in
+    /// any degradation arriving along that edge. Here the producer `gen` fans out
+    /// `vals` via `emit each` (an Approximate derive, #148); the output port `result`
+    /// ← `gen` must inherit that degradation. The fix re-folds row precision over the
+    /// appended edges — without it the port row stays Exact (the regression).
+    #[test]
+    fn composition_output_port_row_reflects_approximate_producer() {
+        let yaml = r#"_compose:
+  name: fanout
+  inputs:
+    src:
+      schema:
+        - { name: items, type: array }
+  outputs:
+    result: gen
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: gen
+    input: src
+    config:
+      cxl: |
+        emit each x in items {
+          emit result = x
+        }
+"#;
+        let view = derive_composition_view(&parse_comp(yaml));
+
+        // The output-port placeholder stage `result` carries one Declared row named
+        // for the port. The producer `gen`'s representative column (`result`, fanned
+        // out by `emit each`) is Approximate, so the appended producer→port edge is
+        // Approximate and the re-fold degrades the port row. Without the fix the
+        // port row would remain Exact.
+        let result_idx = stage_idx(&view, "result");
+        let port_row = view.stages[result_idx]
+            .fields
+            .iter()
+            .find(|r| r.name == "result")
+            .expect("output-port placeholder row present");
+        assert_eq!(
+            port_row.lineage_precision,
+            Precision::Approximate,
+            "the output-port row must inherit the Approximate fanned producer's \
+             degradation via the post-append precision re-fold: {:?}",
+            view.stages[result_idx].fields,
+        );
+        assert!(
+            !port_row.precision_reason.is_empty(),
+            "a degraded port row carries a precision reason"
+        );
+    }
+
+    /// #154: the resolved top-level view materializes INPUT boundary edges binding
+    /// each outer producer column to a synthetic per-port marker on the composition
+    /// node. `src.a` and `src.b` cross into the `src` input port; each edge is
+    /// `FieldEdgeKind::Boundary`, `Exact`, and carries the documented
+    /// `composition_in_boundary_field(port, col)` mapping so #155 can recover the
+    /// (port, column) pair.
+    #[test]
+    fn composition_input_boundary_edges_bind_outer_columns_to_ports() {
+        let plan = compiled_plan_fixture();
+        let view = derive_resolved_pipeline_view(&plan);
+        let i_src = stage_idx(&view, "src");
+        let i_comp = comp_idx(&view);
+
+        for col in ["a", "b"] {
+            let expected = FieldEdge::boundary(
+                i_src,
+                col.to_string(),
+                i_comp,
+                field_lineage::composition_in_boundary_field("src", col),
+                false,
+            );
+            assert!(
+                view.field_edges.contains(&expected),
+                "expected INPUT boundary edge src.{col} → comp port `src` \
+                 (to_field {:?}), got {:?}",
+                field_lineage::composition_in_boundary_field("src", col),
+                view.field_edges,
+            );
+            // The matching edge is genuinely a Boundary crossing, classified Exact.
+            let edge = view
+                .field_edges
+                .iter()
+                .find(|e| **e == expected)
+                .expect("boundary edge present");
+            assert_eq!(edge.kind, FieldEdgeKind::Boundary);
+            assert_eq!(edge.precision, Precision::Exact);
+        }
+
+        // The composition node now shows its OUTPUT schema (synthesized from the
+        // body's output ports), so the value chain passes through it and #155 can
+        // descend. The body's `result` port surfaces a, b (carried) + c, d
+        // (computed); engine-internal `$`-columns are excluded.
+        let comp_cols: Vec<&str> = view.stages[i_comp]
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(
+            comp_cols,
+            vec!["a", "b", "c", "d"],
+            "composition node must show its body's output columns, got {comp_cols:?}",
+        );
+    }
+
+    /// #154 CONNECTIVITY (the test proving #155 can descend): the composition is not
+    /// disconnected — tracing UPSTREAM from the downstream consumer `out` reaches the
+    /// composition `comp` via a `Boundary` edge. Specifically the computed columns
+    /// `c` and `d` (which originate inside the body) each have an upstream
+    /// `comp.col → out.col` edge tagged `FieldEdgeKind::Boundary`. Without the
+    /// synthesized comp output rows + re-tag pass, `out` would draw its columns
+    /// straight from its own typed row with ZERO upstream lineage through comp.
+    #[test]
+    fn composition_output_crossing_connects_comp_to_consumer() {
+        let plan = compiled_plan_fixture();
+        let view = derive_resolved_pipeline_view(&plan);
+        let i_comp = comp_idx(&view);
+        let i_out = stage_idx(&view, "out");
+
+        for col in ["c", "d"] {
+            let crossing = view.field_edges.iter().find(|e| {
+                e.from_node == i_comp
+                    && e.from_field == col
+                    && e.to_node == i_out
+                    && e.to_field == col
+            });
+            let crossing = crossing.unwrap_or_else(|| {
+                panic!(
+                    "expected an upstream edge comp.{col} → out.{col}; \
+                     got {:?}",
+                    view.field_edges,
+                )
+            });
+            assert_eq!(
+                crossing.kind,
+                FieldEdgeKind::Boundary,
+                "the comp.{col} → out.{col} crossing must be tagged Boundary so a \
+                 trace upstream from `out` reaches the composition"
+            );
+        }
+
+        // The carried columns a, b also cross the wall as Boundary edges.
+        for col in ["a", "b"] {
+            assert!(
+                view.field_edges.iter().any(|e| {
+                    e.from_node == i_comp
+                        && e.from_field == col
+                        && e.to_node == i_out
+                        && e.kind == FieldEdgeKind::Boundary
+                }),
+                "carried column {col} must also cross comp → out as a Boundary edge",
+            );
+        }
+
+        // Every edge LEAVING the composition is a Boundary crossing — no plain
+        // carry/derive leaks out of the wall.
+        for edge in &view.field_edges {
+            if edge.from_node == i_comp {
+                assert_eq!(
+                    edge.kind,
+                    FieldEdgeKind::Boundary,
+                    "every edge leaving the composition must be a Boundary crossing: {edge:?}",
+                );
+            }
+        }
+    }
+
+    /// #154: boundary edges are STABLE across two independent builds of the same
+    /// plan — the 5-tuple identity `(from_node, from_field, to_node, to_field,
+    /// kind)` set is identical, so the canvas memoization and the #155 contract see
+    /// a deterministic edge set (no set-iteration order leaking into the result).
+    #[test]
+    fn composition_boundary_edges_are_stable_across_builds() {
+        let plan = compiled_plan_fixture();
+        let view_a = derive_resolved_pipeline_view(&plan);
+        let view_b = derive_resolved_pipeline_view(&plan);
+
+        let boundary_5tuples = |view: &PipelineView| {
+            view.field_edges
+                .iter()
+                .filter(|e| e.kind == FieldEdgeKind::Boundary)
+                .map(|e| {
+                    (
+                        e.from_node,
+                        e.from_field.clone(),
+                        e.to_node,
+                        e.to_field.clone(),
+                        e.kind,
+                    )
+                })
+                .collect::<std::collections::HashSet<_>>()
+        };
+
+        let a = boundary_5tuples(&view_a);
+        let b = boundary_5tuples(&view_b);
+        assert!(
+            !a.is_empty(),
+            "the fixture must materialize at least one boundary edge"
+        );
+        assert_eq!(
+            a, b,
+            "boundary edge identity set must be identical across two builds"
+        );
+    }
+
+    /// #154 (companion to `edge_kind_nature_partition_is_exhaustive`): a materialized
+    /// boundary edge is a DIRECT crossing — the trace follows it as part of the
+    /// value graph.
+    #[test]
+    fn composition_boundary_edges_have_direct_nature() {
+        let plan = compiled_plan_fixture();
+        let view = derive_resolved_pipeline_view(&plan);
+        let mut saw_boundary = false;
+        for edge in &view.field_edges {
+            if edge.kind == FieldEdgeKind::Boundary {
+                saw_boundary = true;
+                assert_eq!(
+                    edge.kind.nature(),
+                    EdgeNature::Direct,
+                    "a composition boundary crossing is a DIRECT edge"
+                );
+            }
+        }
+        assert!(saw_boundary, "the fixture materializes boundary edges");
     }
 
     #[test]

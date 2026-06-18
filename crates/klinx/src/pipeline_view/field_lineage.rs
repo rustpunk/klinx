@@ -161,20 +161,32 @@ pub enum FieldEdgeKind {
     /// output. The default/fallback branch has no predicate, so emits none.
     /// OpenLineage `CONDITIONAL`.
     Conditional,
+    /// A composition boundary crossing (#154): an outer field bound to a
+    /// composition's inner port (outer input field → inner source port, or inner
+    /// output port → outer output field). The value rides across the composition
+    /// wall unchanged, so this is a DIRECT crossing — the trace follows it as part
+    /// of the value graph — distinguished from intra-scope carries/derives so the
+    /// Inspector can mark "↳ enters / ↥ exits composition X". Precision is `Exact`
+    /// when bound to a real body row, `Approximate` when the body row is missing
+    /// and it degrades to a node-level connector.
+    Boundary,
 }
 
 impl FieldEdgeKind {
     /// The [`EdgeNature`] of this kind — a pure, total match.
     ///
-    /// The first three kinds are [`EdgeNature::Direct`] (a value is carried or
-    /// derived); the four influence kinds are [`EdgeNature::Indirect`]. This is
-    /// the only place nature is decided: deriving it from the kind (rather than
-    /// storing it alongside) makes an inconsistent edge unrepresentable.
+    /// The carry/derive kinds and the composition `Boundary` crossing are
+    /// [`EdgeNature::Direct`] (a value is carried, derived, or ridden across a
+    /// composition wall unchanged); the four influence kinds are
+    /// [`EdgeNature::Indirect`]. This is the only place nature is decided: deriving
+    /// it from the kind (rather than storing it alongside) makes an inconsistent
+    /// edge unrepresentable.
     pub fn nature(self) -> EdgeNature {
         match self {
-            FieldEdgeKind::Passthrough | FieldEdgeKind::Access | FieldEdgeKind::Derive => {
-                EdgeNature::Direct
-            }
+            FieldEdgeKind::Passthrough
+            | FieldEdgeKind::Access
+            | FieldEdgeKind::Derive
+            | FieldEdgeKind::Boundary => EdgeNature::Direct,
             FieldEdgeKind::Filter
             | FieldEdgeKind::GroupBy
             | FieldEdgeKind::JoinKey
@@ -421,6 +433,61 @@ impl FieldEdge {
             precision_reason: "conservative CXL-less fan-in carry",
         }
     }
+
+    /// Construct a composition [`FieldEdgeKind::Boundary`] crossing (#154) binding
+    /// an outer field to a composition's inner port. `approximate == false` (a real
+    /// body row backs the crossing) is [`Precision::Exact`] — the value rides across
+    /// the wall unchanged; `approximate == true` (the body row was missing and the
+    /// crossing degraded to a node-level connector) is [`Precision::Approximate`].
+    pub fn boundary(
+        from_node: usize,
+        from_field: String,
+        to_node: usize,
+        to_field: String,
+        approximate: bool,
+    ) -> FieldEdge {
+        let (precision, reason) = if approximate {
+            (
+                Precision::Approximate,
+                "composition boundary degraded: body rows unavailable",
+            )
+        } else {
+            (Precision::Exact, "composition boundary crossing")
+        };
+        FieldEdge {
+            from_node,
+            from_field,
+            to_node,
+            to_field,
+            kind: FieldEdgeKind::Boundary,
+            precision,
+            precision_reason: reason,
+        }
+    }
+}
+
+/// The synthetic `to_field` name for a composition **input** boundary edge (#154):
+/// an outer producer column crossing INTO a composition's input port.
+///
+/// Returns `"\u{2190}in:{port}:{col}"` (a leading `←` U+2190 LEFTWARDS ARROW, then
+/// `in:`, the port name, and the column). The `←` prefix is the collision-safety
+/// guarantee: it is not a valid CXL/engine identifier character, so this synthetic
+/// field can NEVER equal a real output column on the composition node — the edge
+/// lands on a marker anchor, never on a visible [`FieldRow`]. The port and column
+/// are recoverable by splitting on `:` after the `\u{2190}in:` prefix.
+///
+/// This naming convention is the contract #155 (descent into composition bodies)
+/// relies on to detect "an outer column enters the body at port `port` as column
+/// `col`", so it is a documented `pub(crate)` helper rather than an inline literal.
+///
+/// The OUTPUT side has no synthetic-marker analogue: a composition's output columns
+/// are materialized as real [`FieldRow`]s on the node (synthesized from the body's
+/// output ports), so the OUT crossing is the ordinary `comp.col → consumer.col`
+/// edge re-tagged [`FieldEdgeKind::Boundary`]. #155 recovers the body node + output
+/// port for `comp.col` from the body's `output_port_rows` (which port declares
+/// `col`) and `output_port_to_node_idx` (that port's terminal body NodeIndex).
+pub(crate) fn composition_in_boundary_field(port: &str, col: &str) -> String {
+    format!("\u{2190}in:{port}:{col}")
 }
 
 /// Resolve the let-expanded input-column support of a single `emit`
@@ -1290,6 +1357,7 @@ mod tests {
             FieldEdgeKind::Passthrough,
             FieldEdgeKind::Access,
             FieldEdgeKind::Derive,
+            FieldEdgeKind::Boundary,
         ] {
             assert_eq!(kind.nature(), EdgeNature::Direct, "{kind:?} must be Direct");
         }

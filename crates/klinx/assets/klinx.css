@@ -4974,6 +4974,18 @@ input:-webkit-autofill:focus {
   stroke: var(--klinx-hazard);
 }
 
+/* Composition boundary crossing (#154) — an outer field bound to a composition's
+   inner port. A DIRECT crossing (the value rides across unchanged), so it shares
+   the value-ribbon family, but a coarse dash marks where lineage crosses the
+   composition wall, distinguishing it from intra-scope carries/derives. */
+.klinx-field-edge--boundary {
+  stroke: var(--klinx-verdigris);
+  opacity: 0.85;
+}
+.klinx-field-edge--boundary path {
+  stroke-dasharray: 7 4;
+}
+
 /* Whole-path ribbons (#152). The active overlay lights the selected field's full
    transitive path as TWO independently-toggleable ribbons distinguished by edge
    nature (#147):

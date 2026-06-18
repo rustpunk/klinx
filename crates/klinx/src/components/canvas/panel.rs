@@ -232,7 +232,16 @@ fn build_field_rank_signals(
                 .or_default()
                 .insert(edge.to_field.clone());
         }
-        if matches!(edge.kind, FieldEdgeKind::Derive | FieldEdgeKind::Access) {
+        // A `Boundary` crossing (#154) carries a REAL value across a composition
+        // wall to the consumer, so it counts as produced/derived for ranking — the
+        // same as `Derive`/`Access`. Without this, a column genuinely computed inside
+        // a composition body reaches its consumer as a `Boundary` edge (the post-loop
+        // re-tag) and would otherwise lose its produced-column credit, demoting the
+        // consumer card's computed columns in the field ranking/collapse.
+        if matches!(
+            edge.kind,
+            FieldEdgeKind::Derive | FieldEdgeKind::Access | FieldEdgeKind::Boundary
+        ) {
             signals
                 .produced_or_derived_by_node
                 .entry(edge.from_node)
@@ -2014,8 +2023,8 @@ mod tests {
 
     use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
     use crate::pipeline_view::{
-        CanvasPoint, FIELD_ROW_HEIGHT, FieldKind, FieldRow, NODE_WIDTH, RouteBranch, StageKind,
-        StageView, derive_pipeline_view,
+        CanvasPoint, FIELD_ROW_HEIGHT, FieldEdge, FieldKind, FieldRow, NODE_WIDTH, RouteBranch,
+        StageKind, StageView, derive_pipeline_view,
     };
 
     use super::super::connector::{
@@ -2024,8 +2033,9 @@ mod tests {
     use super::{
         CLICK_DRAG_SLOP_PX, FIELD_ROW_CAP, FieldDisplayState, FieldProjectionContext,
         FieldRankSignals, GlobalNodeDisplayMode, GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP,
-        ResolvedNodeDisplayMode, field_matches_by_node, is_drag_beyond_slop, preview_rank,
-        project_stage_fields, rendered_card_height, resolve_node_display_mode, text_matches_query,
+        ResolvedNodeDisplayMode, build_field_rank_signals, field_matches_by_node,
+        is_drag_beyond_slop, preview_rank, project_stage_fields, rendered_card_height,
+        resolve_node_display_mode, text_matches_query,
     };
 
     #[test]
@@ -2087,6 +2097,72 @@ mod tests {
                 rank_signals: &FieldRankSignals::default(),
             },
         )
+    }
+
+    /// #154 (MUST-FIX 2): a `Boundary` crossing carries a real value to the
+    /// consumer, so `build_field_rank_signals` must credit it as produced/derived —
+    /// the same as `Derive`/`Access`. A column genuinely computed inside a
+    /// composition body reaches its consumer as a `Boundary` edge (the post-loop
+    /// re-tag); without crediting it, the consumer's computed columns would lose
+    /// produced-column status and `preview_rank` would demote them from rank 2.
+    #[test]
+    fn boundary_edge_credits_consumer_column_as_produced() {
+        // Mirror the resolved-view topology: comp (node 1) crosses a computed column
+        // `c` into the consumer `out` (node 2) as a Boundary edge.
+        let edges = vec![FieldEdge::boundary(
+            1,
+            "c".to_string(),
+            2,
+            "c".to_string(),
+            false,
+        )];
+        // Two minimal consumer-side stages so `stages[2]` exists for the lookup.
+        let consumer = StageView {
+            id: "out".to_string(),
+            label: "out".to_string(),
+            kind: StageKind::Output,
+            subtitle: String::new(),
+            canvas_x: 0.0,
+            canvas_y: 0.0,
+            cxl_source: None,
+            description: None,
+            error_message: None,
+            fields: vec![FieldRow {
+                name: "c".to_string(),
+                kind: FieldKind::PassThrough,
+                ty: Some("int".to_string()),
+                ..Default::default()
+            }],
+            branches: Vec::new(),
+            role_ports: Vec::new(),
+        };
+        let stages = vec![consumer.clone(), consumer.clone(), consumer.clone()];
+
+        let signals = build_field_rank_signals(&stages, &edges, &[]);
+        let produced = signals
+            .produced_or_derived_by_node
+            .get(&2)
+            .expect("consumer node has produced/derived columns");
+        assert!(
+            produced.contains("c"),
+            "a Boundary crossing must credit the consumer's column `c` as produced: {produced:?}",
+        );
+        // The producing composition side is credited too (both endpoints).
+        assert!(
+            signals
+                .produced_or_derived_by_node
+                .get(&1)
+                .is_some_and(|f| f.contains("c")),
+            "the composition side of the crossing is also credited as produced",
+        );
+
+        // End-to-end: `preview_rank` now ranks the consumer's `c` as produced
+        // (rank 2), not demoted to a plain passthrough (rank 5).
+        let rank = preview_rank(2, &consumer, &consumer.fields[0], &signals);
+        assert_eq!(
+            rank, 2,
+            "the boundary-crossed computed column ranks as produced (2), not demoted",
+        );
     }
 
     #[test]
