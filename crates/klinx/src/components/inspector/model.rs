@@ -1049,6 +1049,7 @@ fn trace_endpoints(
     start_field: &str,
     direction: TraceDirection,
 ) -> Vec<TraceEndpointView> {
+    // PR3: add INDIRECT include/exclude toggle here
     let mut seen = HashSet::from([(start_node, start_field.to_string())]);
     let mut queue = VecDeque::from([(start_node, start_field.to_string(), 0usize)]);
     let mut out = Vec::new();
@@ -1201,16 +1202,17 @@ fn edge_kind_label(kind: FieldEdgeKind) -> &'static str {
     }
 }
 
+/// The `data-kind` attribute slug for an edge kind — the human label
+/// ([`edge_kind_label`]) with its two multi-word INDIRECT kinds hyphenated so the
+/// attribute is a single token. Deriving from the label (rather than a parallel
+/// 7-arm match) keeps the two in lock-step: a new/renamed kind only has to be
+/// added to `edge_kind_label`, and only the multi-word kinds are special-cased
+/// here.
 fn edge_kind_attr(kind: FieldEdgeKind) -> &'static str {
     match kind {
-        FieldEdgeKind::Passthrough => "passthrough",
-        FieldEdgeKind::Access => "access",
-        FieldEdgeKind::Derive => "derive",
-        // INDIRECT influence edges (#147); hyphenated for a stable `data-` attr.
-        FieldEdgeKind::Filter => "filter",
         FieldEdgeKind::GroupBy => "group-by",
         FieldEdgeKind::JoinKey => "join-key",
-        FieldEdgeKind::Conditional => "conditional",
+        _ => edge_kind_label(kind),
     }
 }
 
@@ -1722,5 +1724,35 @@ nodes:
             hop: 1,
         };
         assert!(build_field_detail(&view, None, &stale_hop.to_selected_field()).is_none());
+    }
+
+    /// `edge_kind_attr` feeds the `data-kind` HTML attribute, so EVERY kind's
+    /// value must be a single slug token — no whitespace. The attr derives from
+    /// `edge_kind_label` (which has multi-word labels like "group by"/"join key"),
+    /// hyphenating only the two known multi-word kinds; this guards against a
+    /// future multi-word kind leaking a space through that delegation. Every
+    /// variant is listed by name (no wildcard) so adding a kind without a slug
+    /// decision fails to compile.
+    #[test]
+    fn edge_kind_attr_is_always_slug_safe() {
+        for kind in [
+            FieldEdgeKind::Passthrough,
+            FieldEdgeKind::Access,
+            FieldEdgeKind::Derive,
+            FieldEdgeKind::Filter,
+            FieldEdgeKind::GroupBy,
+            FieldEdgeKind::JoinKey,
+            FieldEdgeKind::Conditional,
+        ] {
+            let attr = edge_kind_attr(kind);
+            assert!(
+                !attr.is_empty(),
+                "{kind:?} must have a non-empty data-kind slug"
+            );
+            assert!(
+                !attr.chars().any(char::is_whitespace),
+                "{kind:?} data-kind slug must contain no whitespace, got {attr:?}"
+            );
+        }
     }
 }

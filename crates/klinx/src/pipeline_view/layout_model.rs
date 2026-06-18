@@ -1669,8 +1669,8 @@ fn compact_canvas_path_points<const N: usize>(points: [CanvasPoint; N]) -> Vec<C
 mod tests {
     use super::*;
     use crate::pipeline_view::{
-        Connection, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, PipelineView, RoleEdge,
-        RouteBranch, StageKind, StagePortKind, StagePortRow, StagePortSide, StageView,
+        Connection, EdgeNature, FieldEdge, FieldEdgeKind, FieldKind, FieldRow, PipelineView,
+        RoleEdge, RouteBranch, StageKind, StagePortKind, StagePortRow, StagePortSide, StageView,
         derive_pipeline_view,
     };
     use clinker_plan::config::parse_config;
@@ -2761,5 +2761,61 @@ nodes:
             })
         );
         assert_eq!(result.view, view);
+    }
+
+    /// #147: the INDIRECT influence kinds Filter/JoinKey/Conditional map to the
+    /// zero-weight [`LayoutEdgeKind::IndirectField`] overlay (so they route a
+    /// cable without distorting node ranks), while GroupBy — which replaced the
+    /// group-key `Derive` one-for-one — maps to the WEIGHTED [`LayoutEdgeKind::Field`]
+    /// despite `nature() == Indirect`. Asserts both the kind mapping (via the
+    /// `field_edge` constructor) and the rank weight, so it fails if a future
+    /// refactor keys the layout weight off `nature()` and silently zeroes GroupBy.
+    #[test]
+    fn indirect_field_edges_are_zero_weight_overlays_but_group_by_keeps_field_weight() {
+        let make = |kind: FieldEdgeKind| {
+            field_edge(&FieldEdge {
+                from_node: 0,
+                from_field: "k".to_string(),
+                to_node: 1,
+                to_field: "k".to_string(),
+                kind,
+            })
+            .kind
+        };
+
+        for kind in [
+            FieldEdgeKind::Filter,
+            FieldEdgeKind::JoinKey,
+            FieldEdgeKind::Conditional,
+        ] {
+            assert_eq!(
+                make(kind),
+                LayoutEdgeKind::IndirectField,
+                "{kind:?} must map to the zero-weight IndirectField overlay"
+            );
+        }
+        assert_eq!(
+            edge_rank_weight(LayoutEdgeKind::IndirectField),
+            0,
+            "an IndirectField overlay must carry zero rank weight"
+        );
+
+        // GroupBy stays a weighted Field edge even though it is INDIRECT by
+        // nature — it replaced the group-key Derive one-for-one and must keep its
+        // prior layout weight so tuned layouts do not shift.
+        assert_eq!(
+            make(FieldEdgeKind::GroupBy),
+            LayoutEdgeKind::Field,
+            "GroupBy must keep the weighted Field kind"
+        );
+        assert_eq!(
+            FieldEdgeKind::GroupBy.nature(),
+            EdgeNature::Indirect,
+            "GroupBy IS indirect by nature — the weight divergence is intentional"
+        );
+        assert!(
+            edge_rank_weight(LayoutEdgeKind::Field) > 0,
+            "the Field kind GroupBy keeps must carry a non-zero rank weight"
+        );
     }
 }

@@ -1224,17 +1224,10 @@ pub struct FieldConnectorProps {
     pub spotlight: bool,
 }
 
-#[component]
-pub fn FieldConnector(props: FieldConnectorProps) -> Element {
-    let (sx, sy) = props.start;
-    let (tx, ty) = props.end;
-    // Each relationship kind reads as a distinct hue: a pure pass-through is the
-    // quietest, an accessed carry a warm highlight, a derive the active accent.
-    // The four INDIRECT influence kinds (#147) additionally carry the
-    // `--indirect` modifier — sourced from [`FieldEdgeKind::nature`] so the
-    // value/influence split has a single source of truth — which the CSS renders
-    // ghosted/dashed so influence reads differently from value.
-    let kind_class = match props.kind {
+/// The per-kind hue class for a field edge — one distinct class per
+/// [`FieldEdgeKind`] so the CSS can colour each relationship differently.
+fn field_edge_kind_class(kind: FieldEdgeKind) -> &'static str {
+    match kind {
         FieldEdgeKind::Passthrough => "klinx-field-edge--passthrough",
         FieldEdgeKind::Access => "klinx-field-edge--access",
         FieldEdgeKind::Derive => "klinx-field-edge--derive",
@@ -1242,14 +1235,33 @@ pub fn FieldConnector(props: FieldConnectorProps) -> Element {
         FieldEdgeKind::GroupBy => "klinx-field-edge--groupby",
         FieldEdgeKind::JoinKey => "klinx-field-edge--joinkey",
         FieldEdgeKind::Conditional => "klinx-field-edge--conditional",
-    };
-    let mut extra_class = format!("klinx-field-edge {kind_class}");
-    if props.kind.nature() == EdgeNature::Indirect {
-        extra_class.push_str(" klinx-field-edge--indirect");
     }
-    if props.spotlight {
-        extra_class.push_str(" klinx-field-edge--spotlight");
+}
+
+/// The full `class` string a [`FieldConnector`] applies to its cable `<g>`.
+///
+/// Each relationship kind reads as a distinct hue: a pure pass-through is the
+/// quietest, an accessed carry a warm highlight, a derive the active accent. The
+/// four INDIRECT influence kinds (#147) additionally carry the `--indirect`
+/// modifier — gated on [`FieldEdgeKind::nature`] so the value/influence split has
+/// a single source of truth — which the CSS renders ghosted/dashed so influence
+/// reads differently from value. `spotlight` adds the local-focus modifier.
+fn field_edge_classes(kind: FieldEdgeKind, spotlight: bool) -> String {
+    let mut classes = format!("klinx-field-edge {}", field_edge_kind_class(kind));
+    if kind.nature() == EdgeNature::Indirect {
+        classes.push_str(" klinx-field-edge--indirect");
     }
+    if spotlight {
+        classes.push_str(" klinx-field-edge--spotlight");
+    }
+    classes
+}
+
+#[component]
+pub fn FieldConnector(props: FieldConnectorProps) -> Element {
+    let (sx, sy) = props.start;
+    let (tx, ty) = props.end;
+    let extra_class = field_edge_classes(props.kind, props.spotlight);
 
     rsx! {
         ConnectorPath {
@@ -1993,6 +2005,60 @@ mod tests {
                 &obstacle,
             ),
             "leaving a port perpendicularly should only touch the card at one point"
+        );
+    }
+
+    /// #147: an edge whose `kind.nature() == Indirect` gets the
+    /// `klinx-field-edge--indirect` modifier the CSS uses to render it
+    /// ghosted/dashed; a DIRECT edge does not. Asserts the actual class string the
+    /// connector builds (via the extracted [`field_edge_classes`] helper the
+    /// component calls), so it fails if the `nature()`-gated modifier is dropped —
+    /// not a scan of klinx.css.
+    #[test]
+    fn indirect_edge_gets_indirect_modifier_class() {
+        let all = [
+            FieldEdgeKind::Passthrough,
+            FieldEdgeKind::Access,
+            FieldEdgeKind::Derive,
+            FieldEdgeKind::Filter,
+            FieldEdgeKind::GroupBy,
+            FieldEdgeKind::JoinKey,
+            FieldEdgeKind::Conditional,
+        ];
+        for kind in all {
+            let classes = field_edge_classes(kind, false);
+            // Always the base class plus the per-kind hue class.
+            assert!(
+                classes.starts_with("klinx-field-edge "),
+                "{kind:?} must carry the base field-edge class, got {classes:?}"
+            );
+            assert!(
+                classes.contains(field_edge_kind_class(kind)),
+                "{kind:?} must carry its per-kind hue class, got {classes:?}"
+            );
+            // The `--indirect` modifier is present iff the kind is INDIRECT.
+            assert_eq!(
+                classes.contains("klinx-field-edge--indirect"),
+                kind.nature() == EdgeNature::Indirect,
+                "{kind:?}: `--indirect` presence must track nature(), got {classes:?}"
+            );
+        }
+        // A concrete INDIRECT case and a concrete DIRECT case, spelled out so the
+        // intent is unmistakable.
+        assert!(
+            field_edge_classes(FieldEdgeKind::Filter, false).contains("klinx-field-edge--indirect"),
+            "a Filter edge is INDIRECT and must be ghosted"
+        );
+        assert!(
+            !field_edge_classes(FieldEdgeKind::Derive, false)
+                .contains("klinx-field-edge--indirect"),
+            "a Derive edge is DIRECT and must not be ghosted"
+        );
+        // The spotlight modifier is additive and independent of nature.
+        assert!(
+            field_edge_classes(FieldEdgeKind::JoinKey, true)
+                .contains("klinx-field-edge--spotlight"),
+            "spotlight must add its modifier"
         );
     }
 }

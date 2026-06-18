@@ -101,7 +101,7 @@ pub enum EdgeNature {
 /// value. [`FieldEdgeKind::nature`] partitions the variants into
 /// [`EdgeNature::Direct`] / [`EdgeNature::Indirect`]; the renderer maps each
 /// variant to a distinct stroke style.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FieldEdgeKind {
     /// Identity carry (`c → c`) whose column is read by no derive — it rides
     /// through the node untouched and unreferenced.
@@ -125,11 +125,16 @@ pub enum FieldEdgeKind {
     /// representation of the post-Aggregate failure grain (it retired the former
     /// `FieldRow::is_aggregate_grain` flag, so the grain is represented once).
     GroupBy,
-    /// INDIRECT (#147): a shared fan-in column carried from more than one input
-    /// of a `Merge`/`Combine` — the join key on which the inputs are aligned. It
-    /// rides through as a value (a separate DIRECT carry edge), *and* influences
-    /// the join, which this edge records. Per-input value-column provenance for
-    /// the other Combine columns stays out of scope (#67). OpenLineage `JOIN`.
+    /// INDIRECT (#147): an input column read by a `Combine` join predicate
+    /// (`where_expr`, e.g. `products.product_code == inventory.product_code`). It
+    /// is the real join key on which the inputs are matched — derived from the
+    /// predicate's read columns through the same `predicate_support` path as
+    /// `Filter`/`Conditional`, so a key whose two sides differ in name
+    /// (`left.k1 == right.k2`) is captured and an unrelated same-named column is
+    /// not. A `Merge` is a streamwise row UNION (rows stacked, never aligned), so
+    /// it performs no join and emits no `JoinKey` edge. Per-input value-column
+    /// provenance for the other Combine columns stays out of scope (#67).
+    /// OpenLineage `JOIN`.
     JoinKey,
     /// INDIRECT (#147): an input column read by a `Route` branch condition. It
     /// decides which branch a row takes but contributes no value to the routed
@@ -661,7 +666,7 @@ pub fn passthrough_output_fields(input_cols: &[String]) -> Vec<FieldRow> {
 /// program, descending into `emit each` bodies via `for_each_field_emit`.
 ///
 /// Order is first-seen emit order; a name emitted twice keeps its first slot.
-pub fn emitted_field_names(program: &Program) -> Vec<String> {
+fn emitted_field_names(program: &Program) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     cxl::ast::for_each_field_emit(&program.statements, &mut |name, _expr| {
@@ -692,16 +697,19 @@ pub fn emit_supports(program: &Program) -> Vec<(String, HashSet<String>)> {
     out
 }
 
-/// The let-resolved input-column support of a standalone *predicate* expression
-/// — the columns a `Cull` removal predicate or a `Route` branch condition reads
-/// (#147).
+/// The input-column support of a standalone *predicate* expression — the columns
+/// a `Cull` removal predicate, a `Route` branch condition, or a `Combine`
+/// `where_expr` join predicate reads (#147).
 ///
 /// INDIRECT influence edges originate from predicate expression *strings* (e.g.
-/// `count(*) < 2`, `region == 'EU'`), which are not `emit` statements and so
-/// `parse_clean` cannot parse on their own. This wraps the predicate as a
-/// synthetic `emit __pred = {expr}` statement and reuses the entire
-/// `parse_clean` + let-resolution + [`emit_supports`] machinery, returning the
-/// single resulting support set: the input columns the predicate truly reads.
+/// `count(*) < 2`, `region == 'EU'`, `a.id == b.id`), which are not `emit`
+/// statements and so `parse_clean` cannot parse on their own. This wraps the
+/// predicate as a synthetic `emit __pred = {expr}` statement and reuses the
+/// entire `parse_clean` + [`emit_supports`] machinery, returning the single
+/// resulting support set: the input columns the predicate truly reads. A
+/// predicate is structurally a single expression, so it cannot carry a
+/// statement-level `let`; the shared let-resolution pass is therefore a no-op for
+/// any well-formed predicate (it only fires for multi-statement `emit` bodies).
 ///
 /// Returns `None` when the wrapped statement does not parse cleanly (mirroring
 /// the module-wide never-infer-from-garbage rule — a predicate we cannot trust
@@ -712,9 +720,16 @@ pub fn emit_supports(program: &Program) -> Vec<(String, HashSet<String>)> {
 pub fn predicate_support(expr: &str) -> Option<HashSet<String>> {
     let program = parse_clean(&format!("emit __pred = {expr}"))?;
     let mut supports = emit_supports(&program);
-    // Exactly one field emit is expected; take its support set. `pop` yields the
-    // sole pair (or `None` if the synthetic emit was somehow not a field emit).
-    supports.pop().map(|(_, support)| support)
+    // The wrap is trusted ONLY when it parsed into EXACTLY the single synthetic
+    // `__pred` field emit we authored. A pathological `expr` could parse into a
+    // body with extra field emits (e.g. an injected statement) or none at all
+    // (e.g. it parsed as something other than a `__pred` field emit); in either
+    // case we never-infer-from-garbage and return `None` rather than read a
+    // support set we cannot trust. (Exactly one entry whose target is `__pred`.)
+    match supports.pop() {
+        Some((name, support)) if name == "__pred" && supports.is_empty() => Some(support),
+        _ => None,
+    }
 }
 
 /// Recursive worker for [`emit_supports`], mirroring
@@ -852,6 +867,7 @@ pub fn lineage_closure(edges: &[FieldEdge], node: usize, field: &str) -> HashSet
 /// lineage at once is permitted ONLY on explicit click (one column on demand) —
 /// hover stays 1-hop to avoid flooding the canvas.
 pub fn field_lineage_full(edges: &[FieldEdge], node: usize, field: &str) -> HashSet<usize> {
+    // PR3: add INDIRECT include/exclude toggle here
     let mut result: HashSet<usize> = HashSet::new();
 
     // Upstream (provenance): follow edges INTO the current endpoint, back to
@@ -937,12 +953,13 @@ mod tests {
         );
     }
 
-    /// `let` chains inside a predicate resolve transitively, exactly as in an
-    /// `emit` body — `predicate_support` is the same pipeline.
+    /// A single-column predicate resolves to exactly that column. A predicate is
+    /// structurally an expression, so it cannot carry a statement-level `let`;
+    /// this locks the simplest read-column extraction (no let resolution to
+    /// exercise — `predicate_support` is the same pipeline as an `emit` body, but
+    /// the let-chain machinery only fires when a body actually declares one).
     #[test]
-    fn predicate_support_resolves_let_chains() {
-        // A let-bearing predicate is wrapped as a multi-statement body; the
-        // synthetic emit reads the let, which resolves to its base column.
+    fn predicate_support_single_column_resolves_to_that_column() {
         let support = predicate_support("score > 0.0").unwrap();
         assert_eq!(support, HashSet::from(["score".to_string()]));
     }
@@ -1209,6 +1226,68 @@ mod tests {
 
         // Hovering the unrelated target reaches only its own edge.
         assert_eq!(lineage_closure(&edges, 1, "w"), HashSet::from([2]));
+    }
+
+    /// #147: INDIRECT influence edges (Filter/JoinKey/Conditional/GroupBy) are
+    /// kept VISIBLE by both reveal walks — selecting either endpoint of an
+    /// INDIRECT edge returns that edge from `lineage_closure` (the 1-hop hover)
+    /// AND from `field_lineage_full` (the transitive click). The walks are
+    /// deliberately kind-agnostic (the PR3 toggle is deferred), so an INDIRECT
+    /// edge is never permanently invisible. This fails if a future change filters
+    /// either walk by `nature()`.
+    #[test]
+    fn indirect_edge_endpoints_are_revealed_by_closure_and_full_walk() {
+        // A DIRECT carry 0.k -> 1.k, then an INDIRECT JoinKey 0.k -> 1.k (the
+        // value carry and its influence overlay coexist), plus an INDIRECT Filter
+        // that fans onward 1.k -> 2.kept.
+        let edges = vec![
+            FieldEdge {
+                from_node: 0,
+                from_field: "k".to_string(),
+                to_node: 1,
+                to_field: "k".to_string(),
+                kind: FieldEdgeKind::Passthrough,
+            },
+            FieldEdge {
+                from_node: 0,
+                from_field: "k".to_string(),
+                to_node: 1,
+                to_field: "k".to_string(),
+                kind: FieldEdgeKind::JoinKey,
+            },
+            FieldEdge {
+                from_node: 1,
+                from_field: "k".to_string(),
+                to_node: 2,
+                to_field: "kept".to_string(),
+                kind: FieldEdgeKind::Filter,
+            },
+        ];
+
+        // Hovering the producer endpoint 0.k reveals BOTH incident edges at that
+        // node — the DIRECT carry (0) AND the INDIRECT JoinKey (1).
+        assert_eq!(
+            lineage_closure(&edges, 0, "k"),
+            HashSet::from([0, 1]),
+            "the INDIRECT JoinKey edge must be revealed on hover, not hidden"
+        );
+
+        // Selecting 0.k transitively must surface the whole chain INCLUDING the
+        // INDIRECT edges: the carry (0), the JoinKey (1), and the downstream
+        // Filter (2) reached via the shared 1.k endpoint.
+        assert_eq!(
+            field_lineage_full(&edges, 0, "k"),
+            HashSet::from([0, 1, 2]),
+            "the transitive walk must keep INDIRECT edges visible end to end"
+        );
+
+        // Selecting the Filter's downstream endpoint 2.kept walks back up through
+        // the INDIRECT edge to its producer — the INDIRECT edge is traversable in
+        // both directions.
+        assert!(
+            field_lineage_full(&edges, 2, "kept").contains(&2),
+            "selecting an INDIRECT edge's target must reveal that edge"
+        );
     }
 
     /// `group_endpoints_by_node` records BOTH sides of every supplied edge under
