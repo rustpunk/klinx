@@ -1069,11 +1069,19 @@ pub fn CanvasPanel() -> Element {
         let Some(node) = selected_reveal_rect else {
             return;
         };
+        // Copy the peeked pan/zoom out into locals so each read guard drops at the
+        // end of its `let` — NOT held into the `if let` body. The scrutinee's
+        // temporaries stay alive across the matched block (the pattern could borrow
+        // them), so peeking inline here and then `pan_x.set(..)` below would be a
+        // read borrow live across a write → `AlreadyBorrowed` panic.
+        let current_pan_x = *pan_x.peek();
+        let current_pan_y = *pan_y.peek();
+        let current_zoom = *zoom.peek();
         if let Some((px, py)) = pan_to_reveal(
             node,
-            *pan_x.peek(),
-            *pan_y.peek(),
-            *zoom.peek(),
+            current_pan_x,
+            current_pan_y,
+            current_zoom,
             viewport_w,
             viewport_h,
             REVEAL_MARGIN,
