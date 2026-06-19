@@ -98,12 +98,14 @@ fn resolve_role_edge_anchors(
 }
 
 // ── Canvas transform constants ───────────────────────────────────────────────
-const ZOOM_MIN: f32 = 0.25;
-const ZOOM_MAX: f32 = 4.0;
+// `pub(super)` so the body overlay (#171) reuses the SAME clamp range and step
+// for its independent wheel-zoom, keeping overlay and main-canvas zoom identical.
+pub(super) const ZOOM_MIN: f32 = 0.25;
+pub(super) const ZOOM_MAX: f32 = 4.0;
 /// Zoom factor applied per scroll-wheel "tick" (for Line/Page delta modes).
-const ZOOM_STEP_LINE: f32 = 1.10;
+pub(super) const ZOOM_STEP_LINE: f32 = 1.10;
 /// Zoom factor per pixel of scroll delta (for Pixel mode).
-const ZOOM_STEP_PIXEL: f32 = 0.001;
+pub(super) const ZOOM_STEP_PIXEL: f32 = 0.001;
 /// Screen-space padding kept around the node graph when fitting it to view.
 const FIT_MARGIN: f32 = 60.0;
 /// Breathing room kept on each edge when auto-panning a freshly selected field's
@@ -2101,6 +2103,12 @@ pub(super) struct BodyConnection {
 /// connectors, and the SVG overlay size. The overlay renders these inside its own
 /// [`PanViewport`] with independent pan/zoom, REUSING the same [`CanvasNode`] /
 /// [`Connector`] components the main canvas uses — no card/connector reimplementation.
+///
+/// `Clone + PartialEq` so the overlay can hold it in a `use_memo` keyed on the
+/// displayed body + zoom (#171), and only re-run the O(nodes+edges) layout +
+/// routing when one of those changes — never on a hover that merely writes the
+/// overlay's lineage-context signals.
+#[derive(Clone, PartialEq)]
 pub(super) struct BodyCanvas {
     pub cards: Vec<(StageView, FieldDisplayInfo)>,
     pub connections: Vec<BodyConnection>,

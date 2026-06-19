@@ -3660,6 +3660,21 @@ pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) 
     view
 }
 
+/// Build a composition body's mini-DAG view WITHOUT the barycenter layout pass
+/// (#171).
+///
+/// For callers that re-run their own canvas layout afterward (the body overlay
+/// applies `apply_canvas_layout(PortAwareSugiyama)` over the result), the
+/// barycenter pass in [`derive_body_view`] is pure waste — its x/y coordinates are
+/// immediately overwritten. This skips it: the returned view carries the same
+/// stages, rows, connections, and field edges, only without canvas coordinates.
+pub fn derive_body_view_unlaid(
+    body: &clinker_plan::plan::composition_body::BoundBody,
+) -> PipelineView {
+    let (view, _idx_to_slot) = build_body_view(body, false);
+    view
+}
+
 /// Shared core for [`derive_body_view`] and [`derive_body_scope`]: build a composition
 /// body's mini-DAG view (#155 review). Returns the view plus the NodeIndex→slot map so
 /// the scope path can project the body's port→NodeIndex tables into slot space without

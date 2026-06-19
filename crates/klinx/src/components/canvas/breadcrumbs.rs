@@ -54,24 +54,33 @@ pub fn BreadcrumbBar(
             }
 
             for (depth, alias) in frames.iter().enumerate() {
-                span { class: "klinx-breadcrumb-sep", " > " }
+                // Key each segment by its stack DEPTH (a stable identity — aliases
+                // can repeat across nested compositions, the index cannot), so
+                // Dioxus diffs segments by position rather than re-creating the run
+                // on every push/truncate (AP-1). The wrapper holds the separator +
+                // label as one keyed unit.
                 {
                     let is_last = depth == frames.len() - 1;
                     let target_depth = depth + 1;
                     rsx! {
                         span {
-                            class: if is_last {
-                                "klinx-breadcrumb klinx-breadcrumb--current"
-                            } else {
-                                "klinx-breadcrumb klinx-breadcrumb--clickable"
-                            },
-                            onclick: move |_| {
-                                if !is_last {
-                                    let mut stack = stack_signal;
-                                    stack.write().truncate(target_depth);
-                                }
-                            },
-                            "{alias}"
+                            key: "{depth}",
+                            class: "klinx-breadcrumb-segment",
+                            span { class: "klinx-breadcrumb-sep", " > " }
+                            span {
+                                class: if is_last {
+                                    "klinx-breadcrumb klinx-breadcrumb--current"
+                                } else {
+                                    "klinx-breadcrumb klinx-breadcrumb--clickable"
+                                },
+                                onclick: move |_| {
+                                    if !is_last {
+                                        let mut stack = stack_signal;
+                                        stack.write().truncate(target_depth);
+                                    }
+                                },
+                                "{alias}"
+                            }
                         }
                     }
                 }

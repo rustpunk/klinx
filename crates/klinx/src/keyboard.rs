@@ -44,6 +44,21 @@ pub fn handle_keyboard(event: &KeyboardEvent, tab_mgr: &mut TabManagerState) -> 
         return true;
     }
 
+    // ── Escape — close the in-context composition body overlay (#171) ────
+    // Fallback for the overlay's LOCAL `onkeydown`, which relies on `autofocus`
+    // on a focusable <div> that WebKitGTK honors inconsistently. When the overlay
+    // is open this clears its stack so Esc always dismisses; when it is empty this
+    // is a no-op and Esc falls through to any other handler (no other Escape
+    // semantics exist today). No modifiers, so it sits with the no-Ctrl shortcuts
+    // above the `if !ctrl` gate.
+    if matches!(key, Key::Escape) && !ctrl && !alt && !shift {
+        let mut overlay = app.composition_overlay_stack;
+        if !overlay.peek().is_empty() {
+            overlay.write().clear();
+            return true;
+        }
+    }
+
     // ── Alt+Letter — Pipeline panel toggles (Pipeline context only) ──────
     if alt
         && !ctrl

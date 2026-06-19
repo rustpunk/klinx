@@ -711,4 +711,116 @@ mod tests {
         promote_overlay_to_drill(&mut overlay, &mut drill);
         assert_eq!(drill.len(), 1);
     }
+
+    /// Compile a tiny `src → comp → out` pipeline whose `comp` node uses a
+    /// one-transform composition body, returning the `CompiledPlan` so resolver
+    /// tests have a real plan with a populated `composition_body_assignments`. The
+    /// temporary workspace is removed before returning.
+    fn compiled_plan_with_composition() -> CompiledPlan {
+        use clinker_plan::config::{CompileContext, parse_config};
+
+        let unique = format!(
+            "klinx-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temp composition workspace");
+        std::fs::write(
+            root.join("body.comp.yaml"),
+            r#"_compose:
+  name: passthrough
+  inputs:
+    src:
+      schema:
+        - { name: x, type: int }
+  outputs:
+    result: pass
+nodes:
+  - type: transform
+    name: pass
+    input: src
+    config:
+      cxl: |
+        emit y = x + 1
+"#,
+        )
+        .expect("write composition fixture");
+
+        let pipeline = r#"
+pipeline:
+  name: resolve_drill
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: x, type: int }
+  - type: composition
+    name: comp
+    input: src
+    use: ./body.comp.yaml
+    inputs:
+      src: src
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("pipeline fixture parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("pipeline fixture compiles");
+        let _ = std::fs::remove_dir_all(root);
+        plan
+    }
+
+    /// #171: the shared resolver returns a frame for a real composition node —
+    /// with that node's name as the alias and the body id the plan assigned it, so
+    /// the overlay and the full-swap drill navigate into the SAME body.
+    #[test]
+    fn resolve_composition_frame_returns_frame_for_known_node() {
+        let plan = compiled_plan_with_composition();
+        let expected_body = *plan
+            .artifacts()
+            .composition_body_assignments
+            .get("comp")
+            .expect("the compiled plan assigns a body to `comp`");
+
+        let resolved =
+            resolve_composition_frame(&plan, "comp").expect("known composition node resolves");
+        assert_eq!(
+            resolved.alias, "comp",
+            "the alias is the call-site node name"
+        );
+        assert_eq!(
+            resolved.body_id, expected_body,
+            "the frame points at the plan's assigned body id",
+        );
+    }
+
+    /// #171: the resolver returns `None` for a node the plan has no body
+    /// assignment for (a non-composition name, or a typo) — the `▶`/overlay then
+    /// silently no-ops rather than pushing a bogus frame.
+    #[test]
+    fn resolve_composition_frame_returns_none_for_unknown_node() {
+        let plan = compiled_plan_with_composition();
+        assert!(
+            resolve_composition_frame(&plan, "src").is_none(),
+            "a non-composition node has no body assignment",
+        );
+        assert!(
+            resolve_composition_frame(&plan, "no_such_node").is_none(),
+            "an unknown node name resolves to None",
+        );
+    }
 }

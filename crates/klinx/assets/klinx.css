@@ -5396,6 +5396,13 @@ input:-webkit-autofill:focus {
   position: relative;
 }
 
+/* Per-depth breadcrumb segment wrapper (#171): groups the separator + label as
+   one keyed unit so the flex bar keeps them inline. */
+.klinx-breadcrumb-segment {
+  display: inline-flex;
+  align-items: center;
+}
+
 .klinx-breadcrumb__segment {
   font-family: var(--klinx-font-ui);
   font-size: 11px;

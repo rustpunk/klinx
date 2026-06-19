@@ -9,14 +9,19 @@
 //! The overlay reads [`crate::state::AppState::composition_overlay_stack`]: its
 //! top frame names the body to show. An in-overlay breadcrumb navigates nested
 //! compositions WITHIN the overlay (pushing/truncating the overlay stack, never
-//! the full-swap drill stack). The inner sub-canvas gets its OWN pan/zoom,
-//! independent of the parent, by mounting a second [`super::panel::PanViewport`]
-//! over a locally-derived body view.
+//! the full-swap drill stack). The inner sub-canvas gets its OWN pan AND zoom,
+//! independent of the parent: a local [`super::panel::PanViewport`] over a
+//! locally-derived body view, panned by left/middle drag and zoomed by the
+//! header zoom buttons (the engine-independent control) plus a best-effort
+//! cursor-anchored `onwheel` mirroring the main canvas — WebKitGTK does not
+//! reliably deliver `wheel` to a `position:fixed` overlay, so the buttons are the
+//! primary zoom affordance and the wheel is a bonus where it is delivered.
 //!
-//! Dismissal: Esc (a local `onkeydown` on the focusable overlay root), backdrop
-//! click, or the `✕` button — each clears the overlay stack. The "OPEN FULL"
-//! button is the escape hatch to the existing full-swap drill: it moves the
-//! overlay frames onto the drill stack and clears the overlay.
+//! Dismissal: Esc (a local `onkeydown` on the focusable overlay root, with an
+//! app-root keyboard fallback in [`crate::keyboard`] for WebKitGTK focus quirks),
+//! a genuine backdrop click, or the `✕` button — each clears the overlay stack.
+//! The "OPEN FULL" button is the escape hatch to the existing full-swap drill: it
+//! moves the overlay frames onto the drill stack and clears the overlay.
 //!
 //! This is the CONTAINED-overlay approach (the brief's bounded fallback): rather
 //! than extracting a shared `CanvasSurface` from the ~1240-line `CanvasPanel`
@@ -27,15 +32,18 @@
 //! components the main canvas uses. The in-overlay lineage ribbon and the full
 //! `CanvasSurface` extraction are a documented Phase-2 follow-up.
 
+use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 
-use crate::pipeline_view::derive_body_view;
+use crate::pipeline_view::derive_body_view_unlaid;
 use crate::state::{promote_overlay_to_drill, use_app_state};
 
 use super::breadcrumbs::{BreadcrumbBar, BreadcrumbTarget};
 use super::connector::Connector;
 use super::node::CanvasNode;
-use super::panel::{PanViewport, build_body_canvas};
+use super::panel::{
+    PanViewport, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP_LINE, ZOOM_STEP_PIXEL, build_body_canvas,
+};
 use super::{CanvasHover, HoverTarget, PinnedField};
 
 /// The in-context composition body overlay (#171).
@@ -54,18 +62,26 @@ pub fn BodyOverlay() -> Element {
     // of the parent canvas (its transform lives on `CanvasPanel`, untouched here).
     let mut pan_x = use_signal(|| 0.0_f32);
     let mut pan_y = use_signal(|| 0.0_f32);
-    let zoom = use_signal(|| 1.0_f32);
+    let mut zoom = use_signal(|| 1.0_f32);
 
     // Non-reactive drag state for the inner pan — a hot path that must not
     // re-render per move, so it lives in a `use_hook` cell, mirroring the main
-    // canvas drag.
+    // canvas drag. `down_on_backdrop` tracks whether the current gesture STARTED
+    // on the backdrop, so a pan that begins inside the sub-canvas and overshoots
+    // onto the backdrop on release does not dismiss the overlay (#171 review 3).
     let drag = use_hook(|| std::rc::Rc::new(std::cell::RefCell::new(OverlayDrag::default())));
 
     // Field-lineage contexts the reused `CanvasNode`/`FieldRowView` consume. The
     // overlay provides its OWN, isolated from the parent canvas's contexts, so a
-    // hover inside the overlay never lights the parent and vice versa. Phase 1
-    // does not draw the field-lineage overlay inside the lightbox, but the cards
-    // still require these contexts to mount.
+    // hover inside the overlay never lights the parent and vice versa.
+    //
+    // Phase 1 does NOT draw the in-overlay field-lineage ribbon, so these contexts
+    // are effectively write-only (the cards publish hover/pin into them, but the
+    // overlay never reads them back to render cables). They exist because
+    // `CanvasNode` requires them to mount. The body-canvas `use_memo` below keys on
+    // `(body_id, zoom)` only, so these hover writes do NOT re-run layout — the
+    // wasted churn is bounded to the cards' own memoized re-render. Wiring the
+    // ribbon to read these is a Phase-2 follow-up (the `CanvasSurface` extraction).
     use_context_provider(|| {
         CanvasHover(
             Signal::new(HoverTarget::None),
@@ -87,17 +103,26 @@ pub fn BodyOverlay() -> Element {
     let breadcrumb_frames: Vec<String> = stack.iter().map(|f| f.alias.clone()).collect();
     let depth = stack.len();
 
-    // Derive the body view for the top frame, mirroring `current_pipeline_view`'s
-    // missing-body fallback (no compiled plan / unknown body → empty canvas).
-    let view = {
-        let compiled_guard = state.compiled_plan.read();
-        compiled_guard
-            .as_ref()
-            .and_then(|plan| plan.body_of(frame.body_id))
-            .map(derive_body_view)
-            .unwrap_or_default()
-    };
-    let canvas = build_body_canvas(view, *zoom.read());
+    // Body render model, MEMOIZED on (body_id, zoom) (#171 review 2). The heavy
+    // `apply_canvas_layout(PortAwareSugiyama)` + obstacle-aware routing inside
+    // `build_body_canvas` re-runs ONLY when the displayed body or the zoom changes
+    // — never on a hover (which writes the lineage-context signals above, not read
+    // here). `derive_body_view_unlaid` skips the wasted barycenter pass that the
+    // public `derive_body_view` would run, since `build_body_canvas` re-lays-out
+    // anyway. `body_id` is `Copy`; `zoom` feeds the Auto display-density choice.
+    let body_id = frame.body_id;
+    let canvas = use_memo(move || {
+        let z = *zoom.read();
+        let view = {
+            let compiled_guard = state.compiled_plan.read();
+            compiled_guard
+                .as_ref()
+                .and_then(|plan| plan.body_of(body_id))
+                .map(derive_body_view_unlaid)
+                .unwrap_or_default()
+        };
+        build_body_canvas(view, z)
+    });
 
     // ── Inner pan handlers (left/middle-drag on the sub-canvas background) ──
     let drag_down = {
@@ -140,16 +165,115 @@ pub fn BodyOverlay() -> Element {
         }
     };
 
+    // Inner zoom — cursor-anchored, mirroring the main canvas wheel handler
+    // (`panel.rs::on_wheel`) with the same clamp range and step constants, so the
+    // overlay zooms independently of the parent (#171 review 1). Anchoring keeps
+    // the point under the cursor fixed in world space while scaling.
+    let on_wheel = move |e: WheelEvent| {
+        let factor = match e.delta() {
+            WheelDelta::Pixels(data) => {
+                let dy = data.y as f32;
+                if dy == 0.0 {
+                    return;
+                }
+                1.0 - dy * ZOOM_STEP_PIXEL
+            }
+            WheelDelta::Lines(data) => {
+                let dy = data.y as f32;
+                if dy == 0.0 {
+                    return;
+                }
+                if dy < 0.0 {
+                    ZOOM_STEP_LINE
+                } else {
+                    1.0 / ZOOM_STEP_LINE
+                }
+            }
+            WheelDelta::Pages(data) => {
+                let dy = data.y as f32;
+                if dy == 0.0 {
+                    return;
+                }
+                if dy < 0.0 {
+                    ZOOM_STEP_LINE * ZOOM_STEP_LINE
+                } else {
+                    1.0 / (ZOOM_STEP_LINE * ZOOM_STEP_LINE)
+                }
+            }
+        };
+
+        let old_z = *zoom.peek();
+        let new_z = (old_z * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+        if (new_z - old_z).abs() < 0.0001 {
+            return;
+        }
+
+        let cursor = e.client_coordinates();
+        let cx = cursor.x as f32;
+        let cy = cursor.y as f32;
+        let old_px = *pan_x.peek();
+        let old_py = *pan_y.peek();
+        let ratio = new_z / old_z;
+        pan_x.set(cx - (cx - old_px) * ratio);
+        pan_y.set(cy - (cy - old_py) * ratio);
+        zoom.set(new_z);
+    };
+
+    // Discrete zoom step for the header +/- buttons (#171 review 1). Anchors on
+    // the overlay's CENTER (the buttons have no cursor position) so the body grows
+    // about the middle of the lightbox; same clamp range as the wheel path. These
+    // buttons are the engine-independent zoom control — WebKitGTK does not reliably
+    // deliver `wheel` to a `position:fixed` overlay, so the wheel path above is a
+    // best-effort on engines that do (the web target), and these always work.
+    // `Fn` (not `FnMut`) so it can be shared by both the `+` and `-` buttons: it
+    // copies the `Copy` signals locally before mutating, so calling it needs only
+    // `&self`. Mirrors the wheel path's clamp, anchored on the overlay center.
+    let zoom_step = move |factor: f32| {
+        let mut zoom = zoom;
+        let mut pan_x = pan_x;
+        let mut pan_y = pan_y;
+        let old_z = *zoom.peek();
+        let new_z = (old_z * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+        if (new_z - old_z).abs() < 0.0001 {
+            return;
+        }
+        // Anchor on the overlay region's center. The exact center is unknown
+        // without a measurement; the visible body is small and re-centred by the
+        // depth re-key, so anchoring on a fixed nominal center keeps it stable.
+        let (cx, cy) = (700.0_f32, 450.0_f32);
+        let old_px = *pan_x.peek();
+        let old_py = *pan_y.peek();
+        let ratio = new_z / old_z;
+        pan_x.set(cx - (cx - old_px) * ratio);
+        pan_y.set(cy - (cy - old_py) * ratio);
+        zoom.set(new_z);
+    };
+    let reset_zoom = move |_| {
+        zoom.set(1.0);
+        pan_x.set(0.0);
+        pan_y.set(0.0);
+    };
+
     rsx! {
         // Backdrop — fixed full-viewport, sits ABOVE the still-mounted parent
         // canvas. Its blur + semi-opaque fill dim the parent; its pointer-events
-        // intercept parent interaction. Clicking it dismisses the overlay.
-        // `tabindex` + `autofocus` make it focusable so the local Esc handler
-        // fires without a central keyboard arm.
+        // intercept parent interaction. `tabindex` + `autofocus` make it focusable
+        // so the local Esc handler fires; `crate::keyboard` is the fallback path.
         div {
             class: "klinx-body-overlay-backdrop",
             tabindex: "0",
             autofocus: true,
+            // A pointer-DOWN that lands directly on the backdrop (not the panel)
+            // arms a "true backdrop gesture"; a pointer-down that starts inside the
+            // sub-canvas leaves it disarmed, so a pan overshooting onto the backdrop
+            // on release does not dismiss (#171 review 3). The panel `stop_propagation`s
+            // its own mousedown, so this only fires for genuine backdrop presses.
+            onmousedown: {
+                let drag = drag.clone();
+                move |_: MouseEvent| {
+                    drag.borrow_mut().down_on_backdrop = true;
+                }
+            },
             onkeydown: move |e: KeyboardEvent| {
                 if e.key() == Key::Escape {
                     e.stop_propagation();
@@ -157,15 +281,30 @@ pub fn BodyOverlay() -> Element {
                     overlay.write().clear();
                 }
             },
-            onclick: move |_| {
-                let mut overlay = state.composition_overlay_stack;
-                overlay.write().clear();
+            // Dismiss ONLY when the gesture both pressed and released on the
+            // backdrop. The flag is consumed here so the next click re-evaluates.
+            onclick: {
+                let drag = drag.clone();
+                move |_: MouseEvent| {
+                    let was_backdrop = {
+                        let mut d = drag.borrow_mut();
+                        let v = d.down_on_backdrop;
+                        d.down_on_backdrop = false;
+                        v
+                    };
+                    if was_backdrop {
+                        let mut overlay = state.composition_overlay_stack;
+                        overlay.write().clear();
+                    }
+                }
             },
 
-            // Overlay panel — large, near-fullscreen. `stop_propagation` keeps a
-            // click inside the panel from bubbling to the backdrop's dismiss.
+            // Overlay panel — large, near-fullscreen. `stop_propagation` on both
+            // mousedown and click keeps a press/click inside the panel from
+            // bubbling to the backdrop (so the backdrop never sees it as its own).
             div {
                 class: "klinx-body-overlay",
+                onmousedown: move |e: MouseEvent| e.stop_propagation(),
                 onclick: move |e: MouseEvent| e.stop_propagation(),
 
                 // ── Header: in-overlay breadcrumb + OPEN FULL + close ──────
@@ -183,17 +322,46 @@ pub fn BodyOverlay() -> Element {
 
                     div { class: "klinx-body-overlay-header-spacer" }
 
+                    // ── Independent zoom controls (#171 review 1) ───────────
+                    // The overlay sub-canvas zooms independently of the parent.
+                    // These buttons drive the LOCAL `zoom` signal; the `onwheel`
+                    // on the canvas region below mirrors the main canvas wheel-zoom
+                    // where the engine delivers wheel to the overlay.
+                    button {
+                        class: "klinx-body-overlay-btn",
+                        title: "Zoom out",
+                        onclick: move |_| zoom_step(1.0 / ZOOM_STEP_LINE),
+                        "\u{2212}"
+                    }
+                    button {
+                        class: "klinx-body-overlay-btn",
+                        title: "Reset zoom",
+                        onclick: reset_zoom,
+                        "1:1"
+                    }
+                    button {
+                        class: "klinx-body-overlay-btn",
+                        title: "Zoom in",
+                        onclick: move |_| zoom_step(ZOOM_STEP_LINE),
+                        "+"
+                    }
+
                     // Escape hatch to the existing full-swap drill: move the
                     // overlay frames onto the drill stack, then clear the overlay.
+                    // Sequential writes (take + drop each guard in turn) avoid
+                    // holding two live `write()` borrows at once (#171 review 6).
                     button {
                         class: "klinx-body-overlay-btn",
                         title: "Open this body in the full canvas",
                         onclick: move |_| {
                             let mut overlay = state.composition_overlay_stack;
                             let mut drill = state.composition_drill_stack;
-                            let mut overlay_frames = overlay.write();
-                            let mut drill_frames = drill.write();
-                            promote_overlay_to_drill(&mut overlay_frames, &mut drill_frames);
+                            let mut frames = overlay.peek().clone();
+                            {
+                                let mut drill_frames = drill.write();
+                                promote_overlay_to_drill(&mut frames, &mut drill_frames);
+                            }
+                            overlay.write().clear();
                         },
                         "OPEN FULL"
                     }
@@ -211,14 +379,15 @@ pub fn BodyOverlay() -> Element {
 
                 // ── Inner sub-canvas: own PanViewport + independent pan/zoom ──
                 // `overflow:hidden` + `position:relative` (CSS) so the viewport
-                // clips to the overlay region and the cards' world-space cards
-                // pan/zoom within the lightbox, not the screen.
+                // clips to the overlay region and the world-space cards pan/zoom
+                // within the lightbox, not the screen.
                 div {
                     class: "klinx-body-overlay-canvas",
                     onmousedown: drag_down,
                     onmousemove: drag_move,
                     onmouseup: drag_up,
                     onmouseleave: drag_leave,
+                    onwheel: on_wheel,
 
                     // Re-key by depth so navigating a breadcrumb level remounts the
                     // viewport (and resets its pan) for the newly-shown body.
@@ -228,13 +397,20 @@ pub fn BodyOverlay() -> Element {
                         pan_y,
                         zoom,
 
+                        // NOTE: this card/connector/SVG rsx is hand-copied from
+                        // `panel.rs` (the contained-overlay cost). It hardcodes
+                        // `dimmed:false` and DROPS the main canvas's Filter-mode
+                        // `filter_keep_nodes` gate and the `--recede` hover class —
+                        // Phase 1 draws the body's plain node-level DAG only. The
+                        // future `CanvasSurface` extraction supersedes this copy and
+                        // restores the reveal behavior in the overlay (Phase 2).
                         svg {
                             class: "klinx-canvas-svg klinx-canvas-svg--base",
-                            width: "{canvas.svg_w}",
-                            height: "{canvas.svg_h}",
+                            width: "{canvas.read().svg_w}",
+                            height: "{canvas.read().svg_h}",
                             g {
                                 class: "klinx-canvas-edges",
-                                for conn in canvas.connections {
+                                for conn in canvas.read().connections.clone() {
                                     Connector {
                                         key: "{conn.from.id}-{conn.to.id}-{conn.from_branch:?}",
                                         from: conn.from,
@@ -246,7 +422,7 @@ pub fn BodyOverlay() -> Element {
                             }
                         }
 
-                        for (index, (stage, display)) in canvas.cards.into_iter().enumerate() {
+                        for (index, (stage, display)) in canvas.read().cards.clone().into_iter().enumerate() {
                             CanvasNode {
                                 key: "{stage.id}",
                                 stage,
@@ -274,7 +450,9 @@ pub fn BodyOverlay() -> Element {
 }
 
 /// Non-reactive drag state for the overlay sub-canvas pan (hot path; no
-/// per-move re-render).
+/// per-move re-render). `down_on_backdrop` additionally distinguishes a genuine
+/// backdrop press from a pan that overshoots onto the backdrop on release, so the
+/// latter does not dismiss the overlay (#171 review 3).
 #[derive(Default)]
 struct OverlayDrag {
     active: bool,
@@ -282,4 +460,5 @@ struct OverlayDrag {
     start_y: f32,
     start_pan_x: f32,
     start_pan_y: f32,
+    down_on_backdrop: bool,
 }
