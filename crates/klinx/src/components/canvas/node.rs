@@ -5,7 +5,7 @@ use crate::pipeline_view::{
     StagePortSide, StageView,
 };
 use crate::state::SelectedField;
-use crate::state::{CompositionDrillFrame, use_app_state};
+use crate::state::{resolve_composition_frame, use_app_state};
 
 use super::{CanvasHover, LineageTarget, PinnedField};
 
@@ -539,17 +539,18 @@ pub fn CanvasNode(
                 }
             }
 
-            // Drill-in button for composition nodes
+            // Drill-in button for composition nodes — opens the in-context body
+            // overlay (#171). The full-swap drill lives behind the overlay's
+            // "OPEN FULL" escape hatch, so the card needs no second button.
             if is_composition {
                 button {
                     class: "klinx-node-drill-btn",
-                    title: "Drill into composition",
+                    title: "Open composition body",
                     onclick: {
                         let stage_id = stage.id.clone();
-                        let subtitle = stage.subtitle.clone();
                         move |e: MouseEvent| {
                             e.stop_propagation();
-                            drill_into_composition(&state, &stage_id, &subtitle);
+                            open_composition_overlay(&state, &stage_id);
                         }
                     },
                     "▶"
@@ -825,30 +826,27 @@ fn BranchPortView(name: String, predicate: Option<String>, is_default: bool) -> 
     }
 }
 
-/// Push a drill frame for a composition node onto the drill stack.
-fn drill_into_composition(state: &crate::state::AppState, node_name: &str, _subtitle: &str) {
-    let compiled_guard = state.compiled_plan.read();
-    let Some(plan) = compiled_guard.as_ref() else {
+/// The `▶` drill action for a composition node card (#171).
+///
+/// A composition node's `▶` always pushes the in-context OVERLAY stack — on the
+/// top-level canvas it opens a fresh lightbox; inside the overlay a nested `▶`
+/// pushes the same stack so drilling stays in the lightbox (the overlay re-mounts
+/// against the new top frame). The full-swap drill remains reachable only via the
+/// overlay's "OPEN FULL" escape hatch, never directly from a node card.
+///
+/// Shared frame resolution lives in [`resolve_composition_frame`]; this only
+/// routes the resolved frame onto the overlay stack. A no-op when the compiled
+/// plan has no body for `node_name` — the same silent no-op the drill has always
+/// had when no plan is compiled (`compiled_plan` is `None`).
+fn open_composition_overlay(state: &crate::state::AppState, node_name: &str) {
+    let Some(frame) = ({
+        let compiled_guard = state.compiled_plan.read();
+        compiled_guard
+            .as_ref()
+            .and_then(|plan| resolve_composition_frame(plan, node_name))
+    }) else {
         return;
     };
-
-    // Look up the body ID from the compilation artifacts
-    let Some(&body_id) = plan.artifacts().composition_body_assignments.get(node_name) else {
-        return;
-    };
-
-    // Get the use_path from the body
-    let use_path = plan
-        .body_of(body_id)
-        .map(|b| b.signature_path.clone())
-        .unwrap_or_default();
-
-    drop(compiled_guard);
-
-    let mut drill = state.composition_drill_stack;
-    drill.write().push(CompositionDrillFrame {
-        body_id,
-        alias: node_name.to_string(),
-        use_path,
-    });
+    let mut overlay = state.composition_overlay_stack;
+    overlay.write().push(frame);
 }

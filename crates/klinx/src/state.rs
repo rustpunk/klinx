@@ -314,6 +314,47 @@ pub struct CompositionDrillFrame {
     pub use_path: std::path::PathBuf,
 }
 
+/// Resolve a composition node name to a drill/overlay frame against a compiled
+/// plan, or `None` when the plan has no body assignment for that node.
+///
+/// Shared by the full-swap drill (`composition_drill_stack`) and the in-context
+/// overlay (`composition_overlay_stack`, #171): both navigate into the SAME body
+/// for a given call-site, so they resolve the frame identically and only differ
+/// in which stack they push it onto. Kept as a free function so the resolution
+/// (body-id lookup + `use_path` read) is unit-testable without a Dioxus runtime.
+pub fn resolve_composition_frame(
+    plan: &CompiledPlan,
+    node_name: &str,
+) -> Option<CompositionDrillFrame> {
+    let &body_id = plan
+        .artifacts()
+        .composition_body_assignments
+        .get(node_name)?;
+    let use_path = plan
+        .body_of(body_id)
+        .map(|b| b.signature_path.clone())
+        .unwrap_or_default();
+    Some(CompositionDrillFrame {
+        body_id,
+        alias: node_name.to_string(),
+        use_path,
+    })
+}
+
+/// Promote the in-context overlay frames to the full-swap drill stack (#171).
+///
+/// The overlay's "OPEN FULL" escape hatch: the user has navigated some depth
+/// inside the overlay and wants the classic full-canvas drill at that same depth.
+/// Moves every overlay frame onto the drill stack (appending, preserving order
+/// and any frames already there) and empties the overlay stack. A pure transform
+/// over the two frame vectors so the move is unit-testable.
+pub fn promote_overlay_to_drill(
+    overlay: &mut Vec<CompositionDrillFrame>,
+    drill: &mut Vec<CompositionDrillFrame>,
+) {
+    drill.append(overlay);
+}
+
 /// A selected output field on the currently visible canvas.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectedField {
@@ -381,6 +422,17 @@ pub struct AppState {
     /// Composition drill-in stack. Empty = top-level pipeline view.
     /// Each frame holds a body ID for rendering the sub-canvas.
     pub composition_drill_stack: Signal<Vec<CompositionDrillFrame>>,
+    /// Composition body OVERLAY stack (#171 Phase 1). Empty = no overlay open.
+    ///
+    /// Parallel to `composition_drill_stack`: the parent canvas keeps rendering
+    /// its top-level view while the in-context "lightbox" overlay independently
+    /// renders the body of `last().body_id` over a dimmed/blurred parent. The
+    /// in-overlay breadcrumb pushes/truncates THIS stack; the overlay's "OPEN
+    /// FULL" escape hatch moves these frames into `composition_drill_stack` and
+    /// clears this one (the existing full-swap drill). Reuses
+    /// `CompositionDrillFrame` verbatim — a frame means the same thing whether it
+    /// is shown in the overlay or in the full-swap canvas.
+    pub composition_overlay_stack: Signal<Vec<CompositionDrillFrame>>,
     /// Compiled plan with channel overlay applied. None when no channel is
     /// loaded or in Raw mode. Wrapped in Arc because CompiledPlan is not Clone.
     pub compiled_plan: Signal<Option<Arc<CompiledPlan>>>,
@@ -610,5 +662,53 @@ mod tests {
             let restored: KilnTheme = serde_json::from_str(&json).unwrap();
             assert_eq!(theme, restored);
         }
+    }
+
+    fn frame(alias: &str, id: u32) -> CompositionDrillFrame {
+        CompositionDrillFrame {
+            body_id: clinker_plan::plan::composition_body::CompositionBodyId(id),
+            alias: alias.to_string(),
+            use_path: std::path::PathBuf::from(format!("./{alias}.comp.yaml")),
+        }
+    }
+
+    /// #171: "OPEN FULL" moves every overlay frame onto the drill stack in order
+    /// and empties the overlay stack, so the full-swap canvas opens at exactly the
+    /// depth the user reached inside the overlay.
+    #[test]
+    fn promote_overlay_moves_frames_in_order_and_clears_overlay() {
+        let mut overlay = vec![frame("outer", 1), frame("inner", 2)];
+        let mut drill = Vec::new();
+        promote_overlay_to_drill(&mut overlay, &mut drill);
+        assert!(overlay.is_empty(), "overlay stack is emptied");
+        assert_eq!(
+            drill.iter().map(|f| f.alias.as_str()).collect::<Vec<_>>(),
+            vec!["outer", "inner"],
+            "frames keep their drill-in order",
+        );
+    }
+
+    /// #171: promotion APPENDS — any frames already on the drill stack are kept
+    /// ahead of the promoted overlay frames (defensive; the stacks are mutually
+    /// exclusive in practice, but the transform must not drop frames).
+    #[test]
+    fn promote_overlay_appends_to_existing_drill_frames() {
+        let mut overlay = vec![frame("b", 2)];
+        let mut drill = vec![frame("a", 1)];
+        promote_overlay_to_drill(&mut overlay, &mut drill);
+        assert_eq!(
+            drill.iter().map(|f| f.alias.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"],
+        );
+    }
+
+    /// #171: an empty overlay promotes to a no-op — clicking "OPEN FULL" with no
+    /// overlay open leaves the drill stack untouched.
+    #[test]
+    fn promote_empty_overlay_is_a_no_op() {
+        let mut overlay: Vec<CompositionDrillFrame> = Vec::new();
+        let mut drill = vec![frame("a", 1)];
+        promote_overlay_to_drill(&mut overlay, &mut drill);
+        assert_eq!(drill.len(), 1);
     }
 }
