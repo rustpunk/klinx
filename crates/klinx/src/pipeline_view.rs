@@ -3986,14 +3986,19 @@ fn aggregate_residual_support(
 
 /// Resolve one [`BindingArg`] to the input columns it reads (#180 GAP 1).
 ///
-/// **SHARP EDGE:** `BindingArg::Field(idx)` indexes the aggregate's ENGINE input
-/// schema (`typed.field_types.keys()`, the exact list `extract_aggregates` was fed),
-/// NOT klinx's deduped `input_cols`. The caller passes that schema as
-/// `agg_input_schema` straight from the predecessor's `stored_output_schema()` (see
-/// [`aggregate_engine_input_schema`]), so every valid `idx` is in range by
-/// construction. The `.get(idx)` guard against `None` is a belt-and-braces
-/// degrade-to-no-edge: it would only fire if a future engine change let an emit bind
-/// a `Field(idx)` outside its own input schema, which today is impossible.
+/// **SHARP EDGE:** `BindingArg::Field(idx)` indexes the aggregate's input schema in
+/// the order `extract_aggregates` was fed — the aggregate's bound input row =
+/// `typed.field_types.keys()`, which is its predecessor's body Row in PORT order —
+/// NOT klinx's deduped `input_cols`. The caller passes that as `agg_input_schema`,
+/// reconstructed from the predecessor stage's `fields` (the predecessor's body row,
+/// port order; see [`body_field_edges`]). Only the DECLARED prefix is ever indexed:
+/// an aggregate cannot read an undeclared (open-tail) column — CXL rejects it at
+/// compile time with `E200`
+/// (see `body_aggregate_referencing_open_tail_column_does_not_compile`) — so every
+/// `Field(idx)` the adapter can see falls inside the declared columns, which the body
+/// Row reproduces in exactly the order `Field(idx)` expects. The `.get(idx)` guard
+/// against `None` is a belt-and-braces degrade-to-no-edge for an out-of-range index
+/// that today is unreachable.
 fn binding_arg_support(
     arg: &cxl::plan::BindingArg,
     agg_input_schema: &[String],
@@ -4042,39 +4047,6 @@ fn aggregate_emit_supports(
         .collect()
 }
 
-/// The body Aggregate's ENGINE input schema — the exact column list, in the exact
-/// order, that `BindingArg::Field(idx)` was assigned against (#180 GAP 1).
-///
-/// **Why the engine schema, not `body_rows[pred]`:** `extract_aggregates` indexes
-/// `BindingArg::Field(idx)` into `typed.field_types.keys()`, whose order is the
-/// aggregate's bound INPUT row = its sole predecessor's output `Schema` (declared
-/// columns followed by any engine-stamped/inferred-trailing columns). Reconstructing
-/// it from the predecessor's `body_rows` entry would risk an index mismatch if the
-/// two ever diverged. Sourcing directly from the predecessor's
-/// `stored_output_schema().columns()` — the same `Arc<Schema>` the engine derived
-/// `extract_aggregates`'s `input_schema` from — makes `Field(idx)` resolution exact
-/// by construction: every valid `idx` is in range. The aggregate has exactly one
-/// incoming edge in the body graph, so the predecessor is unambiguous.
-///
-/// Returns an empty schema when the aggregate has no incoming neighbor or the
-/// predecessor carries no stored schema (a Route at the body root) — `Field(idx)`
-/// then resolves to nothing, but such a node feeds an aggregate no resolvable column
-/// anyway.
-fn aggregate_engine_input_schema(
-    body: &clinker_plan::plan::composition_body::BoundBody,
-    agg_idx: petgraph::graph::NodeIndex,
-) -> Vec<String> {
-    use petgraph::Direction;
-
-    body.graph
-        .neighbors_directed(agg_idx, Direction::Incoming)
-        .next()
-        .and_then(|pred| body.graph.node_weight(pred))
-        .and_then(|pred| pred.stored_output_schema())
-        .map(|schema| schema.columns().iter().map(|c| c.to_string()).collect())
-        .unwrap_or_default()
-}
-
 /// What drives a body node's emit/anchor analysis (#174, #180 GAP 1).
 ///
 /// Reads the in-process-compiled artifact off the already-resolved body plan node:
@@ -4088,9 +4060,10 @@ fn aggregate_engine_input_schema(
 ///   with a populated `compiled` → [`StageProgram::Aggregate`] over
 ///   [`aggregate_emit_supports`], so a computed aggregate column (`emit total =
 ///   sum(x)`) draws a `Derive` cable to the input column it folds (#180 GAP 1).
-///   `agg_engine_input_schema` is the aggregate's predecessor engine schema (from
-///   [`aggregate_engine_input_schema`]), supplying the exact `BindingArg::Field(idx)`
-///   → column-name resolution. Computed lazily by the caller — only this arm reads it.
+///   `agg_input_schema` is the aggregate's input schema — its sole predecessor's body
+///   row in PORT order (the caller reconstructs it from the predecessor stage's
+///   `fields`; see [`body_field_edges`]), which is the index space `BindingArg::Field(idx)`
+///   was assigned against. It is computed LAZILY — only this arm forces the closure.
 /// - Every other node — and a `Transform` whose `resolved` is `None` or an
 ///   `Aggregation` whose `compiled` is empty (a deserialized plan never populates
 ///   the `#[serde(skip)]` fields) — → [`StageProgram::None`], the same-name carry
@@ -4099,7 +4072,7 @@ fn aggregate_engine_input_schema(
 ///   columns surface from its body rows).
 fn body_node_stage_program<'a>(
     node: &'a clinker_plan::plan::execution::PlanNode,
-    agg_engine_input_schema: impl FnOnce() -> Vec<String>,
+    agg_input_schema: impl FnOnce() -> Vec<String>,
 ) -> StageProgram<'a> {
     use clinker_plan::plan::execution::PlanNode;
 
@@ -4109,10 +4082,7 @@ fn body_node_stage_program<'a>(
             ..
         } => StageProgram::Cxl(&payload.typed.program),
         PlanNode::Aggregation { compiled, .. } if !compiled.emits.is_empty() => {
-            StageProgram::Aggregate(aggregate_emit_supports(
-                compiled,
-                &agg_engine_input_schema(),
-            ))
+            StageProgram::Aggregate(aggregate_emit_supports(compiled, &agg_input_schema()))
         }
         _ => StageProgram::None,
     }
@@ -4236,16 +4206,28 @@ fn body_field_edges(
             .unwrap_or_default();
 
         // GAP 1 + GAP 3: a body Transform/Aggregate runs the shared analyzer (the
-        // Aggregate via precomputed supports keyed on its ENGINE input schema, built
+        // Aggregate via precomputed supports keyed on its input schema, reconstructed
         // lazily — only the Aggregate arm needs it); fan-in grading is now Conservative,
         // so a body Merge fanning a column in from two distinct producers grades that
         // carry Approximate, matching the top-level paths. A CXL-less / unresolved
         // node (Route/Merge/Output/Cull/nested Composition, and Combine — clinker#621)
         // falls to the same-name carry fallback.
+        //
+        // The Aggregate's input schema is its sole predecessor stage's `fields` — the
+        // predecessor body row, in PORT order. That is exactly the index space
+        // `BindingArg::Field(idx)` was assigned against (the engine indexes it into the
+        // aggregate's bound input row = the predecessor's body Row, port order), and it
+        // is populated for EVERY predecessor kind (a Route's body row carries its
+        // preserved input schema), so it covers cases the engine `stored_output_schema`
+        // does not (a Route predecessor has no stored schema). See the closure below.
         let stage_program = match resolved {
-            Some((node_idx, plan_node)) => {
-                body_node_stage_program(plan_node, || aggregate_engine_input_schema(body, node_idx))
-            }
+            Some((_node_idx, plan_node)) => body_node_stage_program(plan_node, || {
+                ordered_predecessors
+                    .first()
+                    .and_then(|&p| stages.get(p))
+                    .map(|source| source.fields.iter().map(|f| f.name.clone()).collect())
+                    .unwrap_or_default()
+            }),
             None => StageProgram::None,
         };
         field_edges_for_stage(
@@ -5085,6 +5067,82 @@ nodes:
         )
     }
 
+    /// A composition body where an Aggregate sits DOWNSTREAM of a Route:
+    /// `src(x:int, k:string) → split(route on k) → agg(group_by:[k],
+    /// emit total = sum(x))`, output port `result: agg`. The aggregate's body-graph
+    /// predecessor is the Route `split`, which carries NO engine `stored_output_schema`
+    /// (Route/Output/Sort/CorrelationCommit return `None`). The aggregate's input
+    /// schema must therefore come from the Route's body row (`body_rows["split"]`,
+    /// which IS populated — a Route preserves its input schema), not the engine
+    /// accessor. Guards #180 PR2 Finding 1: a Route-fed aggregate keeps its derive edges.
+    fn compiled_route_then_aggregate_body_fixture() -> BoundBody {
+        compile_body_fixture(
+            "route-agg-body",
+            "        - { name: x, type: int }\n        - { name: k, type: string }",
+            r#"_compose:
+  name: route_then_agg
+  inputs:
+    src:
+      schema:
+        - { name: x, type: int }
+        - { name: k, type: string }
+  outputs:
+    result: agg
+  config_schema: {}
+
+nodes:
+  - type: route
+    name: split
+    input: src
+    config:
+      conditions:
+        hi: "k != ''"
+      default: lo
+  - type: aggregate
+    name: agg
+    input: split.hi
+    config:
+      group_by: [k]
+      cxl: |
+        emit total = sum(x)
+"#,
+        )
+    }
+
+    /// A composition body whose input port declares its columns in a DIFFERENT order
+    /// than the caller supplies: the caller's source is `[x, k]` (parent order); the
+    /// port declares `[k, x]` (port order). Both columns are present, so it compiles.
+    /// The aggregate `emit total = sum(x)` binds `Field(idx)` in PORT order — so the
+    /// adapter MUST resolve `idx` against the port row (`body_rows["src"] = [k, x, …]`),
+    /// not the engine input-port Source's `stored_output_schema`, which carries the
+    /// PARENT order `[x, k, …]` and would mis-resolve to `k`. Guards #180 PR2 Finding 2.
+    fn compiled_port_reordered_aggregate_body_fixture() -> BoundBody {
+        compile_body_fixture(
+            "reorder-agg-body",
+            "        - { name: x, type: int }\n        - { name: k, type: string }",
+            r#"_compose:
+  name: reorder_agg
+  inputs:
+    src:
+      schema:
+        - { name: k, type: string }
+        - { name: x, type: int }
+  outputs:
+    result: agg
+  config_schema: {}
+
+nodes:
+  - type: aggregate
+    name: agg
+    input: src
+    config:
+      group_by: [k]
+      cxl: |
+        emit total = sum(x)
+"#,
+        )
+    }
+
     /// A composition body that CULLS: `src(gid:string, status:string) →
     /// prune(cull, drop_group_when reads status)`, output port `result: prune`.
     /// Exercises #180 GAP 2: the body Cull's removal predicate draws a `Filter`
@@ -5810,17 +5868,21 @@ nodes:
         );
     }
 
-    /// #180 PR2 GAP-1 schema-source characterization: the hypothesized "body aggregate
-    /// folds an open-tail pass-through column the port did not declare" scenario — the
-    /// only case where the engine `BindingArg::Field(idx)` index could exceed klinx's
-    /// reconstructed schema — **cannot compile**. CXL `resolve` binds a `FieldRef` only
-    /// against the explicitly declared field set, so an aggregate reading an undeclared
-    /// (open-tail) column is a compile-time `E200` "unresolved identifier" and the body
-    /// never exists. This pins WHY the adapter's `Field(idx)` resolution is total:
-    /// every `Field(idx)` it can ever see points at a declared input column, and the
-    /// declared prefix is identical between the engine schema and the body row. If a
-    /// future engine change lets an aggregate fold open-tail columns, this test flips
-    /// (the body would compile) — a deliberate signal to revisit the resolution.
+    /// #180 PR2 GAP-1 schema-source characterization: this is WHY the predecessor body
+    /// row's DECLARED columns suffice as the aggregate input schema.
+    ///
+    /// The aggregate input schema is reconstructed from the predecessor body row (port
+    /// order); its declared prefix matches the engine's `field_types` order exactly. The
+    /// only place the two could diverge is the inferred-trailing (open-tail) region — a
+    /// column the caller supplies that the port did not declare. But an aggregate cannot
+    /// reference such a column: CXL `resolve` binds a `FieldRef` only against the
+    /// explicitly declared field set, so reading an undeclared (open-tail) column is a
+    /// compile-time `E200` "unresolved identifier" and the body never exists. So every
+    /// `BindingArg::Field(idx)` the adapter can ever see points at a DECLARED column,
+    /// which the body row reproduces in exactly the order `Field(idx)` expects — the
+    /// open-tail region is never indexed. If a future engine change lets an aggregate
+    /// fold open-tail columns, this test flips (the body would compile) — a deliberate
+    /// signal to revisit the schema source.
     #[test]
     fn body_aggregate_referencing_open_tail_column_does_not_compile() {
         let result = try_compile_open_tail_aggregate_reference();
@@ -5833,6 +5895,109 @@ nodes:
                 .iter()
                 .any(|d| d.message.contains("unresolved identifier")),
             "expected an E200 unresolved-identifier diagnostic for the open-tail read, got {diags:?}",
+        );
+    }
+
+    /// #180 PR2 Finding 1 regression: a body Aggregate DOWNSTREAM of a Route still
+    /// traces its computed column to the folded input.
+    ///
+    /// The aggregate's body-graph predecessor is the Route, which carries NO engine
+    /// `stored_output_schema` (`None` for Route/Output/Sort/CorrelationCommit). The
+    /// input schema is therefore reconstructed from the Route's body row (populated —
+    /// a Route preserves its input schema), so `emit total = sum(x)` still derives
+    /// `agg.total` from `x`. Sourcing the schema from the engine accessor instead would
+    /// yield an empty schema here and drop every aggregate-derive edge.
+    #[test]
+    fn body_view_aggregate_downstream_of_route_traces_derive_edges() {
+        let body = compiled_route_then_aggregate_body_fixture();
+        let view = derive_body_view(&body);
+        let split_idx = stage_idx(&view, "split");
+        let agg_idx = stage_idx(&view, "agg");
+
+        // The derive edge `<route>.x → agg.total` IS drawn — the Route predecessor's
+        // body row supplied the aggregate input schema.
+        assert!(
+            view.field_edges.contains(&FieldEdge {
+                from_node: split_idx,
+                from_field: "x".to_string(),
+                to_node: agg_idx,
+                to_field: "total".to_string(),
+                kind: FieldEdgeKind::Derive,
+                ..Default::default()
+            }),
+            "a Route-fed body Aggregate must still derive agg.total from x (Finding 1): {:?}",
+            view.field_edges
+        );
+        // And the group-by edge for `k` is likewise present.
+        assert!(
+            view.field_edges.iter().any(|e| {
+                e.to_node == agg_idx && e.to_field == "k" && e.kind == FieldEdgeKind::GroupBy
+            }),
+            "a Route-fed body Aggregate must still draw the GroupBy edge for k: {:?}",
+            view.field_edges
+        );
+    }
+
+    /// #180 PR2 Finding 2 regression: a body Aggregate resolves `BindingArg::Field(idx)`
+    /// in PORT order, not the parent's column order.
+    ///
+    /// The input port declares `[k, x]` while the caller supplies `[x, k]` (parent
+    /// order). The engine binds `Field(idx)` in PORT order, so `sum(x)` is `Field(1)`.
+    /// The adapter must resolve it against the predecessor body row (`[k, x, …]`,
+    /// port order) → `x`. The engine input-port Source's `stored_output_schema` carries
+    /// PARENT order (`[x, k, …]`), so resolving `Field(1)` against IT would wrongly
+    /// target `k`.
+    #[test]
+    fn body_view_aggregate_resolves_field_idx_in_port_order() {
+        let body = compiled_port_reordered_aggregate_body_fixture();
+        let view = derive_body_view(&body);
+        let src_idx = stage_idx(&view, "src");
+        let agg_idx = stage_idx(&view, "agg");
+
+        // The derive edge targets `x` (the folded column), NOT `k` — proving the
+        // adapter indexed `Field(idx)` against the port-order body row.
+        assert!(
+            view.field_edges.contains(&FieldEdge {
+                from_node: src_idx,
+                from_field: "x".to_string(),
+                to_node: agg_idx,
+                to_field: "total".to_string(),
+                kind: FieldEdgeKind::Derive,
+                ..Default::default()
+            }),
+            "sum(x) must derive agg.total from `x` under a reordered port (Finding 2): {:?}",
+            view.field_edges
+        );
+        assert!(
+            !view.field_edges.iter().any(|e| {
+                e.from_node == src_idx
+                    && e.from_field == "k"
+                    && e.to_node == agg_idx
+                    && e.to_field == "total"
+                    && e.kind == FieldEdgeKind::Derive
+            }),
+            "sum(x) must NOT derive agg.total from `k` (the parent-order mis-resolution): {:?}",
+            view.field_edges
+        );
+
+        // Single source of truth: the schema the adapter resolves against IS the
+        // predecessor body row in port order, distinct from the parent order here.
+        let port_order: Vec<String> = body
+            .body_rows
+            .get("src")
+            .expect("src body row")
+            .fields()
+            .map(|(qf, _)| qf.name.to_string())
+            .collect();
+        assert_eq!(
+            port_order.iter().position(|c| c == "k"),
+            Some(0),
+            "the port row declares `k` first (port order), {port_order:?}",
+        );
+        assert_eq!(
+            port_order.iter().position(|c| c == "x"),
+            Some(1),
+            "the port row declares `x` second (port order), {port_order:?}",
         );
     }
 
@@ -5879,21 +6044,29 @@ nodes:
 
         // GAP 1 SHARP EDGE: assert the `BindingArg::Field(idx)` → column resolution
         // directly. The single binding folds `sum(x)`, so its arg is `Field(idx)`
-        // where the aggregate's ENGINE input schema at `idx` is `x` — NOT some other
-        // column. This is the one place the adapter can silently produce a wrong column.
-        let agg_node_idx = body
+        // where the aggregate's input schema at `idx` is `x` — NOT some other column.
+        // This is the one place the adapter can silently produce a wrong column.
+        let agg_node = body
             .topo_order
             .iter()
-            .copied()
-            .find(|&i| matches!(body.graph[i], PlanNode::Aggregation { .. }))
+            .find_map(|&i| match &body.graph[i] {
+                node @ PlanNode::Aggregation { .. } => Some(node),
+                _ => None,
+            })
             .expect("body has an Aggregation node");
-        let PlanNode::Aggregation { compiled, .. } = &body.graph[agg_node_idx] else {
+        let PlanNode::Aggregation { compiled, .. } = agg_node else {
             unreachable!("matched Aggregation above")
         };
-        // Source the schema the SAME way production does — from the aggregate's
-        // predecessor `stored_output_schema()` — so the test pins the real index space
-        // `BindingArg::Field(idx)` was assigned against, not a reconstruction.
-        let agg_input_schema = aggregate_engine_input_schema(&body, agg_node_idx);
+        // Source the schema the SAME way production does — the aggregate's predecessor
+        // body row (here `src`) in PORT order, which is the index space `Field(idx)`
+        // was assigned against. (`stages["src"].fields` is built from this same row.)
+        let agg_input_schema: Vec<String> = body
+            .body_rows
+            .get("src")
+            .expect("src body row")
+            .fields()
+            .map(|(qf, _)| qf.name.to_string())
+            .collect();
         let binding = compiled
             .bindings
             .first()
@@ -5904,7 +6077,7 @@ nodes:
         assert_eq!(
             agg_input_schema.get(*idx as usize).map(String::as_str),
             Some("x"),
-            "BindingArg::Field({idx}) must resolve to `x` in the engine input schema \
+            "BindingArg::Field({idx}) must resolve to `x` in the input schema \
              {agg_input_schema:?}, not another column",
         );
 
