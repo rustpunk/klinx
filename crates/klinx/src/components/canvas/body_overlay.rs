@@ -78,10 +78,11 @@ pub fn BodyOverlay() -> Element {
     // Phase 1 does NOT draw the in-overlay field-lineage ribbon, so these contexts
     // are effectively write-only (the cards publish hover/pin into them, but the
     // overlay never reads them back to render cables). They exist because
-    // `CanvasNode` requires them to mount. The body-canvas `use_memo` below keys on
-    // `(body_id, zoom)` only, so these hover writes do NOT re-run layout — the
-    // wasted churn is bounded to the cards' own memoized re-render. Wiring the
-    // ribbon to read these is a Phase-2 follow-up (the `CanvasSurface` extraction).
+    // `CanvasNode` requires them to mount. The body-canvas `use_memo` below reads
+    // only the stack / plan / zoom signals — NOT these context signals — so a hover
+    // does not invalidate it and the O(nodes+edges) layout never re-runs on hover.
+    // Wiring the ribbon to read these is a Phase-2 follow-up (the `CanvasSurface`
+    // extraction).
     use_context_provider(|| {
         CanvasHover(
             Signal::new(HoverTarget::None),
@@ -92,37 +93,58 @@ pub fn BodyOverlay() -> Element {
     });
     use_context_provider(|| PinnedField(Signal::new(None)));
 
-    // Read the overlay stack: its frames drive the breadcrumb and its top frame
-    // names the body to render. Subscribes so a push/truncate re-renders.
-    let stack = state.composition_overlay_stack.read().clone();
-    let Some(frame) = stack.last().cloned() else {
-        // No overlay open — render nothing. AFTER all hooks above, so hook order
-        // is identical whether or not the overlay is showing.
-        return rsx! {};
-    };
-    let breadcrumb_frames: Vec<String> = stack.iter().map(|f| f.alias.clone()).collect();
-    let depth = stack.len();
-
-    // Body render model, MEMOIZED on (body_id, zoom) (#171 review 2). The heavy
-    // `apply_canvas_layout(PortAwareSugiyama)` + obstacle-aware routing inside
-    // `build_body_canvas` re-runs ONLY when the displayed body or the zoom changes
-    // — never on a hover (which writes the lineage-context signals above, not read
-    // here). `derive_body_view_unlaid` skips the wasted barycenter pass that the
-    // public `derive_body_view` would run, since `build_body_canvas` re-lays-out
-    // anyway. `body_id` is `Copy`; `zoom` feeds the Auto display-density choice.
-    let body_id = frame.body_id;
+    // Body render model — an UNCONDITIONAL, REACTIVE `use_memo` (#171 review):
+    // it runs every render (above any early return, so it is never a conditional
+    // hook), and it READS the selecting signals INSIDE the closure so `Memo` knows
+    // to recompute when they go dirty:
+    //   - `composition_overlay_stack` → recompute when the displayed frame changes
+    //     to a DIFFERENT body (a nested push or a breadcrumb truncate AT THE SAME
+    //     zoom must re-derive — keying on a captured `body_id` would miss this and
+    //     show the previous body under the new breadcrumb);
+    //   - `compiled_plan` → recompute when the plan loads/changes;
+    //   - `zoom` → recompute when the Auto display density changes.
+    // It deliberately does NOT read the `CanvasHover`/`PinnedField` context signals,
+    // so a hover never invalidates it — that preserves the win of NOT re-running the
+    // O(nodes+edges) layout + obstacle routing on every hover. Returns `None` only
+    // when the overlay is CLOSED (no frame); when a frame exists but the body can't
+    // resolve it falls back to an empty canvas (mirroring `current_pipeline_view`),
+    // so the overlay chrome still shows. `derive_body_view_unlaid` skips the wasted
+    // barycenter pass since `build_body_canvas` re-lays-out anyway.
     let canvas = use_memo(move || {
-        let z = *zoom.read();
+        let stack = state.composition_overlay_stack.read();
+        let frame = stack.last()?;
         let view = {
             let compiled_guard = state.compiled_plan.read();
             compiled_guard
                 .as_ref()
-                .and_then(|plan| plan.body_of(body_id))
+                .and_then(|plan| plan.body_of(frame.body_id))
                 .map(derive_body_view_unlaid)
                 .unwrap_or_default()
         };
-        build_body_canvas(view, z)
+        Some(build_body_canvas(view, *zoom.read()))
     });
+
+    // Breadcrumb labels + depth come from the SAME stack read in the component body
+    // (so the component re-renders on navigation); the early return below gates on
+    // the memo, which is `None` exactly when the overlay is closed.
+    let stack = state.composition_overlay_stack.read().clone();
+    let breadcrumb_frames: Vec<String> = stack.iter().map(|f| f.alias.clone()).collect();
+    let depth = stack.len();
+    drop(stack);
+    let Some(canvas) = canvas() else {
+        // No overlay open — render nothing. The memo (a hook) already ran above, so
+        // hook order is identical whether or not the overlay is showing.
+        return rsx! {};
+    };
+    // The memo yields an OWNED `BodyCanvas` (it is `Clone`); destructure it into the
+    // pieces the rsx renders. `svg_w`/`svg_h` are `Copy`; `cards`/`connections` are
+    // moved into the loops below.
+    let super::panel::BodyCanvas {
+        cards,
+        connections,
+        svg_w,
+        svg_h,
+    } = canvas;
 
     // ── Inner pan handlers (left/middle-drag on the sub-canvas background) ──
     let drag_down = {
@@ -263,11 +285,14 @@ pub fn BodyOverlay() -> Element {
             class: "klinx-body-overlay-backdrop",
             tabindex: "0",
             autofocus: true,
-            // A pointer-DOWN that lands directly on the backdrop (not the panel)
-            // arms a "true backdrop gesture"; a pointer-down that starts inside the
-            // sub-canvas leaves it disarmed, so a pan overshooting onto the backdrop
-            // on release does not dismiss (#171 review 3). The panel `stop_propagation`s
-            // its own mousedown, so this only fires for genuine backdrop presses.
+            // Each gesture's mousedown sets `down_on_backdrop` fresh: the BACKDROP
+            // mousedown arms it (true), the PANEL mousedown below disarms it (false).
+            // Because every gesture begins with exactly one of these two mousedowns,
+            // the flag always reflects where the CURRENT gesture STARTED — it can
+            // never go stale (Bug 3: a backdrop-press that releases on the panel
+            // would otherwise leave it armed for a later pan that overshoots onto the
+            // backdrop). So a pan starting in the sub-canvas (panel press → false)
+            // never dismisses, and a genuine backdrop press → release dismisses.
             onmousedown: {
                 let drag = drag.clone();
                 move |_: MouseEvent| {
@@ -300,11 +325,19 @@ pub fn BodyOverlay() -> Element {
             },
 
             // Overlay panel — large, near-fullscreen. `stop_propagation` on both
-            // mousedown and click keeps a press/click inside the panel from
-            // bubbling to the backdrop (so the backdrop never sees it as its own).
+            // mousedown and click keeps a press/click inside the panel from bubbling
+            // to the backdrop. The mousedown ALSO disarms `down_on_backdrop`, so any
+            // gesture that starts inside the panel (incl. a sub-canvas pan) can never
+            // dismiss on release — even if it overshoots onto the backdrop (Bug 3).
             div {
                 class: "klinx-body-overlay",
-                onmousedown: move |e: MouseEvent| e.stop_propagation(),
+                onmousedown: {
+                    let drag = drag.clone();
+                    move |e: MouseEvent| {
+                        drag.borrow_mut().down_on_backdrop = false;
+                        e.stop_propagation();
+                    }
+                },
                 onclick: move |e: MouseEvent| e.stop_propagation(),
 
                 // ── Header: in-overlay breadcrumb + OPEN FULL + close ──────
@@ -406,11 +439,11 @@ pub fn BodyOverlay() -> Element {
                         // restores the reveal behavior in the overlay (Phase 2).
                         svg {
                             class: "klinx-canvas-svg klinx-canvas-svg--base",
-                            width: "{canvas.read().svg_w}",
-                            height: "{canvas.read().svg_h}",
+                            width: "{svg_w}",
+                            height: "{svg_h}",
                             g {
                                 class: "klinx-canvas-edges",
-                                for conn in canvas.read().connections.clone() {
+                                for conn in connections {
                                     Connector {
                                         key: "{conn.from.id}-{conn.to.id}-{conn.from_branch:?}",
                                         from: conn.from,
@@ -422,7 +455,7 @@ pub fn BodyOverlay() -> Element {
                             }
                         }
 
-                        for (index, (stage, display)) in canvas.read().cards.clone().into_iter().enumerate() {
+                        for (index, (stage, display)) in cards.into_iter().enumerate() {
                             CanvasNode {
                                 key: "{stage.id}",
                                 stage,
