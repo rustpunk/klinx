@@ -518,12 +518,29 @@ fn trace_key_at(node: &TraceNode, scope_depth: usize) -> TraceKey {
     )
 }
 
+/// The Dioxus list `key:` string for a trace row — the same four identity components as
+/// [`trace_key_at`], dash-joined. Built from one helper so the render key cannot drift
+/// from the expand-state [`TraceKey`]: `scope_depth` MUST be present, or two visible
+/// rows sharing `(stage_id, field, hop)` across composition scopes collide and Dioxus
+/// mis-associates them (#156).
+fn trace_render_key(node: &TraceNode, scope_depth: usize) -> String {
+    format!(
+        "{}-{}-{}-{}",
+        node.endpoint.stage_id, node.endpoint.field_name, node.endpoint.hop, scope_depth
+    )
+}
+
 /// The scope depth ON this node, given its parent's scope depth: a node whose hop is an
-/// `Enter`/`Recursive` composition crossing opens one more wall (mirroring
-/// [`super::model::max_scope_depth`]'s increment), so it and its descendants live one
-/// scope deeper. An `Exit` resurfaces but is counted at the depth it is reached at — the
-/// crossing-count on the path only ever grows, so two distinct scopes reached via
-/// different Enter chains can never collide on depth for the SAME hop number.
+/// `Enter`/`Recursive` composition crossing opens one more wall, so it and its
+/// descendants live one scope deeper. An `Exit` resurfaces but is counted at the depth
+/// it is reached at — the crossing-count on the path only ever grows, so two distinct
+/// scopes reached via different Enter chains can never collide on depth for the SAME hop
+/// number.
+///
+/// The `Enter | Recursive => +1` increment MUST stay in sync with
+/// [`super::model::max_scope_depth`], which owns the same rule for the "originated N
+/// deep" summary; if one changes which crossings deepen a scope, the other must match or
+/// the panel's per-row depth and the summary figure diverge.
 fn node_scope_depth(parent_depth: usize, node: &TraceNode) -> usize {
     match node.endpoint.boundary {
         Some(BoundaryHopKind::Enter(_)) | Some(BoundaryHopKind::Recursive(_)) => parent_depth + 1,
@@ -755,7 +772,7 @@ fn TraceTree(
                     class: "klinx-field-trace-list",
                     for row in rows.read().iter() {
                         TraceTreeRow {
-                            key: "{row.node.endpoint.stage_id}-{row.node.endpoint.field_name}-{row.node.endpoint.hop}",
+                            key: "{trace_render_key(&row.node, row.scope_depth)}",
                             row: row.clone(),
                             on_toggle: move |key: TraceKey| {
                                 let mut set = expanded.write();
@@ -786,40 +803,19 @@ fn TraceTreeRow(row: TraceRow, on_toggle: EventHandler<TraceKey>) -> Element {
         ""
     };
     let key = trace_key_at(&row.node, row.scope_depth);
-    // Composition-boundary crossing marker (#156): an Enter/Exit/Recursive hop names
-    // the composition wall the lineage crosses. `None` on an ordinary intra-scope hop.
-    let boundary = entry.boundary.as_ref().map(|kind| match kind {
-        BoundaryHopKind::Enter(label) => ("enter", "\u{21B3}", "enters composition", label.clone()),
-        BoundaryHopKind::Exit(label) => ("exit", "\u{21A5}", "exits composition", label.clone()),
-        BoundaryHopKind::Recursive(label) => (
-            "recursive",
-            "\u{21BA}",
-            "recursive composition",
-            label.clone(),
-        ),
-    });
     // The precision badge's tooltip (#156). On a boundary hop, surface WHY the tier is
     // what it is — a Recursive crossing is Approximate because the composition recurses,
     // so the reason names the boundary rather than leaving the bare tier unexplained.
-    // Reuses the existing `entry.precision` badge (no new badge); only the tooltip is
+    // Reuses the existing `entry.precision` badge (no new badge) and the shared
+    // `BoundaryHopKind` verb/label methods (no re-spelled strings); only the tooltip is
     // enriched. Ordinary hops keep the plain tier label.
     let precision_title = match &entry.boundary {
-        Some(BoundaryHopKind::Recursive(label)) => format!(
-            "{} — recursive composition {label} cannot be expanded further",
-            entry.precision.precision_label()
+        Some(kind) => format!(
+            "{} — {} {}",
+            entry.precision.precision_label(),
+            kind.verb(),
+            kind.label(),
         ),
-        Some(BoundaryHopKind::Enter(label)) => {
-            format!(
-                "{} — lineage enters composition {label}",
-                entry.precision.precision_label()
-            )
-        }
-        Some(BoundaryHopKind::Exit(label)) => {
-            format!(
-                "{} — lineage exits composition {label}",
-                entry.precision.precision_label()
-            )
-        }
         None => entry.precision.precision_label().to_string(),
     };
 
@@ -860,14 +856,16 @@ fn TraceTreeRow(row: TraceRow, on_toggle: EventHandler<TraceKey>) -> Element {
                 span { class: "klinx-field-trace-field", "{entry.field_name}" }
                 // Composition-boundary marker (#156): when this hop crosses a
                 // composition wall, name the crossing (↳ enters / ↥ exits / ↺
-                // recursive) so a cross-boundary trace reads legibly. `data-boundary`
-                // tints the base `.klinx-field-trace-boundary` rule per crossing kind.
-                if let Some((kind, glyph, verb, label)) = boundary.as_ref() {
+                // recursive) so a cross-boundary trace reads legibly. Glyph/verb/slug
+                // come from the shared `BoundaryHopKind` methods so the marker and the
+                // precision tooltip cannot drift; `data-boundary` tints the base
+                // `.klinx-field-trace-boundary` rule per crossing kind.
+                if let Some(kind) = entry.boundary.as_ref() {
                     span {
                         class: "klinx-field-trace-boundary",
-                        "data-boundary": "{kind}",
-                        span { class: "klinx-field-trace-boundary-glyph", "{glyph}" }
-                        span { class: "klinx-field-trace-boundary-text", "{verb} {label}" }
+                        "data-boundary": "{kind.data_slug()}",
+                        span { class: "klinx-field-trace-boundary-glyph", "{kind.glyph()}" }
+                        span { class: "klinx-field-trace-boundary-text", "{kind.verb()} {kind.label()}" }
                     }
                 }
                 // Per-hop CXL attribution (#153): the responsible statement(s) on
@@ -1060,15 +1058,28 @@ mod tests {
         expanded.insert(trace_key_at(&forest[1], comp_scope));
         let mut rows = Vec::new();
         flatten_trace(&forest, &expanded, 0, 0, &mut rows);
-        let inner_keys: Vec<TraceKey> = rows
+        let inner_rows: Vec<&TraceRow> = rows
             .iter()
             .filter(|r| r.node.endpoint.stage_id == "inner")
+            .collect();
+        assert_eq!(inner_rows.len(), 2, "both inner.v rows are present");
+        let inner_keys: Vec<TraceKey> = inner_rows
+            .iter()
             .map(|r| trace_key_at(&r.node, r.scope_depth))
             .collect();
-        assert_eq!(inner_keys.len(), 2, "both inner.v rows are present");
         assert_ne!(
             inner_keys[0], inner_keys[1],
-            "the outer and in-body inner.v rows carry distinct keys"
+            "the outer and in-body inner.v rows carry distinct expand-state keys"
+        );
+        // The Dioxus list `key:` string MUST be distinct in lockstep — otherwise the two
+        // visible same-name rows collide and Dioxus mis-associates them (#156).
+        let render_keys: Vec<String> = inner_rows
+            .iter()
+            .map(|r| trace_render_key(&r.node, r.scope_depth))
+            .collect();
+        assert_ne!(
+            render_keys[0], render_keys[1],
+            "the render `key:` string must carry scope_depth so the rows do not collide"
         );
     }
 
