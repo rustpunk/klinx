@@ -1880,26 +1880,6 @@ fn derive_row_precision(out_fields: &mut [Vec<FieldRow>], edges: &[FieldEdge]) {
     }
 }
 
-/// How a stage's CXL-less / unresolved fan-in carries are graded (#180).
-///
-/// The top-level raw and resolved paths treat a shared column arriving from more
-/// than one producer (a Merge/Combine join-key fan-in) as a CONSERVATIVE carry —
-/// without CXL we cannot confirm it rides through unchanged, so a multi-producer
-/// carry is [`Precision::Approximate`] ([`FieldEdge::conservative_fan_in`]) while a
-/// single-producer carry stays an exact [`FieldEdgeKind::Passthrough`]. The
-/// composition body path has no fan-in policy yet (its no-program fallback always
-/// draws plain `Passthrough`/Exact carries), so it selects [`FanInPolicy::ExactOnly`].
-/// Turning the body's fan-in grading on is GAP 3 (#180 PR2); this enum names the
-/// seam without changing today's behavior.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FanInPolicy {
-    /// A multi-producer carry is graded `Approximate` via
-    /// [`FieldEdge::conservative_fan_in`]; a single-producer carry is exact.
-    Conservative,
-    /// Every carry is a plain exact `Passthrough`, regardless of producer count.
-    ExactOnly,
-}
-
 /// The output-name gate a stage applies to its emit targets and carried columns
 /// (#180).
 ///
@@ -1929,6 +1909,29 @@ impl OutputGate<'_> {
     }
 }
 
+/// What drives a stage's emit/anchor analysis in [`field_edges_for_stage`] (#180).
+///
+/// The top-level paths feed a `cxl::ast::Program` directly; the composition body's
+/// Aggregate has no plan-node `Program` — its emit RHS was rewritten into a
+/// [`CompiledAggregate`] residual at compile time (every `AggCall` → `Expr::AggSlot`,
+/// every group-by `FieldRef` → `Expr::GroupKey`), which `emit_supports` cannot
+/// recover. So an Aggregate supplies its per-emit support set PRECOMPUTED (via
+/// [`aggregate_emit_supports`]) and the analyzer runs the SAME derive/carry loop on
+/// it — keeping the analyzer single-sourced rather than forking a second emit loop.
+///
+/// - `Cxl(p)` — run the full `emit_supports` / `emit_copy_targets` /
+///   `emit_each_fanned_targets` analysis on the program (Transform).
+/// - `Aggregate(supports)` — use the precomputed `(target, support)` pairs.
+///   An aggregate emit is always a value DERIVE (it folds the group), never an
+///   identity copy and never `emit each`-fanned, so its copy/fanned sets are empty.
+/// - `None` — no program: only the same-name carry fallback runs (a CXL-less /
+///   unresolved node forwarding columns).
+enum StageProgram<'a> {
+    Cxl(&'a cxl::ast::Program),
+    Aggregate(Vec<(String, std::collections::HashSet<String>)>),
+    None,
+}
+
 /// The single emit/anchor classification core for ONE consumer stage, shared by
 /// the raw ([`compute_field_lineage`]), engine-resolved
 /// ([`resolved_pipeline_field_lineage`]), and composition-body ([`body_field_edges`])
@@ -1951,8 +1954,10 @@ impl OutputGate<'_> {
 ///
 /// Parameters that capture every known difference between the three paths:
 /// - `to` — the consumer stage/node/slot index in the caller's index space.
-/// - `program` — `Some(p)` runs the full emit/anchor analysis; `None` runs only
-///   the same-name carry fallback (a no-CXL / unresolved node forwarding columns).
+/// - `program` — [`StageProgram::Cxl`] runs the full emit/anchor analysis;
+///   [`StageProgram::Aggregate`] runs that same analysis over precomputed aggregate
+///   supports; [`StageProgram::None`] runs only the same-name carry fallback (a
+///   no-CXL / unresolved node forwarding columns).
 /// - `input_cols` / `producers_of` — the caller's predecessor fold (ordered column
 ///   union and per-column producer indices).
 /// - `output_gate` — `Resolved` gates emits/carries on the engine row set;
@@ -1961,51 +1966,77 @@ impl OutputGate<'_> {
 ///   refs (empty for every non-Combine node and for the body path).
 /// - `group_keys` — Aggregate group-key columns: a `GroupBy` influence edge (plus
 ///   its role edge) is emitted for each, and they are skipped by the emit/carry
-///   loops (a group key defines grain, it is not a value derive). Empty for the
-///   body path and for non-Aggregate nodes.
-/// - `fan_in_policy` — how a no-program multi-producer carry is graded.
+///   loops (a group key defines grain, it is not a value derive). The top-level and
+///   body Aggregate paths populate it; empty for every non-Aggregate node.
+///
+/// A no-program multi-producer (Merge/Combine join-key) fan-in carry is always
+/// graded conservatively ([`Precision::Approximate`] via
+/// [`FieldEdge::conservative_fan_in`]) on every path — top-level raw/resolved AND the
+/// composition body (#180 GAP 3) — while a single-producer carry stays an exact
+/// `Passthrough`.
 #[allow(clippy::too_many_arguments)]
 fn field_edges_for_stage(
     acc: &mut EdgeAccumulator,
     role_edges: &mut Vec<RoleEdge>,
     to: usize,
-    program: Option<&cxl::ast::Program>,
+    program: StageProgram<'_>,
     input_cols: &[String],
     producers_of: &std::collections::HashMap<String, Vec<usize>>,
     output_gate: &OutputGate<'_>,
     aliases: &std::collections::HashMap<String, usize>,
     group_keys: &std::collections::HashSet<String>,
-    fan_in_policy: FanInPolicy,
 ) {
-    let Some(program) = program else {
-        // No (resolved) CXL program: the node forwards its input columns. Each
-        // surfaced column carries from every producer of it (#67 fan-in), graded
-        // per `fan_in_policy`. The raw/resolved paths grade a multi-producer carry
-        // conservatively; the body path always draws an exact passthrough.
-        for col in input_cols {
-            if !output_gate.admits(col) {
-                continue;
-            }
-            if let Some(producers) = producers_of.get(col) {
-                let conservative =
-                    fan_in_policy == FanInPolicy::Conservative && producers.len() > 1;
-                for &p in producers {
-                    let edge = if conservative {
-                        FieldEdge::conservative_fan_in(p, col.clone(), to, col.clone())
-                    } else {
-                        FieldEdge::carry(
-                            p,
-                            col.clone(),
-                            to,
-                            col.clone(),
-                            FieldEdgeKind::Passthrough,
-                        )
-                    };
-                    acc.push_direct(edge);
+    // Resolve the variant to its `(supports, copies, fanned)` triple. A `Cxl`
+    // program runs the full emit analysis; an `Aggregate` supplies its supports
+    // precomputed (its emits are pure derives, so copies/fanned are empty); a
+    // `None` program runs only the same-name carry fallback below. The triple's
+    // type is fixed by the `Cxl` arm (`Vec<(String, HashSet<String>)>` + two
+    // `HashSet<String>`s); the `Aggregate` arm's empty sets unify against it.
+    let (supports, copies, fanned) = match program {
+        StageProgram::None => {
+            // No (resolved) CXL program: the node forwards its input columns. Each
+            // surfaced column carries from every producer of it (#67 fan-in). A
+            // multi-producer carry rides in from a Merge/Combine fan-in with no CXL
+            // to confirm it passes through unchanged, so it is graded `Approximate`;
+            // a single-producer carry is an exact `Passthrough`.
+            for col in input_cols {
+                if !output_gate.admits(col) {
+                    continue;
+                }
+                if let Some(producers) = producers_of.get(col) {
+                    let conservative = producers.len() > 1;
+                    for &p in producers {
+                        let edge = if conservative {
+                            FieldEdge::conservative_fan_in(p, col.clone(), to, col.clone())
+                        } else {
+                            FieldEdge::carry(
+                                p,
+                                col.clone(),
+                                to,
+                                col.clone(),
+                                FieldEdgeKind::Passthrough,
+                            )
+                        };
+                        acc.push_direct(edge);
+                    }
                 }
             }
+            return;
         }
-        return;
+        StageProgram::Cxl(program) => (
+            field_lineage::emit_supports(program),
+            field_lineage::emit_copy_targets(program, input_cols),
+            field_lineage::emit_each_fanned_targets(program),
+        ),
+        // An aggregate emit folds the group, so it is always a value DERIVE — never
+        // an identity copy and never `emit each`-fanned (the extractor rejects
+        // `emit each` inside an aggregate body). Empty copy/fanned sets reproduce
+        // that classification through the shared loop.
+        StageProgram::Aggregate(supports) => (
+            supports,
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        ),
     };
 
     // Group keys define the grouped-record grain — an INDIRECT GROUP_BY influence,
@@ -2019,14 +2050,8 @@ fn field_edges_for_stage(
         emit_group_by_edges(acc, role_edges, to, group_key, producers_of, aliases);
     }
 
-    // Per-emit let-resolved support, in emit order. The order is load-bearing for
-    // the intra-node chained-emit fallback below.
-    let supports = field_lineage::emit_supports(program);
     let emitted: std::collections::HashSet<&str> =
         supports.iter().map(|(name, _)| name.as_str()).collect();
-    // Emits that merely re-emit an input column unchanged (`emit c = c` /
-    // `emit c = src.c`) are passthroughs, not derives, so their edge is a carry.
-    let copies = field_lineage::emit_copy_targets(program, input_cols);
     // Columns read by a COMPUTED or renamed emit (a pure copy excluded): a same-name
     // carry of one is an `Access` carry rather than a pure `Passthrough` (#72). Keyed
     // by bare column so a qualified `orders.line_total` read and a bare `line_total`
@@ -2043,10 +2068,6 @@ fn field_edges_for_stage(
             FieldEdgeKind::Passthrough
         }
     };
-
-    // Targets fanned out by an `emit each` lose per-element provenance, so their
-    // derive edges are Approximate (#148).
-    let fanned = field_lineage::emit_each_fanned_targets(program);
     let mut emitted_so_far: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (target, support) in &supports {
         // Skip a target the engine did not produce or a group key (its grain edge is
@@ -2368,13 +2389,12 @@ fn compute_field_lineage(
                     &mut acc,
                     &mut role_edges,
                     idx,
-                    Some(&program),
+                    StageProgram::Cxl(&program),
                     &input_cols,
                     &producers_of,
                     &OutputGate::Unfiltered,
                     &input_aliases[idx],
                     &std::collections::HashSet::new(),
-                    FanInPolicy::Conservative,
                 );
             }
             Some(None) => {
@@ -2395,13 +2415,12 @@ fn compute_field_lineage(
                     &mut acc,
                     &mut role_edges,
                     idx,
-                    None,
+                    StageProgram::None,
                     &input_cols,
                     &producers_of,
                     &OutputGate::Unfiltered,
                     &input_aliases[idx],
                     &std::collections::HashSet::new(),
-                    FanInPolicy::Conservative,
                 );
             }
         }
@@ -2771,13 +2790,12 @@ fn resolved_pipeline_field_lineage(
                 &mut acc,
                 &mut role_edges,
                 idx,
-                Some(program),
+                StageProgram::Cxl(program),
                 &input_cols,
                 &producers_of,
                 &OutputGate::Resolved(&output_names),
                 &input_aliases[idx],
                 &aggregate_group_keys,
-                FanInPolicy::Conservative,
             );
         } else if node_cxl(node).is_none() && node_preserves_input_schema(node) {
             // No CXL: the shared analyzer's no-program fallback carries each
@@ -2787,13 +2805,12 @@ fn resolved_pipeline_field_lineage(
                 &mut acc,
                 &mut role_edges,
                 idx,
-                None,
+                StageProgram::None,
                 &input_cols,
                 &producers_of,
                 &OutputGate::Resolved(&output_names),
                 &input_aliases[idx],
                 &aggregate_group_keys,
-                FanInPolicy::Conservative,
             );
         } else if parsed.is_none() && node_cxl(node).is_some() {
             // CXL present but it failed to parse: edges were suppressed (no derive
@@ -3626,10 +3643,14 @@ fn cxl_subtitle(cxl: &str) -> String {
 /// `body.graph.edge_references()` so route, merge, and combine branches all
 /// render as the real DAG instead of a synthetic chain.
 ///
-/// Field cables come from [`body_field_edges`], which is derive-aware (#174): a
-/// body Transform's computed column draws a `Derive` cable to the producer column
-/// it is computed from, alongside the same-name passthrough carries — so the
-/// drill-in canvas shows in-body derivation, not carries alone.
+/// Field cables come from [`body_field_edges`], which is derive-aware (#174) and, after
+/// #180 PR2, near top-level parity: a body Transform OR Aggregation computed column
+/// draws a `Derive` cable to its producer column; a body Route/Cull draws
+/// `Conditional`/`Filter` influence cables; an Aggregate group-by draws `GroupBy`
+/// cables; and a multi-producer Merge fan-in grades the shared carry `Approximate`.
+/// **Combine is not at parity** (clinker#621): a body Combine's computed columns and
+/// join key are not reachable from a `BoundBody`, so they fall to the same-name carry
+/// fallback.
 pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) -> PipelineView {
     // The public drill-in canvas needs laid-out coordinates, so run the barycenter
     // pass. The signature and behavior are unchanged; the implementation now delegates
@@ -3769,7 +3790,7 @@ fn build_body_view(
         }
     }
 
-    let field_edges = body_field_edges(body, &stages, &predecessors);
+    let (field_edges, role_edges) = body_field_edges(body, &stages, &predecessors);
 
     if with_layout {
         // Body rows come from the engine's body-scoped output rows. Missing row data
@@ -3793,7 +3814,10 @@ fn build_body_view(
         connection_paths: Vec::new(),
         field_edges,
         field_edge_paths: Vec::new(),
-        role_edges: Vec::new(),
+        // Body role edges (Aggregate group-by role-port edges) are now surfaced on
+        // the view rather than discarded (#180 GAP 2). They feed the Inspector's
+        // role-usage list the same way the top-level paths' role edges do.
+        role_edges,
         role_edge_paths: Vec::new(),
     };
     (view, idx_to_slot)
@@ -3876,62 +3900,218 @@ fn body_row_fields(row: &cxl::typecheck::Row) -> Vec<FieldRow> {
         .collect()
 }
 
-/// The compiled CXL [`Program`](cxl::ast::Program) a body node carries, or `None`
-/// for a node with no resolved CXL (#174).
+/// Collect the input-column support of one [`CompiledAggregate`] emit residual,
+/// resolving the extractor-produced `AggSlot`/`GroupKey` leaves back to the
+/// aggregate's input columns (#180 GAP 1).
 ///
-/// Resolves the named body node through [`BoundBody::name_to_idx`] and reads its
-/// in-process-compiled [`PlanTransformPayload`](clinker_plan::plan::execution::PlanTransformPayload)'s
-/// `typed.program` — the exact `cxl::ast::Program` the top-level resolved path's
-/// emit/anchor machinery already consumes, so the body's derive lineage reuses it
-/// verbatim with no `.comp.yaml` re-parse.
-///
-/// Only [`PlanNode::Transform`](clinker_plan::plan::execution::PlanNode::Transform)
-/// carries a CXL `TypedProgram` on the plan node. `Aggregation` carries a
-/// `CompiledAggregate` (not a `TypedProgram`) and `Combine` keeps its typed
-/// `where`/`body` programs in `CompileArtifacts`, not on the node — so both, and
-/// every CXL-less node (Source/Route/Output/Merge/Cull/Reshape/Envelope/nested
-/// Composition), return `None`. The caller's same-name carry fallback covers every
-/// `None`, which is also why a nested `PlanNode::Composition` keeps drawing the
-/// same-name carries its body-row output columns surface (mirroring how the
-/// top-level resolved path skips a Composition's own emit analysis).
-///
-/// The outer `resolved` field is `#[serde(skip)]` and `Option`; an in-process
-/// compile always populates it, but a deserialized plan would not — `None` then
-/// degrades to the carry fallback rather than panicking.
-fn body_node_program<'a>(
-    body: &'a clinker_plan::plan::composition_body::BoundBody,
-    node_name: &str,
-) -> Option<&'a cxl::ast::Program> {
-    use clinker_plan::plan::execution::PlanNode;
-
-    let &idx = body.name_to_idx.get(node_name)?;
-    match body.graph.node_weight(idx)? {
-        PlanNode::Transform {
-            resolved: Some(payload),
+/// `Expr::support_into` treats [`Expr::AggSlot`] and [`Expr::GroupKey`] as terminal
+/// (they are leaves with no field name), so it CANNOT recover the columns an
+/// aggregate emit reads — they were rewritten away at `extract_aggregates` time.
+/// This custom walk descends every `AggSlot`/`GroupKey` in the residual and resolves
+/// it through `compiled`, then runs `support_into` once more to catch any bare
+/// `FieldRef` the extractor left in the residual (a literal/passthrough term).
+fn aggregate_residual_support(
+    residual: &cxl::ast::Expr,
+    compiled: &cxl::plan::CompiledAggregate,
+    agg_input_schema: &[String],
+    out: &mut std::collections::HashSet<String>,
+) {
+    use cxl::ast::Expr;
+    match residual {
+        Expr::AggSlot { slot, .. } => {
+            if let Some(binding) = compiled.bindings.get(*slot as usize) {
+                binding_arg_support(&binding.arg, agg_input_schema, out);
+            }
+        }
+        Expr::GroupKey { slot, .. } => {
+            if let Some(field) = compiled.group_by_fields.get(*slot as usize) {
+                out.insert(field.clone());
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::Coalesce { lhs, rhs, .. } => {
+            aggregate_residual_support(lhs, compiled, agg_input_schema, out);
+            aggregate_residual_support(rhs, compiled, agg_input_schema, out);
+        }
+        Expr::Unary { operand, .. } => {
+            aggregate_residual_support(operand, compiled, agg_input_schema, out)
+        }
+        Expr::IfThenElse {
+            condition,
+            then_branch,
+            else_branch,
             ..
-        } => Some(&payload.typed.program),
-        _ => None,
+        } => {
+            aggregate_residual_support(condition, compiled, agg_input_schema, out);
+            aggregate_residual_support(then_branch, compiled, agg_input_schema, out);
+            if let Some(e) = else_branch {
+                aggregate_residual_support(e, compiled, agg_input_schema, out);
+            }
+        }
+        Expr::Match { subject, arms, .. } => {
+            if let Some(s) = subject {
+                aggregate_residual_support(s, compiled, agg_input_schema, out);
+            }
+            for arm in arms {
+                aggregate_residual_support(&arm.pattern, compiled, agg_input_schema, out);
+                aggregate_residual_support(&arm.body, compiled, agg_input_schema, out);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            aggregate_residual_support(receiver, compiled, agg_input_schema, out);
+            for a in args {
+                aggregate_residual_support(a, compiled, agg_input_schema, out);
+            }
+        }
+        Expr::WindowCall { args, .. } | Expr::AggCall { args, .. } => {
+            for a in args {
+                aggregate_residual_support(a, compiled, agg_input_schema, out);
+            }
+        }
+        Expr::IndexAccess {
+            receiver, index, ..
+        } => {
+            aggregate_residual_support(receiver, compiled, agg_input_schema, out);
+            aggregate_residual_support(index, compiled, agg_input_schema, out);
+        }
+        Expr::Closure { body, .. } => {
+            aggregate_residual_support(body, compiled, agg_input_schema, out)
+        }
+        // A bare `FieldRef`/`QualifiedFieldRef` (or any non-recursive leaf) the
+        // extractor left in place is recovered by `support_into`, which the caller
+        // runs over the whole residual — so the recursive arms above only need to
+        // reach the `AggSlot`/`GroupKey` leaves `support_into` ignores.
+        _ => {}
     }
 }
 
-/// Body-internal field lineage edges in the body's slot space (#174).
+/// Resolve one [`BindingArg`] to the input columns it reads (#180 GAP 1).
 ///
-/// Mirrors the top-level resolved path ([`resolved_pipeline_field_lineage`]) but
-/// against a [`BoundBody`]: a body node WITH a resolved CXL program runs the same
-/// `emit_supports` / `emit_copy_targets` / `emit_each_fanned_targets` analysis and
-/// emits `Derive`/`carry` edges so a COMPUTED body column (e.g. `emit c = a + 1`)
-/// draws a derive cable to the producer column it is computed from — the cable the
-/// Inspector's in-body BFS follows to reach the true in-body origin of a computed
-/// column, and the drill-in canvas renders. A body node WITHOUT a resolved program
-/// (the helper returns `None` — every CXL-less node, including a nested
-/// `Composition`) keeps the original same-name passthrough carry fallback, which is
-/// exactly correct for a nested Composition whose output columns surface from its
-/// body rows.
+/// **SHARP EDGE:** `BindingArg::Field(idx)` indexes the aggregate's ENGINE input
+/// schema (the upstream row order `extract_aggregates` was fed), NOT klinx's deduped
+/// `input_cols` — so the name is resolved from `agg_input_schema` (the aggregate's
+/// predecessor body row, in declaration order). An out-of-range index resolves to
+/// nothing rather than panicking.
+fn binding_arg_support(
+    arg: &cxl::plan::BindingArg,
+    agg_input_schema: &[String],
+    out: &mut std::collections::HashSet<String>,
+) {
+    use cxl::plan::BindingArg;
+    match arg {
+        BindingArg::Field(idx) => {
+            if let Some(name) = agg_input_schema.get(*idx as usize) {
+                out.insert(name.clone());
+            }
+        }
+        BindingArg::Expr(e) => e.support_into(out),
+        BindingArg::Wildcard => {}
+        BindingArg::Pair(a, b) => {
+            binding_arg_support(a, agg_input_schema, out);
+            binding_arg_support(b, agg_input_schema, out);
+        }
+    }
+}
+
+/// Per-emit support for a body [`CompiledAggregate`], same shape
+/// [`field_lineage::emit_supports`] returns (#180 GAP 1).
+///
+/// One `(output_name, support)` pair per [`CompiledEmit`], in emit order. `support`
+/// is the set of aggregate-input columns the emit reads, recovered from the residual
+/// via [`aggregate_residual_support`] (the `AggSlot`/`GroupKey` leaves) plus
+/// `support_into` (any bare `FieldRef` left in the residual). The shared
+/// [`field_edges_for_stage`] turns each into a `Derive` edge.
+fn aggregate_emit_supports(
+    compiled: &cxl::plan::CompiledAggregate,
+    agg_input_schema: &[String],
+) -> Vec<(String, std::collections::HashSet<String>)> {
+    compiled
+        .emits
+        .iter()
+        .map(|emit| {
+            let mut support = std::collections::HashSet::new();
+            aggregate_residual_support(&emit.residual, compiled, agg_input_schema, &mut support);
+            // Bare `FieldRef`s the extractor left untouched (e.g. a group-by column
+            // referenced raw, or a passthrough term) are not `AggSlot`/`GroupKey`
+            // leaves, so `support_into` is the one walk that recovers them.
+            emit.residual.support_into(&mut support);
+            (emit.output_name.to_string(), support)
+        })
+        .collect()
+}
+
+/// What drives a body node's emit/anchor analysis (#174, #180 GAP 1).
+///
+/// Resolves the named body node through [`BoundBody::name_to_idx`] and reads the
+/// in-process-compiled artifact off the plan node:
+///
+/// - [`PlanNode::Transform`](clinker_plan::plan::execution::PlanNode::Transform)
+///   with a resolved payload → [`StageProgram::Cxl`] over its
+///   [`PlanTransformPayload`](clinker_plan::plan::execution::PlanTransformPayload)'s
+///   `typed.program`, the same `cxl::ast::Program` the top-level resolved path
+///   consumes, reused verbatim with no `.comp.yaml` re-parse.
+/// - [`PlanNode::Aggregation`](clinker_plan::plan::execution::PlanNode::Aggregation)
+///   with a populated `compiled` → [`StageProgram::Aggregate`] over
+///   [`aggregate_emit_supports`], so a computed aggregate column (`emit total =
+///   sum(x)`) draws a `Derive` cable to the input column it folds (#180 GAP 1).
+///   `agg_input_schema` is the aggregate's predecessor body row, supplying the
+///   `BindingArg::Field(idx)` → column-name resolution.
+/// - Every other node — and a `Transform` whose `resolved` is `None` or an
+///   `Aggregation` whose `compiled` is empty (a deserialized plan never populates
+///   the `#[serde(skip)]` fields) — → [`StageProgram::None`], the same-name carry
+///   fallback. `Combine` stays on this fallback (its computed columns are
+///   engine-blocked, clinker#621), as does a nested `Composition` (its output
+///   columns surface from its body rows).
+fn body_node_stage_program<'a>(
+    body: &'a clinker_plan::plan::composition_body::BoundBody,
+    node_name: &str,
+    agg_input_schema: &[String],
+) -> StageProgram<'a> {
+    use clinker_plan::plan::execution::PlanNode;
+
+    let Some(&idx) = body.name_to_idx.get(node_name) else {
+        return StageProgram::None;
+    };
+    match body.graph.node_weight(idx) {
+        Some(PlanNode::Transform {
+            resolved: Some(payload),
+            ..
+        }) => StageProgram::Cxl(&payload.typed.program),
+        Some(PlanNode::Aggregation { compiled, .. }) if !compiled.emits.is_empty() => {
+            StageProgram::Aggregate(aggregate_emit_supports(compiled, agg_input_schema))
+        }
+        _ => StageProgram::None,
+    }
+}
+
+/// Body-internal field lineage edges + role edges in the body's slot space (#174,
+/// #180 PR2).
+///
+/// Mirrors the top-level resolved path ([`resolved_pipeline_field_lineage`]) against
+/// a [`BoundBody`], reusing the shared [`field_edges_for_stage`] analyzer so the body
+/// matches the top-level path on every closeable gap:
+/// - A body **Transform** runs the full emit/anchor analysis ([`StageProgram::Cxl`]),
+///   so a COMPUTED body column (`emit c = a + 1`) draws a `Derive` cable to its
+///   producer column — the cable the Inspector's in-body BFS follows and the drill-in
+///   canvas renders.
+/// - A body **Aggregate** runs that same analysis over precomputed supports
+///   ([`StageProgram::Aggregate`] via [`aggregate_emit_supports`]), so a computed
+///   aggregate column (`emit total = sum(x)`) derives to the input column it folds,
+///   and its `group_by` columns draw `GroupBy` influence + role edges (#180 GAP 1/2).
+/// - A body **Route**/**Cull** emits its `Conditional`/`Filter` INDIRECT influence
+///   edges via [`body_node_influence_predicates`] (#180 GAP 2).
+/// - Multi-producer fan-in carries are graded conservatively, so a body Merge
+///   join-key fan-in grades `Approximate` like the top level (#180 GAP 3).
+///
+/// A body node with NO resolved program (every CXL-less node — Source/Route/Merge/
+/// Output/Cull/Reshape/Envelope/nested `Composition`, and `Combine`) keeps the
+/// same-name passthrough carry fallback. **Combine is NOT at parity** (clinker#621):
+/// its computed columns and its `JoinKey` influence are not reachable from a
+/// `BoundBody`, so they degrade to the carry fallback.
 fn body_field_edges(
     body: &clinker_plan::plan::composition_body::BoundBody,
     stages: &[StageView],
     graph_predecessors: &[Vec<usize>],
-) -> Vec<FieldEdge> {
+) -> (Vec<FieldEdge>, Vec<RoleEdge>) {
     let name_to_slot: std::collections::HashMap<&str, usize> = stages
         .iter()
         .enumerate()
@@ -3939,6 +4119,12 @@ fn body_field_edges(
         .collect();
 
     let mut acc = EdgeAccumulator::new();
+    // Role edges (Aggregate group-by role-port edges) are now LIVE for the body
+    // (#180 GAP 2), so they accumulate across the whole body rather than being
+    // discarded per-stage. The Combine alias map stays empty — a body Combine has
+    // no resolved program / no alias-qualified support to resolve (clinker#621).
+    let mut role_edges: Vec<RoleEdge> = Vec::new();
+    let no_aliases: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (to, stage) in stages.iter().enumerate() {
         let ordered_predecessors: Vec<usize> = body
             .node_input_refs
@@ -3989,33 +4175,130 @@ fn body_field_edges(
         let output_names: std::collections::HashSet<String> =
             stage.fields.iter().map(|f| f.name.clone()).collect();
 
-        // The body path has no group keys, no Combine alias map (a body Combine
-        // carries no resolved program, so `body_node_program` never returns `Some`
-        // for one), no role edges to surface, and no fan-in policy yet
-        // (`FanInPolicy::ExactOnly` keeps every carry an exact `Passthrough`). Turning
-        // group-by / influence / fan-in grading on inside the body is #180 PR2; the
-        // emit/anchor core itself is the same shared stage analyzer the top-level
-        // paths use, so a computed body column (`emit c = a + 1`) draws its derive
-        // cable identically. `body_node_program` returning `None` (every CXL-less
-        // node, including a nested Composition) selects the no-program same-name carry
-        // fallback, exactly as before (#174).
-        let mut role_edges: Vec<RoleEdge> = Vec::new();
-        let no_aliases: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let no_group_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // An aggregate's `BindingArg::Field(idx)` indexes its ENGINE input schema —
+        // its single upstream's row, in declaration order — NOT the deduped
+        // `input_cols`. The aggregate's predecessor stage's `fields` is exactly that
+        // engine row (it was built from `body_rows[pred]`), so its column names in
+        // order are the idx→name table the adapter resolves against.
+        let agg_input_schema: Vec<String> = ordered_predecessors
+            .first()
+            .and_then(|&p| stages.get(p))
+            .map(|source| source.fields.iter().map(|f| f.name.clone()).collect())
+            .unwrap_or_default();
+
+        // Aggregate group keys define the grouped-record grain — a `GroupBy`
+        // influence edge (#147) — and are skipped by the emit/carry loops. The body
+        // path reads them off the plan node's `config.group_by` (#180 GAP 2), the
+        // mirror of the top-level path's `config.group_by`.
+        let group_keys = body_node_group_keys(body, &stage.id);
+
+        // GAP 1 + GAP 3: a body Transform/Aggregate runs the shared analyzer (the
+        // Aggregate via precomputed supports); fan-in grading is now Conservative,
+        // so a body Merge fanning a column in from two distinct producers grades that
+        // carry Approximate, matching the top-level paths. A CXL-less / unresolved
+        // node (Route/Merge/Output/Cull/nested Composition, and Combine — clinker#621)
+        // falls to the same-name carry fallback.
         field_edges_for_stage(
             &mut acc,
             &mut role_edges,
             to,
-            body_node_program(body, &stage.id),
+            body_node_stage_program(body, &stage.id, &agg_input_schema),
             &input_cols,
             &producers_of,
             &OutputGate::Resolved(&output_names),
             &no_aliases,
-            &no_group_keys,
-            FanInPolicy::ExactOnly,
+            &group_keys,
         );
+
+        // INDIRECT influence edges (#147, #180 GAP 2): a body Route's branch
+        // `Conditional` conditions and a body Cull's `Filter` removal predicates,
+        // added AFTER the node's DIRECT carries so they land on the real surviving
+        // output rows. A Merge is a row UNION and contributes none; Combine's
+        // `JoinKey` is engine-blocked (clinker#621).
+        for (predicate, kind) in body_node_influence_predicates(body, &stage.id) {
+            emit_predicate_influence_edges(
+                &mut acc,
+                to,
+                &predicate,
+                kind,
+                &stage.fields,
+                &producers_of,
+                &no_aliases,
+            );
+        }
     }
-    acc.edges
+    (acc.edges, role_edges)
+}
+
+/// A body Aggregate's group-by columns in the body's own scope (#180 GAP 2).
+///
+/// Read off the plan node's `config.group_by` — the mirror of the top-level
+/// resolved path's `PipelineNode::Aggregate { config }.group_by`. Every other body
+/// node (and a `Transform`) groups nothing, so this returns an empty set.
+fn body_node_group_keys(
+    body: &clinker_plan::plan::composition_body::BoundBody,
+    node_name: &str,
+) -> std::collections::HashSet<String> {
+    use clinker_plan::plan::execution::PlanNode;
+
+    body.name_to_idx
+        .get(node_name)
+        .and_then(|&idx| body.graph.node_weight(idx))
+        .and_then(|node| match node {
+            PlanNode::Aggregation { config, .. } => Some(config.group_by.iter().cloned().collect()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// The control-flow predicates a BODY node imposes, each paired with the INDIRECT
+/// edge kind it produces (#180 GAP 2) — the body-scope analogue of
+/// [`node_influence_predicates`], reading the engine `PlanNode`/`BoundBody` instead
+/// of the top-level config.
+///
+/// - **Route** — body Route conditions live in
+///   [`BoundBody::route_bodies`]`[name].conditions` (the top-level Route's
+///   conditions would mis-route a body Route, so the body keeps its own). Each
+///   branch condition is a `Conditional` predicate; the default branch has none.
+/// - **Cull** — [`PlanNode::Cull`](clinker_plan::plan::execution::PlanNode::Cull)'s
+///   `config.rules[].drop_group_when` is a `Filter` predicate per removal rule.
+/// - **Combine** `JoinKey` is OMITTED — a body Combine's typed `where` predicate is
+///   not on the plan node (it lives in `CompileArtifacts`, not reachable from a
+///   `BoundBody`), so the body cannot emit the join-key influence (clinker#621).
+///
+/// Returns owned predicate strings (the `RouteBody` conditions are borrowed from a
+/// map the caller does not keep alive across the influence emission).
+fn body_node_influence_predicates(
+    body: &clinker_plan::plan::composition_body::BoundBody,
+    node_name: &str,
+) -> Vec<(String, FieldEdgeKind)> {
+    use clinker_plan::plan::execution::PlanNode;
+
+    // A Route node's conditions are keyed by the body node name in `route_bodies`.
+    if let Some(route) = body.route_bodies.get(node_name) {
+        return route
+            .conditions
+            .values()
+            .map(|predicate| (predicate.as_ref().to_string(), FieldEdgeKind::Conditional))
+            .collect();
+    }
+    match body
+        .name_to_idx
+        .get(node_name)
+        .and_then(|&idx| body.graph.node_weight(idx))
+    {
+        Some(PlanNode::Cull { config, .. }) => config
+            .rules
+            .iter()
+            .map(|rule| {
+                (
+                    rule.drop_group_when.as_ref().to_string(),
+                    FieldEdgeKind::Filter,
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -4558,6 +4841,187 @@ nodes:
     /// The composition index in the shared fixture's resolved top-level view.
     fn comp_idx(view: &PipelineView) -> usize {
         stage_idx(view, "comp")
+    }
+
+    /// Compile a composition `body.comp.yaml` (given verbatim) wired into a minimal
+    /// `src → comp → out` pipeline, extract the bound body of `comp`, and return it.
+    /// `src_schema` is the YAML schema block shared by the composition input port and
+    /// the pipeline Source. Shared by the #180 PR2 GAP fixtures.
+    fn compile_body_fixture(label: &str, src_schema: &str, comp_yaml: &str) -> BoundBody {
+        let unique = format!(
+            "klinx-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temporary composition workspace");
+        std::fs::write(root.join("body.comp.yaml"), comp_yaml).expect("write composition fixture");
+
+        let pipeline = format!(
+            r#"
+pipeline:
+  name: {label}_drill
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+{src_schema}
+  - type: composition
+    name: comp
+    input: src
+    use: ./body.comp.yaml
+    inputs:
+      src: src
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#
+        );
+        let config = parse_config(&pipeline).expect("pipeline fixture parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("pipeline fixture compiles");
+        let _ = std::fs::remove_dir_all(root);
+        let body_id = plan
+            .dag()
+            .graph
+            .node_weights()
+            .find_map(|node| match node {
+                clinker_plan::plan::execution::PlanNode::Composition { name, body, .. }
+                    if name == "comp" =>
+                {
+                    Some(*body)
+                }
+                _ => None,
+            })
+            .expect("compiled composition body id");
+        plan.body_of(body_id).expect("compiled body exists").clone()
+    }
+
+    use clinker_plan::plan::composition_body::BoundBody;
+
+    /// A composition body that AGGREGATES: `src(x:int, k:string) → agg(group_by:[k],
+    /// emit total = sum(x))`, output port `result: agg`. Exercises #180 GAP 1 (the
+    /// computed aggregate column traces to its folded input column) and GAP 2 (the
+    /// `k` group-by draws a `GroupBy` edge).
+    fn compiled_aggregating_body_fixture() -> BoundBody {
+        compile_body_fixture(
+            "agg-body",
+            "        - { name: x, type: int }\n        - { name: k, type: string }",
+            r#"_compose:
+  name: aggregating
+  inputs:
+    src:
+      schema:
+        - { name: x, type: int }
+        - { name: k, type: string }
+  outputs:
+    result: agg
+  config_schema: {}
+
+nodes:
+  - type: aggregate
+    name: agg
+    input: src
+    config:
+      group_by: [k]
+      cxl: |
+        emit total = sum(x)
+"#,
+        )
+    }
+
+    /// A composition body where a Merge genuinely fans in TWO DISTINCT producer slots
+    /// carrying the same column: `src → split(route) → t1/t2(transform) →
+    /// joined(merge of t1,t2)`. `t1` and `t2` each pass `k` through unchanged, so the
+    /// Merge sees `k` from two separate producers (unlike `compiled_routing_body_fixture`,
+    /// whose `split.hi`/`split.lo` dedup to one Route slot). Exercises #180 GAP 3:
+    /// the shared `k` carry into the Merge grades `Approximate`, while a column from a
+    /// single producer stays `Exact`.
+    fn compiled_multi_producer_merge_body_fixture() -> BoundBody {
+        compile_body_fixture(
+            "multi-merge-body",
+            "        - { name: k, type: int }\n        - { name: v, type: string }",
+            r#"_compose:
+  name: multi_merge
+  inputs:
+    src:
+      schema:
+        - { name: k, type: int }
+        - { name: v, type: string }
+  outputs:
+    result: joined
+  config_schema: {}
+
+nodes:
+  - type: route
+    name: split
+    input: src
+    config:
+      conditions:
+        hi: "k > 0"
+      default: lo
+  - type: transform
+    name: t1
+    input: split.hi
+    config:
+      cxl: |
+        emit tag = 1
+  - type: transform
+    name: t2
+    input: split.lo
+    config:
+      cxl: |
+        emit tag = 2
+  - type: merge
+    name: joined
+    inputs: [t1, t2]
+"#,
+        )
+    }
+
+    /// A composition body that CULLS: `src(gid:string, status:string) →
+    /// prune(cull, drop_group_when reads status)`, output port `result: prune`.
+    /// Exercises #180 GAP 2: the body Cull's removal predicate draws a `Filter`
+    /// influence edge from its read column.
+    fn compiled_culling_body_fixture() -> BoundBody {
+        compile_body_fixture(
+            "cull-body",
+            "        - { name: gid, type: string }\n        - { name: status, type: string }",
+            r#"_compose:
+  name: culling
+  inputs:
+    src:
+      schema:
+        - { name: gid, type: string }
+        - { name: status, type: string }
+  outputs:
+    result: prune
+  config_schema: {}
+
+nodes:
+  - type: cull
+    name: prune
+    input: src
+    config:
+      partition_by: [gid]
+      removed_to: dropped
+      rules:
+        - name: drop_errored
+          drop_group_when: "sum(if status == 'error' then 1 else 0) > 0"
+"#,
+        )
     }
 
     /// Compile a composition whose input port declares NO schema (accept-any), so
@@ -5255,24 +5719,203 @@ nodes:
     /// #174: a body node with NO resolved CXL program (here a Route — and an Output,
     /// which the engine seeds as the body's terminal node) yields only same-name
     /// passthrough carries, never a synthetic derive edge. This pins the no-program
-    /// fallback path that preserves nested-composition correctness.
+    /// #180 PR2 GAP 1 + GAP 2: a body Aggregate's computed column traces to the input
+    /// column it folds, its group-by draws a `GroupBy` edge, and the
+    /// `BindingArg::Field(idx)` → column-name resolution maps to the RIGHT column.
     #[test]
-    fn body_view_no_program_node_yields_only_passthrough_carries() {
+    fn body_view_aggregate_traces_computed_column_to_folded_input() {
+        use clinker_plan::plan::execution::PlanNode;
+
+        let body = compiled_aggregating_body_fixture();
+        let view = derive_body_view(&body);
+        let src_idx = stage_idx(&view, "src");
+        let agg_idx = stage_idx(&view, "agg");
+
+        // GAP 1: `emit total = sum(x)` derives `agg.total` from the aggregate's input
+        // column `x` — the cable that was a dead end before the adapter.
+        assert!(
+            view.field_edges.contains(&FieldEdge {
+                from_node: src_idx,
+                from_field: "x".to_string(),
+                to_node: agg_idx,
+                to_field: "total".to_string(),
+                kind: FieldEdgeKind::Derive,
+                ..Default::default()
+            }),
+            "body Aggregate must derive agg.total from src.x (GAP 1): {:?}",
+            view.field_edges
+        );
+
+        // GAP 2: the `k` group-by draws a `GroupBy` influence edge to the grouped row.
+        assert!(
+            view.field_edges.contains(&FieldEdge {
+                from_node: src_idx,
+                from_field: "k".to_string(),
+                to_node: agg_idx,
+                to_field: "k".to_string(),
+                kind: FieldEdgeKind::GroupBy,
+                ..Default::default()
+            }),
+            "body Aggregate must draw a GroupBy edge for k (GAP 2): {:?}",
+            view.field_edges
+        );
+
+        // GAP 1 SHARP EDGE: assert the `BindingArg::Field(idx)` → column resolution
+        // directly. The single binding folds `sum(x)`, so its arg is `Field(idx)`
+        // where the aggregate's engine input schema (its predecessor `src`'s body row,
+        // in declaration order) at `idx` is `x` — NOT some other column. This is the
+        // one place the adapter can silently produce a wrong column.
+        let agg_node = body
+            .topo_order
+            .iter()
+            .find_map(|&i| match &body.graph[i] {
+                node @ PlanNode::Aggregation { .. } => Some(node),
+                _ => None,
+            })
+            .expect("body has an Aggregation node");
+        let PlanNode::Aggregation { compiled, .. } = agg_node else {
+            unreachable!("matched Aggregation above")
+        };
+        // The aggregate's input schema in engine row order = src's body row fields.
+        let agg_input_schema: Vec<String> = body
+            .body_rows
+            .get("src")
+            .expect("src body row")
+            .fields()
+            .map(|(qf, _)| qf.name.to_string())
+            .collect();
+        let binding = compiled
+            .bindings
+            .first()
+            .expect("sum(x) produces one binding");
+        let cxl::plan::BindingArg::Field(idx) = &binding.arg else {
+            panic!("sum(x) binds a bare field, got {:?}", binding.arg);
+        };
+        assert_eq!(
+            agg_input_schema.get(*idx as usize).map(String::as_str),
+            Some("x"),
+            "BindingArg::Field({idx}) must resolve to `x` in the engine input schema \
+             {agg_input_schema:?}, not another column",
+        );
+
+        // The same resolution flows through the adapter: the precomputed support for
+        // the `total` emit is exactly `{x}`.
+        let supports = aggregate_emit_supports(compiled, &agg_input_schema);
+        let total_support = supports
+            .iter()
+            .find(|(name, _)| name == "total")
+            .map(|(_, s)| s)
+            .expect("adapter produced a support set for `total`");
+        assert!(
+            total_support.contains("x") && total_support.len() == 1,
+            "aggregate_emit_supports must resolve total's support to {{x}}, got {total_support:?}",
+        );
+    }
+
+    /// #180 PR2 GAP 3: a body Merge that genuinely fans in two DISTINCT producers of
+    /// the same column grades that carry `Approximate` (`conservative_fan_in`), while a
+    /// single-producer carry elsewhere in the body stays `Exact`.
+    #[test]
+    fn body_view_multi_producer_merge_grades_fan_in_conservatively() {
+        let body = compiled_multi_producer_merge_body_fixture();
+        let view = derive_body_view(&body);
+        let t1_idx = stage_idx(&view, "t1");
+        let t2_idx = stage_idx(&view, "t2");
+        let joined_idx = stage_idx(&view, "joined");
+        let split_idx = stage_idx(&view, "split");
+
+        // The Merge sees `tag` from BOTH t1 and t2 (two distinct producer slots), so
+        // each carry into `joined.tag` is graded Approximate.
+        for producer in [t1_idx, t2_idx] {
+            let carry = view
+                .field_edges
+                .iter()
+                .find(|e| {
+                    e.from_node == producer
+                        && e.from_field == "tag"
+                        && e.to_node == joined_idx
+                        && e.to_field == "tag"
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected a tag carry from producer {producer} into the merge: {:?}",
+                        view.field_edges
+                    )
+                });
+            assert_eq!(
+                carry.kind,
+                FieldEdgeKind::Passthrough,
+                "a fan-in carry is still a Passthrough kind"
+            );
+            assert_eq!(
+                carry.precision,
+                Precision::Approximate,
+                "a multi-producer merge fan-in carry grades Approximate (GAP 3): {:?}",
+                view.field_edges
+            );
+        }
+
+        // Contrast: a single-producer carry (split → t2, one predecessor) stays Exact.
+        let single = view
+            .field_edges
+            .iter()
+            .find(|e| {
+                e.from_node == split_idx
+                    && e.from_field == "k"
+                    && e.to_node == t2_idx
+                    && e.to_field == "k"
+            })
+            .expect("split → t2 carries k from a single producer");
+        assert_eq!(
+            single.precision,
+            Precision::Exact,
+            "a single-producer carry stays Exact: {:?}",
+            view.field_edges
+        );
+    }
+
+    /// A body Route draws same-name passthrough carries AND, after #180 PR2 GAP 2, the
+    /// `Conditional` influence edges its branch condition imposes.
+    ///
+    /// Before GAP 2 the body emitted no influence edges, so this test asserted the
+    /// Route drew ONLY `Passthrough` carries. That assertion is now deliberately
+    /// flipped: the Route's branch condition (`a > 0`) reads `a`, so `a` draws a
+    /// `Conditional` edge to each surviving row — exactly the top-level Route's
+    /// behavior. The same-name passthrough carries still ride through, and no derive
+    /// edge appears (a Route computes nothing).
+    #[test]
+    fn body_view_route_emits_conditional_influence_and_passthrough_carries() {
         let body = compiled_routing_body_fixture();
         let view = derive_body_view(&body);
 
-        // Every edge incident to a no-program node (Route/Output/Merge) is a pure
-        // passthrough carry — the derive-aware branch only fires for Transforms.
         let route_idx = stage_idx(&view, "split");
+
+        // GAP 2: the Route's `a > 0` condition reads `a`, so `a` now draws a
+        // `Conditional` influence edge to surviving rows on the Route.
+        assert!(
+            view.field_edges.iter().any(|e| {
+                e.to_node == route_idx
+                    && e.from_field == "a"
+                    && e.kind == FieldEdgeKind::Conditional
+            }),
+            "body Route must draw a Conditional edge from its predicate column `a` (GAP 2): {:?}",
+            view.field_edges
+        );
+        // Every edge incident to the Route is EITHER a same-name passthrough carry OR a
+        // `Conditional` influence edge — never anything else, and never a derive.
         assert!(
             view.field_edges
                 .iter()
                 .filter(|e| e.from_node == route_idx || e.to_node == route_idx)
-                .all(|e| e.kind == FieldEdgeKind::Passthrough),
-            "a Route node (no CXL program) must carry only same-name passthroughs: {:?}",
+                .all(|e| matches!(
+                    e.kind,
+                    FieldEdgeKind::Passthrough | FieldEdgeKind::Conditional
+                )),
+            "a Route node draws only passthrough carries and Conditional influence: {:?}",
             view.field_edges
         );
-        // And it materialized at least one carry — the fallback is live, not vacuous.
+        // The carry fallback is still live: at least one same-name passthrough rides
+        // through the Route.
         assert!(
             view.field_edges.iter().any(|e| {
                 (e.from_node == route_idx || e.to_node == route_idx)
@@ -5287,6 +5930,36 @@ nodes:
                 .iter()
                 .all(|e| e.kind != FieldEdgeKind::Derive),
             "a body with no computing Transform draws no derive edges: {:?}",
+            view.field_edges
+        );
+    }
+
+    /// #180 PR2 GAP 2: a body Cull's `drop_group_when` removal predicate draws a
+    /// `Filter` influence edge from each column it reads to the surviving rows — the
+    /// body analogue of the top-level Cull `Filter` edges.
+    #[test]
+    fn body_view_cull_emits_filter_influence_edges() {
+        let body = compiled_culling_body_fixture();
+        let view = derive_body_view(&body);
+        let cull_idx = stage_idx(&view, "prune");
+
+        // The predicate `sum(if status == 'error' ...)` reads `status`, so `status`
+        // draws a `Filter` edge to surviving Cull rows.
+        assert!(
+            view.field_edges.iter().any(|e| {
+                e.to_node == cull_idx && e.from_field == "status" && e.kind == FieldEdgeKind::Filter
+            }),
+            "body Cull must draw a Filter edge from its predicate column `status`: {:?}",
+            view.field_edges
+        );
+        // Every Cull edge is EITHER a same-name passthrough carry OR a `Filter`
+        // influence edge (a Cull computes nothing and groups nothing).
+        assert!(
+            view.field_edges
+                .iter()
+                .filter(|e| e.from_node == cull_idx || e.to_node == cull_idx)
+                .all(|e| matches!(e.kind, FieldEdgeKind::Passthrough | FieldEdgeKind::Filter)),
+            "a body Cull draws only passthrough carries and Filter influence: {:?}",
             view.field_edges
         );
     }
