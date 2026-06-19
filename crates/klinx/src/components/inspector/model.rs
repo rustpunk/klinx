@@ -1747,12 +1747,18 @@ fn trace_tree(
 /// The recursion guard and [`MAX_SCOPE_DEPTH`] backstop are applied via the shared
 /// [`enter_body`]. A resolve/map miss returns `false` (degrade to a leaf).
 ///
-/// Note (known limitation, not a bug): the in-body BFS that follows an `Enter` rides
-/// `derive_body_view`'s edges, which are CARRY-ONLY. A column carried through the body
-/// traces all the way to the outer producer/consumer; a column COMPUTED inside the
-/// body dead-ends at its in-body row because the body view draws no derive edge for it.
-/// Body-internal derive lineage is a pending follow-up; #155 surfaces every crossing
-/// correctly regardless.
+/// The in-body BFS that follows an `Enter` rides the body scope's `field_edges`, which
+/// are now derive-aware (#174): a column COMPUTED inside the body (`emit c = a + 1`)
+/// draws a derive cable to the producer column it is computed from, so the trace
+/// follows it to the column's true in-body origin and resurfaces to the outer source —
+/// it no longer dead-ends at the computed column's in-body row. A carried column still
+/// traces straight through.
+///
+/// Residual gap (Transform-only coverage): derive cables are emitted for columns
+/// computed by a body `Transform` (the only body node that carries a CXL program on the
+/// plan node). A column computed by a body `Aggregation` or `Combine` still dead-ends at
+/// its in-body row, and body-internal influence edges (Filter/GroupBy/JoinKey/Conditional)
+/// are not drawn — both are follow-ups, not #174 regressions.
 #[allow(clippy::too_many_arguments)]
 fn descend_into_composition(
     item: &Frontier,
@@ -3934,11 +3940,18 @@ nodes:
             .any(|(f, b)| f == field && b.as_ref() == Some(want))
     }
 
-    /// #155 acceptance: tracing UPSTREAM from a composition's carried output column
+    /// #155 + #174 acceptance: tracing UPSTREAM from a composition's output column
     /// descends INTO the body (Enter hop) and resurfaces FROM it (Exit hop) back to
     /// the outer source producer — returning the correct origin field. The carried
     /// column `a` rides straight through `second ← first ← src` inside the body, so
     /// the trace reaches the body input port and resurfaces to outer `src.a`.
+    ///
+    /// #174: with the body view derive-aware, a COMPUTED output column also reaches
+    /// its true in-body origin. The body is `first: emit c = a + 1`,
+    /// `second: emit d = c + 1`; the output port surfaces `second`. Tracing `out.d`
+    /// upstream now follows `second.d → first.c → src.a` inside the body and
+    /// resurfaces to outer `src.a` (previously `d` dead-ended at its in-body row).
+    /// `out.c` likewise resurfaces to `src.a` (it was Enter-only before #174).
     #[test]
     fn upstream_descends_into_and_resurfaces_from_composition() {
         let plan = compiled_single_composition();
@@ -3981,22 +3994,70 @@ nodes:
         // One composition was crossed → depth 1.
         assert_eq!(max_scope_depth(&detail.upstream), 1);
 
-        // A computed body column still descends (Enter), then dead-ends inside the body
-        // because `derive_body_view` is CARRY-ONLY (it draws no in-body derive edges —
-        // body-internal lineage fidelity is a pending follow-up, NOT a #155 bug). The
-        // crossing is still surfaced correctly; only the deeper in-body origin of a
-        // computed column is absent until the body view gains derive edges.
+        // #174: tracing the COMPUTED output column `out.d` (`second: emit d = c + 1`)
+        // now follows the body's derive cables to the true in-body origin instead of
+        // dead-ending. The trace Enters `comp`, hops through the intermediate computed
+        // column `first.c`, reaches the source column `src.a`, and Exits on `src.a`.
         let computed =
+            build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "d"))
+                .expect("out.d exists");
+        assert!(
+            has_boundary(
+                &computed.upstream,
+                "d",
+                &BoundaryHopKind::Enter("comp".to_string())
+            ),
+            "upstream from out.d must Enter composition `comp`: {:?}",
+            collect_boundaries(&computed.upstream),
+        );
+        // The intermediate computed column `first.c` is now a hop — the body derive
+        // edge `first.c → second.d` is followed.
+        assert!(
+            find_hop(&computed.upstream, |hop| hop.stage_id == "first"
+                && hop.field_name == "c"),
+            "upstream from out.d must hop through the in-body computed column first.c: {:?}",
+            collect_boundaries(&computed.upstream),
+        );
+        // The deeper derive `src.a → first.c` chains all the way to the source column.
+        assert!(
+            find_hop(&computed.upstream, |hop| hop.stage_id == "src"
+                && hop.field_name == "a"),
+            "upstream from out.d must reach the computed origin src.a: {:?}",
+            collect_boundaries(&computed.upstream),
+        );
+        // It Exits the composition on `src.a` (the resurfaced outer producer column).
+        assert!(
+            find_hop(&computed.upstream, |hop| {
+                hop.boundary == Some(BoundaryHopKind::Exit("comp".to_string()))
+                    && hop.stage_id == "src"
+                    && hop.field_name == "a"
+            }),
+            "upstream from out.d must Exit `comp` back to src.a: {:?}",
+            collect_boundaries(&computed.upstream),
+        );
+        // One composition crossed → depth 1 (the derive chain stays within the body).
+        assert_eq!(max_scope_depth(&computed.upstream), 1);
+
+        // #174: `out.c` was Enter-only before (carry-only body view); it now resurfaces
+        // to its computed origin `src.a` via the body derive `src.a → first.c` and the
+        // `first.c → second.c` access carry the output port surfaces.
+        let carried_computed =
             build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "c"))
                 .expect("out.c exists");
         assert!(
             has_boundary(
-                &computed.upstream,
+                &carried_computed.upstream,
                 "c",
                 &BoundaryHopKind::Enter("comp".to_string())
             ),
             "upstream from out.c must Enter composition `comp`: {:?}",
-            collect_boundaries(&computed.upstream),
+            collect_boundaries(&carried_computed.upstream),
+        );
+        assert!(
+            find_hop(&carried_computed.upstream, |hop| hop.stage_id == "src"
+                && hop.field_name == "a"),
+            "upstream from out.c must now resurface to the computed origin src.a: {:?}",
+            collect_boundaries(&carried_computed.upstream),
         );
     }
 
@@ -4048,6 +4109,142 @@ nodes:
             find_hop(&detail.upstream, |hop| hop.stage_id == "src"
                 && hop.field_name == "v"),
             "nested trace must resurface to the outer origin src.v: {boundaries:?}",
+        );
+    }
+
+    /// Compile a 2-level nested composition whose INNERMOST body COMPUTES a column.
+    /// Outer body (`level0`) wraps inner composition `inner` (`level1`); the inner
+    /// body's transform computes `emit w = v + 1`. Both bodies surface their inner
+    /// node via `result`. The computed column `w` therefore originates from `src.v`
+    /// two composition levels down, so a derive-aware trace must chain across BOTH
+    /// boundaries to reach it.
+    fn compiled_nested_computed_composition() -> CompiledPlan {
+        let root = scratch_dir("nested-computed");
+
+        // Inner level: a transform that COMPUTES `w` from the carried `v`.
+        std::fs::write(
+            root.join("level1.comp.yaml"),
+            r#"_compose:
+  name: level1
+  inputs:
+    src:
+      schema:
+        - { name: v, type: int }
+  outputs:
+    result: compute
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: compute
+    input: src
+    config:
+      cxl: |
+        emit w = v + 1
+"#,
+        )
+        .expect("write inner computing level fixture");
+
+        // Outer level: wraps the inner composition and surfaces its output.
+        std::fs::write(
+            root.join("level0.comp.yaml"),
+            r#"_compose:
+  name: level0
+  inputs:
+    src:
+      schema:
+        - { name: v, type: int }
+  outputs:
+    result: inner
+  config_schema: {}
+
+nodes:
+  - type: composition
+    name: inner
+    input: src
+    use: ./level1.comp.yaml
+    inputs:
+      src: src
+"#,
+        )
+        .expect("write outer wrapper level fixture");
+
+        let pipeline = r#"
+pipeline:
+  name: nested_computed_comp
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: v, type: int }
+  - type: composition
+    name: comp
+    input: src
+    use: ./level0.comp.yaml
+    inputs:
+      src: src
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("nested computed pipeline parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("nested computed pipeline compiles");
+        let _ = std::fs::remove_dir_all(root);
+        plan
+    }
+
+    /// #174 acceptance: a COMPUTED column whose origin lies two nested composition
+    /// levels down chains across BOTH boundaries. The innermost body computes
+    /// `emit w = v + 1`; tracing the outer output `out.w` upstream Enters twice
+    /// (depth 2), follows the inner derive `src.v → compute.w`, and resurfaces all
+    /// the way to the outer source `src.v`.
+    #[test]
+    fn upstream_computed_column_chains_across_nested_boundaries() {
+        let plan = compiled_nested_computed_composition();
+        let view = derive_resolved_pipeline_view(&plan);
+
+        let detail = build_field_detail(&view, None, Some(&plan), &SelectedField::new("out", "w"))
+            .expect("out.w exists");
+
+        let boundaries = collect_boundaries(&detail.upstream);
+        // Two nested compositions crossed for a computed column → depth 2.
+        assert_eq!(
+            max_scope_depth(&detail.upstream),
+            2,
+            "a computed column two levels deep must cross both boundaries: {boundaries:?}",
+        );
+        let enters = boundaries
+            .iter()
+            .filter(|(_, b)| matches!(b, Some(BoundaryHopKind::Enter(_))))
+            .count();
+        let exits = boundaries
+            .iter()
+            .filter(|(_, b)| matches!(b, Some(BoundaryHopKind::Exit(_))))
+            .count();
+        assert!(
+            enters >= 2,
+            "expected ≥2 Enter crossings tracing a deep computed column, got {enters}: {boundaries:?}"
+        );
+        assert!(
+            exits >= 2,
+            "expected ≥2 Exit crossings tracing a deep computed column, got {exits}: {boundaries:?}"
+        );
+        // The derive-aware descent reaches the true source column `src.v` — the
+        // computed column's real origin, proven absent before #174.
+        assert!(
+            find_hop(&detail.upstream, |hop| hop.stage_id == "src"
+                && hop.field_name == "v"),
+            "computed column trace must resurface to the deep origin src.v: {boundaries:?}",
         );
     }
 
