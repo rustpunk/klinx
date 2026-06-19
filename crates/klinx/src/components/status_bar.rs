@@ -140,6 +140,7 @@ pub fn StatusBar() -> Element {
                 let theme_label = match current_theme {
                     KilnTheme::Oxide => "\u{25D1} OXIDE",  // ◑
                     KilnTheme::Enamel => "\u{25D0} ENAMEL", // ◐
+                    KilnTheme::Arc => "\u{26A1} ARC",      // ⚡
                 };
                 rsx! {
                     button {

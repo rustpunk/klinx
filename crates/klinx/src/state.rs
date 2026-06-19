@@ -30,12 +30,15 @@ use crate::workspace::Workspace;
 ///
 /// Oxide is the default dark Rustpunk theme (warm charred surfaces).
 /// Enamel is a light industrial theme (porcelain-fused-to-steel data plates).
+/// Arc is the dark high-contrast "electrified" sub-aesthetic (cold blue-black
+/// ground under glowing ember/patina neons).
 /// The active theme drives CSS custom property overrides via `data-theme` on the root element.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub enum KilnTheme {
     #[default]
     Oxide,
     Enamel,
+    Arc,
 }
 
 impl KilnTheme {
@@ -44,14 +47,16 @@ impl KilnTheme {
         match self {
             Self::Oxide => "oxide",
             Self::Enamel => "enamel",
+            Self::Arc => "arc",
         }
     }
 
-    /// Toggle to the opposite theme.
+    /// Cycle to the next theme (Oxide → Enamel → Arc → Oxide).
     pub fn toggle(self) -> Self {
         match self {
             Self::Oxide => Self::Enamel,
-            Self::Enamel => Self::Oxide,
+            Self::Enamel => Self::Arc,
+            Self::Arc => Self::Oxide,
         }
     }
 
@@ -59,6 +64,7 @@ impl KilnTheme {
     pub fn from_str_or_default(s: &str) -> Self {
         match s {
             "enamel" => Self::Enamel,
+            "arc" => Self::Arc,
             _ => Self::Oxide,
         }
     }
@@ -538,6 +544,71 @@ mod tests {
                 !attr.is_empty() && attr.chars().all(|c| c.is_ascii_lowercase()),
                 "{mode:?} data attr must be a lowercase slug, got {attr:?}",
             );
+        }
+    }
+
+    /// The default theme is Oxide — the dark Rustpunk surface the app boots into.
+    #[test]
+    fn kiln_theme_defaults_to_oxide() {
+        assert_eq!(KilnTheme::default(), KilnTheme::Oxide);
+    }
+
+    /// The quick toggle cycles through all three themes and returns to the start
+    /// after one full lap, so the status-bar click and Ctrl+Shift+T reach Arc.
+    #[test]
+    fn kiln_theme_toggle_cycles_all_three() {
+        assert_eq!(KilnTheme::Oxide.toggle(), KilnTheme::Enamel);
+        assert_eq!(KilnTheme::Enamel.toggle(), KilnTheme::Arc);
+        assert_eq!(KilnTheme::Arc.toggle(), KilnTheme::Oxide);
+        for theme in [KilnTheme::Oxide, KilnTheme::Enamel, KilnTheme::Arc] {
+            assert_eq!(
+                theme.toggle().toggle().toggle(),
+                theme,
+                "three toggles is identity",
+            );
+        }
+    }
+
+    /// Each theme carries a DISTINCT, slug-safe `data-theme` attribute so the CSS
+    /// keyed off `[data-theme="…"]` can tell the three surfaces apart.
+    #[test]
+    fn kiln_theme_attrs_are_distinct_slugs() {
+        let attrs = [
+            KilnTheme::Oxide.as_data_attr(),
+            KilnTheme::Enamel.as_data_attr(),
+            KilnTheme::Arc.as_data_attr(),
+        ];
+        for attr in attrs {
+            assert!(
+                !attr.is_empty() && attr.chars().all(|c| c.is_ascii_lowercase()),
+                "data attr must be a lowercase slug, got {attr:?}",
+            );
+        }
+        let unique: std::collections::HashSet<_> = attrs.iter().collect();
+        assert_eq!(unique.len(), attrs.len(), "data attrs must be distinct");
+    }
+
+    /// Persisted theme strings round-trip through `from_str_or_default`, and
+    /// unknown values fall back to Oxide.
+    #[test]
+    fn kiln_theme_from_str_round_trips() {
+        for theme in [KilnTheme::Oxide, KilnTheme::Enamel, KilnTheme::Arc] {
+            assert_eq!(KilnTheme::from_str_or_default(theme.as_data_attr()), theme);
+        }
+        assert_eq!(
+            KilnTheme::from_str_or_default("bogus"),
+            KilnTheme::Oxide,
+            "unknown theme falls back to Oxide",
+        );
+    }
+
+    /// The theme survives a serde round-trip so it can persist in workspace.json.
+    #[test]
+    fn kiln_theme_serde_round_trips() {
+        for theme in [KilnTheme::Oxide, KilnTheme::Enamel, KilnTheme::Arc] {
+            let json = serde_json::to_string(&theme).unwrap();
+            let restored: KilnTheme = serde_json::from_str(&json).unwrap();
+            assert_eq!(theme, restored);
         }
     }
 }

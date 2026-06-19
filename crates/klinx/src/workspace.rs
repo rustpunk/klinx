@@ -143,7 +143,7 @@ pub struct WorkspaceState {
     /// Active channel and recent channel list for session restoration.
     #[serde(default)]
     pub channels: Option<ChannelPersistence>,
-    /// Visual theme: "oxide" or "enamel". Defaults to Oxide if missing.
+    /// Visual theme: "oxide", "enamel", or "arc". Defaults to Oxide if missing.
     #[serde(default)]
     pub theme: Option<String>,
 }
