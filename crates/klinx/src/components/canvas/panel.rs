@@ -765,6 +765,42 @@ fn is_drag_beyond_slop(dx: f32, dy: f32) -> bool {
     dx * dx + dy * dy > CLICK_DRAG_SLOP_PX * CLICK_DRAG_SLOP_PX
 }
 
+/// The single transformed canvas viewport (`klinx-canvas-viewport`).
+///
+/// Carved out of [`CanvasPanel`] purely for re-render isolation: it is the ONLY
+/// place that interpolates the live `pan_x`/`pan_y` signals, so a PAN tick
+/// re-renders just this tiny element instead of the whole panel body.
+/// `CanvasPanel` builds the connectors, node cards, and lineage overlay once and
+/// hands them in as `children` — that VNode subtree is owned by the parent and
+/// stays untouched while only this component re-renders during a sustained pan.
+///
+/// `zoom` is interpolated here too but is NOT isolated: `CanvasPanel` still reads
+/// it (`zoom_for_auto`) to drive Auto-mode node density, so a zoom tick re-renders
+/// the parent body anyway. That asymmetry is intentional — pan is the sustained
+/// drag that needed isolating; zoom is a discrete wheel tick. This child's zoom
+/// re-render is subsumed by the parent's.
+///
+/// The pan/zoom props are [`ReadSignal`] so the drag handlers' `.set(..)` writes
+/// (which live on `CanvasPanel`) flow in reactively and re-render only here. The
+/// world-coordinate `children` (cables + cards + field overlay) sit inside the
+/// single transform, so the lineage overlay tracks the pan with the content
+/// rather than independently.
+#[component]
+fn PanViewport(
+    pan_x: ReadSignal<f32>,
+    pan_y: ReadSignal<f32>,
+    zoom: ReadSignal<f32>,
+    children: Element,
+) -> Element {
+    rsx! {
+        div {
+            class: "klinx-canvas-viewport",
+            style: "transform: translate({pan_x}px, {pan_y}px) scale({zoom});",
+            {children}
+        }
+    }
+}
+
 /// The infinite-canvas panel rendering the pipeline node graph.
 ///
 /// Pan: left-click-drag anywhere on the canvas background.
@@ -1809,9 +1845,17 @@ pub fn CanvasPanel() -> Element {
             },
 
             // ── Transformed viewport ──────────────────────────────────────
-            div {
-                class: "klinx-canvas-viewport",
-                style: "transform: translate({pan_x}px, {pan_y}px) scale({zoom});",
+            // The transform lives in `PanViewport` so a PAN tick re-renders only
+            // that child, not this whole panel body (which would otherwise re-run
+            // layout + lineage closure + connector routing every tick — worse with
+            // a field selected). A zoom tick still re-renders the body (Auto-mode
+            // density reads `zoom`), by design. The connectors/cards/overlay are
+            // built here and passed as `children`, in world coordinates inside
+            // the single transform.
+            PanViewport {
+                pan_x,
+                pan_y,
+                zoom,
 
                 // Default SVG connector overlay. Its channels are populated
                 // from the currently visible node-level connections and drawn
