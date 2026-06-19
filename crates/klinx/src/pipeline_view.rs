@@ -3565,6 +3565,11 @@ fn cxl_subtitle(cxl: &str) -> String {
 /// pass — the same placement `derive_pipeline_view` uses. Edges come from
 /// `body.graph.edge_references()` so route, merge, and combine branches all
 /// render as the real DAG instead of a synthetic chain.
+///
+/// Field cables come from [`body_field_edges`], which is derive-aware (#174): a
+/// body Transform's computed column draws a `Derive` cable to the producer column
+/// it is computed from, alongside the same-name passthrough carries — so the
+/// drill-in canvas shows in-body derivation, not carries alone.
 pub fn derive_body_view(body: &clinker_plan::plan::composition_body::BoundBody) -> PipelineView {
     // The public drill-in canvas needs laid-out coordinates, so run the barycenter
     // pass. The signature and behavior are unchanged; the implementation now delegates
@@ -3811,6 +3816,57 @@ fn body_row_fields(row: &cxl::typecheck::Row) -> Vec<FieldRow> {
         .collect()
 }
 
+/// The compiled CXL [`Program`](cxl::ast::Program) a body node carries, or `None`
+/// for a node with no resolved CXL (#174).
+///
+/// Resolves the named body node through [`BoundBody::name_to_idx`] and reads its
+/// in-process-compiled [`PlanTransformPayload`](clinker_plan::plan::execution::PlanTransformPayload)'s
+/// `typed.program` — the exact `cxl::ast::Program` the top-level resolved path's
+/// emit/anchor machinery already consumes, so the body's derive lineage reuses it
+/// verbatim with no `.comp.yaml` re-parse.
+///
+/// Only [`PlanNode::Transform`](clinker_plan::plan::execution::PlanNode::Transform)
+/// carries a CXL `TypedProgram` on the plan node. `Aggregation` carries a
+/// `CompiledAggregate` (not a `TypedProgram`) and `Combine` keeps its typed
+/// `where`/`body` programs in `CompileArtifacts`, not on the node — so both, and
+/// every CXL-less node (Source/Route/Output/Merge/Cull/Reshape/Envelope/nested
+/// Composition), return `None`. The caller's same-name carry fallback covers every
+/// `None`, which is also why a nested `PlanNode::Composition` keeps drawing the
+/// same-name carries its body-row output columns surface (mirroring how the
+/// top-level resolved path skips a Composition's own emit analysis).
+///
+/// The outer `resolved` field is `#[serde(skip)]` and `Option`; an in-process
+/// compile always populates it, but a deserialized plan would not — `None` then
+/// degrades to the carry fallback rather than panicking.
+fn body_node_program<'a>(
+    body: &'a clinker_plan::plan::composition_body::BoundBody,
+    node_name: &str,
+) -> Option<&'a cxl::ast::Program> {
+    use clinker_plan::plan::execution::PlanNode;
+
+    let &idx = body.name_to_idx.get(node_name)?;
+    match body.graph.node_weight(idx)? {
+        PlanNode::Transform {
+            resolved: Some(payload),
+            ..
+        } => Some(&payload.typed.program),
+        _ => None,
+    }
+}
+
+/// Body-internal field lineage edges in the body's slot space (#174).
+///
+/// Mirrors the top-level resolved path ([`resolved_pipeline_field_lineage`]) but
+/// against a [`BoundBody`]: a body node WITH a resolved CXL program runs the same
+/// `emit_supports` / `emit_copy_targets` / `emit_each_fanned_targets` analysis and
+/// emits `Derive`/`carry` edges so a COMPUTED body column (e.g. `emit c = a + 1`)
+/// draws a derive cable to the producer column it is computed from — the cable the
+/// Inspector's in-body BFS follows to reach the true in-body origin of a computed
+/// column, and the drill-in canvas renders. A body node WITHOUT a resolved program
+/// (the helper returns `None` — every CXL-less node, including a nested
+/// `Composition`) keeps the original same-name passthrough carry fallback, which is
+/// exactly correct for a nested Composition whose output columns surface from its
+/// body rows.
 fn body_field_edges(
     body: &clinker_plan::plan::composition_body::BoundBody,
     stages: &[StageView],
@@ -3822,8 +3878,7 @@ fn body_field_edges(
         .map(|(idx, stage)| (stage.id.as_str(), idx))
         .collect();
 
-    let mut edges = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut acc = EdgeAccumulator::new();
     for (to, stage) in stages.iter().enumerate() {
         let ordered_predecessors: Vec<usize> = body
             .node_input_refs
@@ -3839,36 +3894,166 @@ fn body_field_edges(
             .filter(|preds: &Vec<usize>| !preds.is_empty())
             .unwrap_or_else(|| graph_predecessors.get(to).cloned().unwrap_or_default());
 
-        for from in ordered_predecessors {
+        if stage.fields.is_empty() {
+            continue;
+        }
+
+        // Ordered, de-duplicated union of predecessor output column names, with
+        // every producer slot recorded per column (#67 fan-in), mirroring the
+        // top-level `compute_field_lineage` producer fold but in slot space.
+        let mut input_cols: Vec<String> = Vec::new();
+        let mut producers_of: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for &from in &ordered_predecessors {
             let Some(source) = stages.get(from) else {
                 continue;
             };
-            if source.fields.is_empty() || stage.fields.is_empty() {
-                continue;
+            for field in &source.fields {
+                let producers = producers_of.entry(field.name.clone()).or_default();
+                if producers.is_empty() {
+                    input_cols.push(field.name.clone());
+                }
+                if !producers.contains(&from) {
+                    producers.push(from);
+                }
             }
-            let source_fields: std::collections::HashSet<&str> = source
-                .fields
-                .iter()
-                .map(|field| field.name.as_str())
-                .collect();
-            for field in &stage.fields {
-                if source_fields.contains(field.name.as_str())
-                    && seen.insert((from, field.name.clone(), to))
-                {
-                    // A best-effort same-name carry: an honest identity passthrough
-                    // → Exact (#148).
-                    edges.push(FieldEdge::carry(
-                        from,
-                        field.name.clone(),
-                        to,
-                        field.name.clone(),
-                        FieldEdgeKind::Passthrough,
-                    ));
+        }
+        if producers_of.is_empty() {
+            continue;
+        }
+
+        // The consumer stage's real output columns; an edge is only emitted into one
+        // of these (a support member naming a non-output column draws nothing).
+        let output_names: std::collections::HashSet<&str> =
+            stage.fields.iter().map(|f| f.name.as_str()).collect();
+
+        match body_node_program(body, &stage.id) {
+            Some(program) => {
+                // A body Combine would need alias-qualified anchor resolution, but a
+                // Combine carries no resolved program here (its typed body lives in
+                // `CompileArtifacts`), so `body_node_program` never returns `Some`
+                // for one — the alias map is always empty on this branch. Kept for
+                // symmetry with the top-level path's `resolve_support_anchors` call.
+                let input_aliases: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+
+                let supports = field_lineage::emit_supports(program);
+                let emitted: std::collections::HashSet<&str> =
+                    supports.iter().map(|(name, _)| name.as_str()).collect();
+                let copies = field_lineage::emit_copy_targets(program, &input_cols);
+                // A column read by a COMPUTED or renamed emit (a pure copy excluded):
+                // a same-name carry of it is an `Access` carry rather than a pure
+                // `Passthrough` (#72). Keyed by bare column name.
+                let used_cols: std::collections::HashSet<&str> = supports
+                    .iter()
+                    .filter(|(target, _)| !copies.contains(target.as_str()))
+                    .flat_map(|(_, support)| support.iter().map(|m| bare_column(m)))
+                    .collect();
+                let carry_kind = |col: &str| {
+                    if used_cols.contains(col) {
+                        FieldEdgeKind::Access
+                    } else {
+                        FieldEdgeKind::Passthrough
+                    }
+                };
+
+                // Targets fanned out by an `emit each` lose per-element provenance →
+                // Approximate (#148). Let the constructor tag precision; no new logic.
+                let fanned = field_lineage::emit_each_fanned_targets(program);
+                let mut emitted_so_far: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                for (target, support) in &supports {
+                    if !output_names.contains(target.as_str()) {
+                        emitted_so_far.insert(target.as_str());
+                        continue;
+                    }
+                    // An identity-copy emit carries its column unchanged (carry); a
+                    // computed/renamed emit derives its target.
+                    let carried = copies.contains(target.as_str());
+                    let target_fanned = fanned.contains(target.as_str());
+                    for member in support {
+                        let col = bare_column(member);
+                        let mk = |p: usize, from_field: String, consumer: usize| {
+                            if carried {
+                                FieldEdge::carry(
+                                    p,
+                                    from_field,
+                                    consumer,
+                                    target.clone(),
+                                    carry_kind(col),
+                                )
+                            } else {
+                                FieldEdge::derive(
+                                    p,
+                                    from_field,
+                                    consumer,
+                                    target.clone(),
+                                    target_fanned,
+                                )
+                            }
+                        };
+                        let anchors =
+                            resolve_support_anchors(member, &producers_of, &input_aliases);
+                        if !anchors.is_empty() {
+                            for (p, from_field) in anchors {
+                                acc.push_direct(mk(p, from_field, to));
+                            }
+                        } else if emitted_so_far.contains(col) && output_names.contains(col) {
+                            // An intra-node chained emit (`emit d = c + 1` after the
+                            // node emitted `c`) derives from the earlier emit on the
+                            // same card.
+                            acc.push_direct(mk(to, col.to_string(), to));
+                        }
+                    }
+                    emitted_so_far.insert(target.as_str());
+                }
+
+                // Identity carries: each input column surfaced unchanged on the
+                // consumer (present in its output, not shadowed by an emit) carries
+                // from every producer of it (#67 fan-in).
+                for col in &input_cols {
+                    if output_names.contains(col.as_str())
+                        && !emitted.contains(col.as_str())
+                        && let Some(producers) = producers_of.get(col)
+                    {
+                        let kind = carry_kind(col);
+                        for &p in producers {
+                            acc.push_direct(FieldEdge::carry(
+                                p,
+                                col.clone(),
+                                to,
+                                col.clone(),
+                                kind,
+                            ));
+                        }
+                    }
+                }
+            }
+            None => {
+                // No resolved CXL program (Source/Route/Output/Merge/Cull/Reshape/
+                // Envelope/Aggregation/Combine/nested Composition): keep the original
+                // best-effort same-name passthrough carry. An honest identity carry
+                // → Exact (#148). A nested Composition's output columns come from its
+                // body rows, so these same-name carries draw exactly as before (#174).
+                for col in &input_cols {
+                    if output_names.contains(col.as_str())
+                        && let Some(producers) = producers_of.get(col)
+                    {
+                        for &p in producers {
+                            acc.push_direct(FieldEdge::carry(
+                                p,
+                                col.clone(),
+                                to,
+                                col.clone(),
+                                FieldEdgeKind::Passthrough,
+                            ));
+                        }
+                    }
                 }
             }
         }
     }
-    edges
+    acc.edges
 }
 
 #[cfg(test)]
@@ -4313,6 +4498,98 @@ nodes:
                 _ => None,
             })
             .expect("compiled composition body id");
+        plan.body_of(body_id).expect("compiled body exists").clone()
+    }
+
+    /// Compile a composition whose body contains a Route + Merge (no computing
+    /// Transform) so the body has CXL-less nodes (`split` Route, `joined` Merge)
+    /// whose field cables exercise the #174 no-program carry fallback. The body
+    /// `src(a:int,b:string) → split (route on a>0) → joined (merge of both branches)`,
+    /// output port `result: joined`. Returns the extracted [`BoundBody`].
+    fn compiled_routing_body_fixture() -> clinker_plan::plan::composition_body::BoundBody {
+        let unique = format!(
+            "klinx-routing-body-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temporary composition workspace");
+        std::fs::write(
+            root.join("routing.comp.yaml"),
+            r#"_compose:
+  name: routing
+  inputs:
+    src:
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+  outputs:
+    result: joined
+  config_schema: {}
+
+nodes:
+  - type: route
+    name: split
+    input: src
+    config:
+      conditions:
+        hi: "a > 0"
+      default: lo
+  - type: merge
+    name: joined
+    inputs: [split.hi, split.lo]
+"#,
+        )
+        .expect("write routing composition fixture");
+
+        let pipeline = r#"
+pipeline:
+  name: routing_drill
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: a, type: int }
+        - { name: b, type: string }
+  - type: composition
+    name: comp
+    input: src
+    use: ./routing.comp.yaml
+    inputs:
+      src: src
+  - type: output
+    name: out
+    input: comp
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+"#;
+        let config = parse_config(pipeline).expect("routing pipeline parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("routing pipeline compiles");
+        let _ = std::fs::remove_dir_all(root);
+        let body_id = plan
+            .dag()
+            .graph
+            .node_weights()
+            .find_map(|node| match node {
+                clinker_plan::plan::execution::PlanNode::Composition { name, body, .. }
+                    if name == "comp" =>
+                {
+                    Some(*body)
+                }
+                _ => None,
+            })
+            .expect("compiled routing composition body id");
         plan.body_of(body_id).expect("compiled body exists").clone()
     }
 
@@ -4956,26 +5233,98 @@ nodes:
             "body view should render the full engine row, including engine/system fields"
         );
 
-        for field in ["a", "b", "c"] {
+        // Same-name carries `first → second` survive #174's derive awareness. `a`
+        // and `b` ride through `second` unread → pure `Passthrough`. `c` ALSO rides
+        // through unchanged but is READ by `second`'s `emit d = c + 1`, so its carry
+        // is the more precise `Access` kind (#72) — exactly the classification the
+        // top-level resolved path computes for a carried-and-accessed column. (The
+        // carry-only code could not distinguish these and drew every same-name carry
+        // as `Passthrough`.)
+        for (field, kind) in [
+            ("a", FieldEdgeKind::Passthrough),
+            ("b", FieldEdgeKind::Passthrough),
+            ("c", FieldEdgeKind::Access),
+        ] {
             assert!(
                 view.field_edges.contains(&FieldEdge {
                     from_node: first_idx,
                     from_field: field.to_string(),
                     to_node: second_idx,
                     to_field: field.to_string(),
-                    kind: FieldEdgeKind::Passthrough,
+                    kind,
                     ..Default::default()
                 }),
-                "expected body carry edge for {field}, got {:?}",
+                "expected body {kind:?} carry edge for {field}, got {:?}",
                 view.field_edges
             );
         }
+        // #174: the body view is now derive-aware. `second: emit d = c + 1` derives
+        // `d` from `first.c`, and `first: emit c = a + 1` derives `c` from the seeded
+        // input column `a` — so both computed columns draw a `Derive` cable to their
+        // producer column. Precision is excluded from `FieldEdge`'s PartialEq, so the
+        // `..Default::default()` pattern matches the edge identity regardless of tier.
+        let src_idx = stage_idx(&view, "src");
         assert!(
-            !view
-                .field_edges
+            view.field_edges.contains(&FieldEdge {
+                from_node: first_idx,
+                from_field: "c".to_string(),
+                to_node: second_idx,
+                to_field: "d".to_string(),
+                kind: FieldEdgeKind::Derive,
+                ..Default::default()
+            }),
+            "body view must derive second.d from first.c: {:?}",
+            view.field_edges
+        );
+        assert!(
+            view.field_edges.contains(&FieldEdge {
+                from_node: src_idx,
+                from_field: "a".to_string(),
+                to_node: first_idx,
+                to_field: "c".to_string(),
+                kind: FieldEdgeKind::Derive,
+                ..Default::default()
+            }),
+            "body view must derive first.c from src.a: {:?}",
+            view.field_edges
+        );
+    }
+
+    /// #174: a body node with NO resolved CXL program (here a Route — and an Output,
+    /// which the engine seeds as the body's terminal node) yields only same-name
+    /// passthrough carries, never a synthetic derive edge. This pins the no-program
+    /// fallback path that preserves nested-composition correctness.
+    #[test]
+    fn body_view_no_program_node_yields_only_passthrough_carries() {
+        let body = compiled_routing_body_fixture();
+        let view = derive_body_view(&body);
+
+        // Every edge incident to a no-program node (Route/Output/Merge) is a pure
+        // passthrough carry — the derive-aware branch only fires for Transforms.
+        let route_idx = stage_idx(&view, "split");
+        assert!(
+            view.field_edges
                 .iter()
-                .any(|edge| edge.to_node == second_idx && edge.to_field == "d"),
-            "body view must not invent derive edges without engine support data: {:?}",
+                .filter(|e| e.from_node == route_idx || e.to_node == route_idx)
+                .all(|e| e.kind == FieldEdgeKind::Passthrough),
+            "a Route node (no CXL program) must carry only same-name passthroughs: {:?}",
+            view.field_edges
+        );
+        // And it materialized at least one carry — the fallback is live, not vacuous.
+        assert!(
+            view.field_edges.iter().any(|e| {
+                (e.from_node == route_idx || e.to_node == route_idx)
+                    && e.kind == FieldEdgeKind::Passthrough
+            }),
+            "the no-program fallback must still draw same-name carries: {:?}",
+            view.field_edges
+        );
+        // No edge anywhere in this CXL-light body is a Derive (no Transform computes).
+        assert!(
+            view.field_edges
+                .iter()
+                .all(|e| e.kind != FieldEdgeKind::Derive),
+            "a body with no computing Transform draws no derive edges: {:?}",
             view.field_edges
         );
     }
