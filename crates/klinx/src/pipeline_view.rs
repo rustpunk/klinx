@@ -3987,10 +3987,13 @@ fn aggregate_residual_support(
 /// Resolve one [`BindingArg`] to the input columns it reads (#180 GAP 1).
 ///
 /// **SHARP EDGE:** `BindingArg::Field(idx)` indexes the aggregate's ENGINE input
-/// schema (the upstream row order `extract_aggregates` was fed), NOT klinx's deduped
-/// `input_cols` — so the name is resolved from `agg_input_schema` (the aggregate's
-/// predecessor body row, in declaration order). An out-of-range index resolves to
-/// nothing rather than panicking.
+/// schema (`typed.field_types.keys()`, the exact list `extract_aggregates` was fed),
+/// NOT klinx's deduped `input_cols`. The caller passes that schema as
+/// `agg_input_schema` straight from the predecessor's `stored_output_schema()` (see
+/// [`aggregate_engine_input_schema`]), so every valid `idx` is in range by
+/// construction. The `.get(idx)` guard against `None` is a belt-and-braces
+/// degrade-to-no-edge: it would only fire if a future engine change let an emit bind
+/// a `Field(idx)` outside its own input schema, which today is impossible.
 fn binding_arg_support(
     arg: &cxl::plan::BindingArg,
     agg_input_schema: &[String],
@@ -4039,10 +4042,42 @@ fn aggregate_emit_supports(
         .collect()
 }
 
+/// The body Aggregate's ENGINE input schema — the exact column list, in the exact
+/// order, that `BindingArg::Field(idx)` was assigned against (#180 GAP 1).
+///
+/// **Why the engine schema, not `body_rows[pred]`:** `extract_aggregates` indexes
+/// `BindingArg::Field(idx)` into `typed.field_types.keys()`, whose order is the
+/// aggregate's bound INPUT row = its sole predecessor's output `Schema` (declared
+/// columns followed by any engine-stamped/inferred-trailing columns). Reconstructing
+/// it from the predecessor's `body_rows` entry would risk an index mismatch if the
+/// two ever diverged. Sourcing directly from the predecessor's
+/// `stored_output_schema().columns()` — the same `Arc<Schema>` the engine derived
+/// `extract_aggregates`'s `input_schema` from — makes `Field(idx)` resolution exact
+/// by construction: every valid `idx` is in range. The aggregate has exactly one
+/// incoming edge in the body graph, so the predecessor is unambiguous.
+///
+/// Returns an empty schema when the aggregate has no incoming neighbor or the
+/// predecessor carries no stored schema (a Route at the body root) — `Field(idx)`
+/// then resolves to nothing, but such a node feeds an aggregate no resolvable column
+/// anyway.
+fn aggregate_engine_input_schema(
+    body: &clinker_plan::plan::composition_body::BoundBody,
+    agg_idx: petgraph::graph::NodeIndex,
+) -> Vec<String> {
+    use petgraph::Direction;
+
+    body.graph
+        .neighbors_directed(agg_idx, Direction::Incoming)
+        .next()
+        .and_then(|pred| body.graph.node_weight(pred))
+        .and_then(|pred| pred.stored_output_schema())
+        .map(|schema| schema.columns().iter().map(|c| c.to_string()).collect())
+        .unwrap_or_default()
+}
+
 /// What drives a body node's emit/anchor analysis (#174, #180 GAP 1).
 ///
-/// Resolves the named body node through [`BoundBody::name_to_idx`] and reads the
-/// in-process-compiled artifact off the plan node:
+/// Reads the in-process-compiled artifact off the already-resolved body plan node:
 ///
 /// - [`PlanNode::Transform`](clinker_plan::plan::execution::PlanNode::Transform)
 ///   with a resolved payload → [`StageProgram::Cxl`] over its
@@ -4053,8 +4088,9 @@ fn aggregate_emit_supports(
 ///   with a populated `compiled` → [`StageProgram::Aggregate`] over
 ///   [`aggregate_emit_supports`], so a computed aggregate column (`emit total =
 ///   sum(x)`) draws a `Derive` cable to the input column it folds (#180 GAP 1).
-///   `agg_input_schema` is the aggregate's predecessor body row, supplying the
-///   `BindingArg::Field(idx)` → column-name resolution.
+///   `agg_engine_input_schema` is the aggregate's predecessor engine schema (from
+///   [`aggregate_engine_input_schema`]), supplying the exact `BindingArg::Field(idx)`
+///   → column-name resolution. Computed lazily by the caller — only this arm reads it.
 /// - Every other node — and a `Transform` whose `resolved` is `None` or an
 ///   `Aggregation` whose `compiled` is empty (a deserialized plan never populates
 ///   the `#[serde(skip)]` fields) — → [`StageProgram::None`], the same-name carry
@@ -4062,22 +4098,21 @@ fn aggregate_emit_supports(
 ///   engine-blocked, clinker#621), as does a nested `Composition` (its output
 ///   columns surface from its body rows).
 fn body_node_stage_program<'a>(
-    body: &'a clinker_plan::plan::composition_body::BoundBody,
-    node_name: &str,
-    agg_input_schema: &[String],
+    node: &'a clinker_plan::plan::execution::PlanNode,
+    agg_engine_input_schema: impl FnOnce() -> Vec<String>,
 ) -> StageProgram<'a> {
     use clinker_plan::plan::execution::PlanNode;
 
-    let Some(&idx) = body.name_to_idx.get(node_name) else {
-        return StageProgram::None;
-    };
-    match body.graph.node_weight(idx) {
-        Some(PlanNode::Transform {
+    match node {
+        PlanNode::Transform {
             resolved: Some(payload),
             ..
-        }) => StageProgram::Cxl(&payload.typed.program),
-        Some(PlanNode::Aggregation { compiled, .. }) if !compiled.emits.is_empty() => {
-            StageProgram::Aggregate(aggregate_emit_supports(compiled, agg_input_schema))
+        } => StageProgram::Cxl(&payload.typed.program),
+        PlanNode::Aggregation { compiled, .. } if !compiled.emits.is_empty() => {
+            StageProgram::Aggregate(aggregate_emit_supports(
+                compiled,
+                &agg_engine_input_schema(),
+            ))
         }
         _ => StageProgram::None,
     }
@@ -4098,7 +4133,11 @@ fn body_node_stage_program<'a>(
 ///   aggregate column (`emit total = sum(x)`) derives to the input column it folds,
 ///   and its `group_by` columns draw `GroupBy` influence + role edges (#180 GAP 1/2).
 /// - A body **Route**/**Cull** emits its `Conditional`/`Filter` INDIRECT influence
-///   edges via [`body_node_influence_predicates`] (#180 GAP 2).
+///   edges via [`body_node_influence_predicates`] (#180 GAP 2). The body resolves
+///   predicate columns WITHOUT port-alias disambiguation (it passes an empty alias
+///   map), consistent with the body's empty-alias model for derive edges — a
+///   precision divergence from the top-level path, acceptable and pre-existing for the
+///   body (a body Merge/Combine join key is not alias-resolved here).
 /// - Multi-producer fan-in carries are graded conservatively, so a body Merge
 ///   join-key fan-in grades `Approximate` like the top level (#180 GAP 3).
 ///
@@ -4106,7 +4145,10 @@ fn body_node_stage_program<'a>(
 /// Output/Cull/Reshape/Envelope/nested `Composition`, and `Combine`) keeps the
 /// same-name passthrough carry fallback. **Combine is NOT at parity** (clinker#621):
 /// its computed columns and its `JoinKey` influence are not reachable from a
-/// `BoundBody`, so they degrade to the carry fallback.
+/// `BoundBody`, so they degrade to the carry fallback. A body **Aggregate** that folds
+/// an open-tail pass-through column the input port did not declare is a non-issue: CXL
+/// rejects reading an undeclared column at compile time (E200), so no such aggregate
+/// exists to trace (see `body_aggregate_referencing_open_tail_column_does_not_compile`).
 fn body_field_edges(
     body: &clinker_plan::plan::composition_body::BoundBody,
     stages: &[StageView],
@@ -4175,34 +4217,42 @@ fn body_field_edges(
         let output_names: std::collections::HashSet<String> =
             stage.fields.iter().map(|f| f.name.clone()).collect();
 
-        // An aggregate's `BindingArg::Field(idx)` indexes its ENGINE input schema —
-        // its single upstream's row, in declaration order — NOT the deduped
-        // `input_cols`. The aggregate's predecessor stage's `fields` is exactly that
-        // engine row (it was built from `body_rows[pred]`), so its column names in
-        // order are the idx→name table the adapter resolves against.
-        let agg_input_schema: Vec<String> = ordered_predecessors
-            .first()
-            .and_then(|&p| stages.get(p))
-            .map(|source| source.fields.iter().map(|f| f.name.clone()).collect())
-            .unwrap_or_default();
+        // Resolve the body plan node ONCE; the stage-program, group-key, and influence
+        // helpers all read from it (rather than each re-resolving via `name_to_idx` +
+        // `node_weight`). A stage whose id is not in the body graph — only a malformed
+        // body, since stages are built FROM `body.topo_order` — keeps the no-program
+        // same-name carry fallback and emits no group-by / influence edges.
+        let resolved = body
+            .name_to_idx
+            .get(&stage.id)
+            .and_then(|&idx| body.graph.node_weight(idx).map(|node| (idx, node)));
 
         // Aggregate group keys define the grouped-record grain — a `GroupBy`
         // influence edge (#147) — and are skipped by the emit/carry loops. The body
         // path reads them off the plan node's `config.group_by` (#180 GAP 2), the
         // mirror of the top-level path's `config.group_by`.
-        let group_keys = body_node_group_keys(body, &stage.id);
+        let group_keys = resolved
+            .map(|(_, plan_node)| body_node_group_keys(plan_node))
+            .unwrap_or_default();
 
         // GAP 1 + GAP 3: a body Transform/Aggregate runs the shared analyzer (the
-        // Aggregate via precomputed supports); fan-in grading is now Conservative,
+        // Aggregate via precomputed supports keyed on its ENGINE input schema, built
+        // lazily — only the Aggregate arm needs it); fan-in grading is now Conservative,
         // so a body Merge fanning a column in from two distinct producers grades that
         // carry Approximate, matching the top-level paths. A CXL-less / unresolved
         // node (Route/Merge/Output/Cull/nested Composition, and Combine — clinker#621)
         // falls to the same-name carry fallback.
+        let stage_program = match resolved {
+            Some((node_idx, plan_node)) => {
+                body_node_stage_program(plan_node, || aggregate_engine_input_schema(body, node_idx))
+            }
+            None => StageProgram::None,
+        };
         field_edges_for_stage(
             &mut acc,
             &mut role_edges,
             to,
-            body_node_stage_program(body, &stage.id, &agg_input_schema),
+            stage_program,
             &input_cols,
             &producers_of,
             &OutputGate::Resolved(&output_names),
@@ -4214,17 +4264,21 @@ fn body_field_edges(
         // `Conditional` conditions and a body Cull's `Filter` removal predicates,
         // added AFTER the node's DIRECT carries so they land on the real surviving
         // output rows. A Merge is a row UNION and contributes none; Combine's
-        // `JoinKey` is engine-blocked (clinker#621).
-        for (predicate, kind) in body_node_influence_predicates(body, &stage.id) {
-            emit_predicate_influence_edges(
-                &mut acc,
-                to,
-                &predicate,
-                kind,
-                &stage.fields,
-                &producers_of,
-                &no_aliases,
-            );
+        // `JoinKey` is engine-blocked (clinker#621). The body resolves predicate
+        // columns WITHOUT port-alias disambiguation (`no_aliases`) — consistent with
+        // the body's empty-alias model for derive edges; see `body_field_edges` doc.
+        if let Some((_, plan_node)) = resolved {
+            for (predicate, kind) in body_node_influence_predicates(plan_node, &body.route_bodies) {
+                emit_predicate_influence_edges(
+                    &mut acc,
+                    to,
+                    &predicate,
+                    kind,
+                    &stage.fields,
+                    &producers_of,
+                    &no_aliases,
+                );
+            }
         }
     }
     (acc.edges, role_edges)
@@ -4232,29 +4286,24 @@ fn body_field_edges(
 
 /// A body Aggregate's group-by columns in the body's own scope (#180 GAP 2).
 ///
-/// Read off the plan node's `config.group_by` — the mirror of the top-level
-/// resolved path's `PipelineNode::Aggregate { config }.group_by`. Every other body
-/// node (and a `Transform`) groups nothing, so this returns an empty set.
+/// Read off the already-resolved plan node's `config.group_by` — the mirror of the
+/// top-level resolved path's `PipelineNode::Aggregate { config }.group_by`. Every
+/// other body node (and a `Transform`) groups nothing, so this returns an empty set.
 fn body_node_group_keys(
-    body: &clinker_plan::plan::composition_body::BoundBody,
-    node_name: &str,
+    node: &clinker_plan::plan::execution::PlanNode,
 ) -> std::collections::HashSet<String> {
     use clinker_plan::plan::execution::PlanNode;
 
-    body.name_to_idx
-        .get(node_name)
-        .and_then(|&idx| body.graph.node_weight(idx))
-        .and_then(|node| match node {
-            PlanNode::Aggregation { config, .. } => Some(config.group_by.iter().cloned().collect()),
-            _ => None,
-        })
-        .unwrap_or_default()
+    match node {
+        PlanNode::Aggregation { config, .. } => config.group_by.iter().cloned().collect(),
+        _ => std::collections::HashSet::new(),
+    }
 }
 
 /// The control-flow predicates a BODY node imposes, each paired with the INDIRECT
 /// edge kind it produces (#180 GAP 2) — the body-scope analogue of
-/// [`node_influence_predicates`], reading the engine `PlanNode`/`BoundBody` instead
-/// of the top-level config.
+/// [`node_influence_predicates`], reading the already-resolved engine `PlanNode`
+/// (plus the body's `route_bodies` table) instead of the top-level config.
 ///
 /// - **Route** — body Route conditions live in
 ///   [`BoundBody::route_bodies`]`[name].conditions` (the top-level Route's
@@ -4269,25 +4318,27 @@ fn body_node_group_keys(
 /// Returns owned predicate strings (the `RouteBody` conditions are borrowed from a
 /// map the caller does not keep alive across the influence emission).
 fn body_node_influence_predicates(
-    body: &clinker_plan::plan::composition_body::BoundBody,
-    node_name: &str,
+    node: &clinker_plan::plan::execution::PlanNode,
+    route_bodies: &std::collections::HashMap<
+        String,
+        clinker_plan::config::pipeline_node::RouteBody,
+    >,
 ) -> Vec<(String, FieldEdgeKind)> {
     use clinker_plan::plan::execution::PlanNode;
 
-    // A Route node's conditions are keyed by the body node name in `route_bodies`.
-    if let Some(route) = body.route_bodies.get(node_name) {
+    // A body Route's conditions are keyed by node name in `route_bodies` (the plan
+    // node itself carries only branch wiring, not the compiled conditions).
+    if let PlanNode::Route { name, .. } = node
+        && let Some(route) = route_bodies.get(name)
+    {
         return route
             .conditions
             .values()
             .map(|predicate| (predicate.as_ref().to_string(), FieldEdgeKind::Conditional))
             .collect();
     }
-    match body
-        .name_to_idx
-        .get(node_name)
-        .and_then(|&idx| body.graph.node_weight(idx))
-    {
-        Some(PlanNode::Cull { config, .. }) => config
+    match node {
+        PlanNode::Cull { config, .. } => config
             .rules
             .iter()
             .map(|rule| {
@@ -4844,10 +4895,14 @@ nodes:
     }
 
     /// Compile a composition `body.comp.yaml` (given verbatim) wired into a minimal
-    /// `src → comp → out` pipeline, extract the bound body of `comp`, and return it.
-    /// `src_schema` is the YAML schema block shared by the composition input port and
-    /// the pipeline Source. Shared by the #180 PR2 GAP fixtures.
-    fn compile_body_fixture(label: &str, src_schema: &str, comp_yaml: &str) -> BoundBody {
+    /// `src → comp → out` pipeline, returning the compile `Result` so callers can
+    /// assert SUCCESS (extract the body) or FAILURE (a characterization test). The
+    /// temporary workspace is removed before returning.
+    fn try_compile_body_fixture(
+        label: &str,
+        src_schema: &str,
+        comp_yaml: &str,
+    ) -> Result<clinker_plan::plan::CompiledPlan, Vec<clinker_core_types::Diagnostic>> {
         let unique = format!(
             "klinx-{label}-{}-{}",
             std::process::id(),
@@ -4889,10 +4944,16 @@ nodes:
 "#
         );
         let config = parse_config(&pipeline).expect("pipeline fixture parses");
-        let plan = config
-            .compile(&CompileContext::new(root.clone()))
-            .expect("pipeline fixture compiles");
+        let result = config.compile(&CompileContext::new(root.clone()));
         let _ = std::fs::remove_dir_all(root);
+        result
+    }
+
+    /// Compile a body fixture expecting SUCCESS, extract the bound body of `comp`, and
+    /// return it. The common path for #180 PR2 GAP fixtures.
+    fn compile_body_fixture(label: &str, src_schema: &str, comp_yaml: &str) -> BoundBody {
+        let plan = try_compile_body_fixture(label, src_schema, comp_yaml)
+            .expect("pipeline fixture compiles");
         let body_id = plan
             .dag()
             .graph
@@ -4925,6 +4986,39 @@ nodes:
     src:
       schema:
         - { name: x, type: int }
+        - { name: k, type: string }
+  outputs:
+    result: agg
+  config_schema: {}
+
+nodes:
+  - type: aggregate
+    name: agg
+    input: src
+    config:
+      group_by: [k]
+      cxl: |
+        emit total = sum(x)
+"#,
+        )
+    }
+
+    /// Attempt to compile a composition body whose input port declares FEWER columns
+    /// than the caller supplies (port declares only `k`; the caller's source supplies
+    /// `x, k`) and whose aggregate folds an OPEN-TAIL pass-through column the port did
+    /// not declare (`emit total = sum(x)`). Returns the compile `Result` — this body
+    /// is EXPECTED to fail to compile (see
+    /// `body_aggregate_referencing_open_tail_column_does_not_compile`).
+    fn try_compile_open_tail_aggregate_reference()
+    -> Result<clinker_plan::plan::CompiledPlan, Vec<clinker_core_types::Diagnostic>> {
+        try_compile_body_fixture(
+            "open-tail-agg-body",
+            "        - { name: x, type: int }\n        - { name: k, type: string }",
+            r#"_compose:
+  name: open_tail_agg
+  inputs:
+    src:
+      schema:
         - { name: k, type: string }
   outputs:
     result: agg
@@ -5716,9 +5810,32 @@ nodes:
         );
     }
 
-    /// #174: a body node with NO resolved CXL program (here a Route — and an Output,
-    /// which the engine seeds as the body's terminal node) yields only same-name
-    /// passthrough carries, never a synthetic derive edge. This pins the no-program
+    /// #180 PR2 GAP-1 schema-source characterization: the hypothesized "body aggregate
+    /// folds an open-tail pass-through column the port did not declare" scenario — the
+    /// only case where the engine `BindingArg::Field(idx)` index could exceed klinx's
+    /// reconstructed schema — **cannot compile**. CXL `resolve` binds a `FieldRef` only
+    /// against the explicitly declared field set, so an aggregate reading an undeclared
+    /// (open-tail) column is a compile-time `E200` "unresolved identifier" and the body
+    /// never exists. This pins WHY the adapter's `Field(idx)` resolution is total:
+    /// every `Field(idx)` it can ever see points at a declared input column, and the
+    /// declared prefix is identical between the engine schema and the body row. If a
+    /// future engine change lets an aggregate fold open-tail columns, this test flips
+    /// (the body would compile) — a deliberate signal to revisit the resolution.
+    #[test]
+    fn body_aggregate_referencing_open_tail_column_does_not_compile() {
+        let result = try_compile_open_tail_aggregate_reference();
+        let diags = result.expect_err(
+            "a body aggregate folding an undeclared (open-tail) column must NOT compile \
+             — if it now does, the GAP-1 Field(idx) schema-source assumption needs review",
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("unresolved identifier")),
+            "expected an E200 unresolved-identifier diagnostic for the open-tail read, got {diags:?}",
+        );
+    }
+
     /// #180 PR2 GAP 1 + GAP 2: a body Aggregate's computed column traces to the input
     /// column it folds, its group-by draws a `GroupBy` edge, and the
     /// `BindingArg::Field(idx)` → column-name resolution maps to the RIGHT column.
@@ -5762,28 +5879,21 @@ nodes:
 
         // GAP 1 SHARP EDGE: assert the `BindingArg::Field(idx)` → column resolution
         // directly. The single binding folds `sum(x)`, so its arg is `Field(idx)`
-        // where the aggregate's engine input schema (its predecessor `src`'s body row,
-        // in declaration order) at `idx` is `x` — NOT some other column. This is the
-        // one place the adapter can silently produce a wrong column.
-        let agg_node = body
+        // where the aggregate's ENGINE input schema at `idx` is `x` — NOT some other
+        // column. This is the one place the adapter can silently produce a wrong column.
+        let agg_node_idx = body
             .topo_order
             .iter()
-            .find_map(|&i| match &body.graph[i] {
-                node @ PlanNode::Aggregation { .. } => Some(node),
-                _ => None,
-            })
+            .copied()
+            .find(|&i| matches!(body.graph[i], PlanNode::Aggregation { .. }))
             .expect("body has an Aggregation node");
-        let PlanNode::Aggregation { compiled, .. } = agg_node else {
+        let PlanNode::Aggregation { compiled, .. } = &body.graph[agg_node_idx] else {
             unreachable!("matched Aggregation above")
         };
-        // The aggregate's input schema in engine row order = src's body row fields.
-        let agg_input_schema: Vec<String> = body
-            .body_rows
-            .get("src")
-            .expect("src body row")
-            .fields()
-            .map(|(qf, _)| qf.name.to_string())
-            .collect();
+        // Source the schema the SAME way production does — from the aggregate's
+        // predecessor `stored_output_schema()` — so the test pins the real index space
+        // `BindingArg::Field(idx)` was assigned against, not a reconstruction.
+        let agg_input_schema = aggregate_engine_input_schema(&body, agg_node_idx);
         let binding = compiled
             .bindings
             .first()
