@@ -1,3 +1,4 @@
+mod body_overlay;
 pub mod breadcrumbs;
 mod connector;
 pub mod extract_modal;

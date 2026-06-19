@@ -86,6 +86,11 @@ pub fn AppShell() -> Element {
         use_signal(|| None);
     let composition_drill_stack: Signal<Vec<crate::state::CompositionDrillFrame>> =
         use_signal(Vec::new);
+    // #171: the in-context body-overlay stack, parallel to the drill stack. Empty
+    // = no overlay. Like the drill stack it is per-tab transient state; the canvas
+    // D1 view-swap effect clears it on a tab/pipeline switch.
+    let composition_overlay_stack: Signal<Vec<crate::state::CompositionDrillFrame>> =
+        use_signal(Vec::new);
 
     // ── Session restore (single call on first mount per use_signal) ─────
     // restore_session() is called in the first use_signal closure. The result
@@ -357,6 +362,7 @@ pub fn AppShell() -> Element {
         lineage_reveal_mode,
         compiled_plan,
         composition_drill_stack,
+        composition_overlay_stack,
     };
 
     let mut app_state_signal = use_signal(|| current_app_state);

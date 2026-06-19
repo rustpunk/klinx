@@ -98,12 +98,14 @@ fn resolve_role_edge_anchors(
 }
 
 // ── Canvas transform constants ───────────────────────────────────────────────
-const ZOOM_MIN: f32 = 0.25;
-const ZOOM_MAX: f32 = 4.0;
+// `pub(super)` so the body overlay (#171) reuses the SAME clamp range and step
+// for its independent wheel-zoom, keeping overlay and main-canvas zoom identical.
+pub(super) const ZOOM_MIN: f32 = 0.25;
+pub(super) const ZOOM_MAX: f32 = 4.0;
 /// Zoom factor applied per scroll-wheel "tick" (for Line/Page delta modes).
-const ZOOM_STEP_LINE: f32 = 1.10;
+pub(super) const ZOOM_STEP_LINE: f32 = 1.10;
 /// Zoom factor per pixel of scroll delta (for Pixel mode).
-const ZOOM_STEP_PIXEL: f32 = 0.001;
+pub(super) const ZOOM_STEP_PIXEL: f32 = 0.001;
 /// Screen-space padding kept around the node graph when fitting it to view.
 const FIT_MARGIN: f32 = 60.0;
 /// Breathing room kept on each edge when auto-panning a freshly selected field's
@@ -786,7 +788,7 @@ fn is_drag_beyond_slop(dx: f32, dy: f32) -> bool {
 /// single transform, so the lineage overlay tracks the pan with the content
 /// rather than independently.
 #[component]
-fn PanViewport(
+pub(super) fn PanViewport(
     pan_x: ReadSignal<f32>,
     pan_y: ReadSignal<f32>,
     zoom: ReadSignal<f32>,
@@ -1265,6 +1267,21 @@ pub fn CanvasPanel() -> Element {
         pinned.0.set(None);
         let mut selected_field = state.selected_field;
         selected_field.set(None);
+        // #171: close a stale overlay when the active view's IDENTITY changes
+        // (tab/pipeline/composition switch / channel-mode toggle), so the lightbox
+        // never lingers over a different graph. Driven by the fingerprint above —
+        // the overlay stack is deliberately NOT in the fingerprint, so opening or
+        // navigating the overlay (which only mutates the overlay stack) does not
+        // re-run this effect and self-clear. The write is PEEK-guarded so it never
+        // notifies when the stack is already empty, and reads no signal of its own,
+        // so it cannot loop. A pan/zoom never reaches here (those touch no
+        // fingerprint signal).
+        {
+            let mut overlay = state.composition_overlay_stack;
+            if !overlay.peek().is_empty() {
+                overlay.write().clear();
+            }
+        }
         // Reset the reveal depth so a cap raised on the old graph never carries
         // into the new one (#123). The reveal MODE is a persistent UI preference
         // and is intentionally NOT reset here.
@@ -2055,7 +2072,170 @@ pub fn CanvasPanel() -> Element {
                 }
             }
         }
+
+            // ── In-context composition body overlay (#171) ───────────────
+            // Mounted at the canvas-column level, AFTER the canvas panel, so its
+            // fixed backdrop sits above the still-mounted parent canvas. Mounted
+            // unconditionally — `BodyOverlay` reads the overlay stack itself and
+            // renders nothing when it is empty, keeping the panel's rsx free of a
+            // gating conditional and the overlay's hooks unconditional.
+            super::body_overlay::BodyOverlay {}
         }
+    }
+}
+
+/// One node-level connector for the body overlay's sub-canvas (#171), resolved to
+/// the endpoint stages it draws between plus its routed path. A trimmed sibling of
+/// [`CanvasConnection`]: the overlay draws the default node-level DAG only (no
+/// field-lineage overlay yet), so it carries no Filter-mode keep indices.
+#[derive(Clone, PartialEq)]
+pub(super) struct BodyConnection {
+    pub from: StageView,
+    pub to: StageView,
+    pub from_branch: Option<usize>,
+    pub path: Option<CanvasConnectorPath>,
+}
+
+/// The fully-derived render model for the body overlay's inner sub-canvas (#171).
+///
+/// Produced by [`build_body_canvas`] from a laid-out [`crate::pipeline_view::PipelineView`]:
+/// projected node cards (with their `FieldDisplayInfo`), routed node-level
+/// connectors, and the SVG overlay size. The overlay renders these inside its own
+/// [`PanViewport`] with independent pan/zoom, REUSING the same [`CanvasNode`] /
+/// [`Connector`] components the main canvas uses — no card/connector reimplementation.
+///
+/// `Clone + PartialEq` so the overlay can hold it in a `use_memo` keyed on the
+/// displayed body + zoom (#171), and only re-run the O(nodes+edges) layout +
+/// routing when one of those changes — never on a hover that merely writes the
+/// overlay's lineage-context signals.
+#[derive(Clone, PartialEq)]
+pub(super) struct BodyCanvas {
+    pub cards: Vec<(StageView, FieldDisplayInfo)>,
+    pub connections: Vec<BodyConnection>,
+    pub svg_w: f32,
+    pub svg_h: f32,
+}
+
+/// Derive the render model for the overlay's inner sub-canvas from a laid-out
+/// view (#171).
+///
+/// Mirrors the main panel's projection + connector routing, but with the static
+/// inputs an overlay sub-canvas has no UI for yet: Auto display mode, no global
+/// field query, no per-node overrides, no active lineage reveal. `zoom` feeds the
+/// Auto density choice so the cards thin out as the user zooms the overlay out,
+/// exactly like the main canvas. All projection logic stays here in `panel.rs`;
+/// the overlay only consumes the result.
+pub(super) fn build_body_canvas(view: crate::pipeline_view::PipelineView, zoom: f32) -> BodyCanvas {
+    let view = apply_canvas_layout(view, CanvasLayoutEngine::PortAwareSugiyama).view;
+    let connections_model = view.connections;
+    let connection_paths = view.connection_paths;
+    let field_edges = view.field_edges;
+    let role_edges = view.role_edges;
+    let raw_stages = view.stages;
+
+    let display_profile = GraphDisplayProfile::from_stages(&raw_stages);
+    let rank_signals = build_field_rank_signals(&raw_stages, &field_edges, &role_edges);
+    let no_temporary_fields: HashSet<String> = HashSet::new();
+    let empty_display_state = FieldDisplayState::default();
+
+    let projected: Vec<ProjectedStage> = raw_stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| {
+            let mode = resolve_node_display_mode(
+                GlobalNodeDisplayMode::Auto,
+                None,
+                display_profile,
+                zoom,
+                false,
+            );
+            project_stage_fields(
+                stage,
+                &empty_display_state,
+                FieldProjectionContext {
+                    stage_index: index,
+                    mode,
+                    global_mode: GlobalNodeDisplayMode::Auto,
+                    override_mode: None,
+                    temporary_fields: &no_temporary_fields,
+                    rank_signals: &rank_signals,
+                },
+            )
+        })
+        .collect();
+
+    let cards: Vec<(StageView, FieldDisplayInfo)> = projected
+        .into_iter()
+        .map(|p| (p.stage, p.display))
+        .collect();
+
+    // Obstacle-aware routing against the rendered card rects — identical to the
+    // main canvas, so cables route around bodies in the overlay too.
+    let connector_obstacles: Vec<ConnectorObstacle> = cards
+        .iter()
+        .map(|(stage, display)| ConnectorObstacle {
+            x: stage.canvas_x,
+            y: stage.canvas_y,
+            width: NODE_WIDTH,
+            height: rendered_card_height(stage, display),
+        })
+        .collect();
+
+    let connection_endpoints: Vec<ConnectorEndpoints> = connections_model
+        .iter()
+        .map(|c| {
+            let from = &cards[c.from].0;
+            let to = &cards[c.to].0;
+            let (sx, sy) = match c.from_branch {
+                Some(i) => from.branch_anchor_out(i),
+                None => from.port_out(),
+            };
+            let (tx, ty) = to.port_in();
+            ConnectorEndpoints { sx, sy, tx, ty }
+        })
+        .collect();
+    let routed = obstacle_aware_channel_paths(&connection_endpoints, &connector_obstacles);
+
+    let connections: Vec<BodyConnection> = connections_model
+        .iter()
+        .enumerate()
+        .map(|(edge_index, c)| {
+            let dynamic_path = routed
+                .get(edge_index)
+                .filter(|path| path.points.len() >= 2)
+                .cloned();
+            let layout_path = connection_paths
+                .get(edge_index)
+                .filter(|path| path.points.len() >= 2)
+                .cloned();
+            BodyConnection {
+                from: cards[c.from].0.clone(),
+                to: cards[c.to].0.clone(),
+                from_branch: c.from_branch,
+                path: dynamic_path.or(layout_path),
+            }
+        })
+        .collect();
+
+    let (svg_w, svg_h) = if cards.is_empty() {
+        (1200.0_f32, 400.0_f32)
+    } else {
+        let max_x = cards
+            .iter()
+            .map(|(s, _)| s.canvas_x + NODE_WIDTH)
+            .fold(0.0_f32, f32::max);
+        let max_y = cards
+            .iter()
+            .map(|(s, display)| s.canvas_y + rendered_card_height(s, display))
+            .fold(0.0_f32, f32::max);
+        (max_x + 80.0, max_y + 80.0)
+    };
+
+    BodyCanvas {
+        cards,
+        connections,
+        svg_w,
+        svg_h,
     }
 }
 
