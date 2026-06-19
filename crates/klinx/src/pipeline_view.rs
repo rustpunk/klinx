@@ -1880,6 +1880,235 @@ fn derive_row_precision(out_fields: &mut [Vec<FieldRow>], edges: &[FieldEdge]) {
     }
 }
 
+/// How a stage's CXL-less / unresolved fan-in carries are graded (#180).
+///
+/// The top-level raw and resolved paths treat a shared column arriving from more
+/// than one producer (a Merge/Combine join-key fan-in) as a CONSERVATIVE carry —
+/// without CXL we cannot confirm it rides through unchanged, so a multi-producer
+/// carry is [`Precision::Approximate`] ([`FieldEdge::conservative_fan_in`]) while a
+/// single-producer carry stays an exact [`FieldEdgeKind::Passthrough`]. The
+/// composition body path has no fan-in policy yet (its no-program fallback always
+/// draws plain `Passthrough`/Exact carries), so it selects [`FanInPolicy::ExactOnly`].
+/// Turning the body's fan-in grading on is GAP 3 (#180 PR2); this enum names the
+/// seam without changing today's behavior.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FanInPolicy {
+    /// A multi-producer carry is graded `Approximate` via
+    /// [`FieldEdge::conservative_fan_in`]; a single-producer carry is exact.
+    Conservative,
+    /// Every carry is a plain exact `Passthrough`, regardless of producer count.
+    ExactOnly,
+}
+
+/// The output-name gate a stage applies to its emit targets and carried columns
+/// (#180).
+///
+/// - `Resolved(set)` — the engine-resolved (or body) row set is authoritative, so
+///   an emit/carry is drawn ONLY into a column the engine actually produced
+///   (`output_names.contains(col)`), and the intra-node chained-emit fallback is
+///   likewise gated. A target/column the engine dropped draws no edge.
+/// - `Unfiltered` — the raw path builds its rows from
+///   [`field_lineage::transform_output_fields`], so every emit target and every
+///   unshadowed input column is an output column by construction; no gate is
+///   needed and none is applied (matching the raw path's original behavior, which
+///   had no `output_names` check at all).
+enum OutputGate<'a> {
+    Resolved(&'a std::collections::HashSet<String>),
+    Unfiltered,
+}
+
+impl OutputGate<'_> {
+    /// Whether `col` is an output column this stage may draw an edge into. The
+    /// `Unfiltered` raw path admits every column (its rows are emit-derived by
+    /// construction); the resolved/body path admits only engine-produced columns.
+    fn admits(&self, col: &str) -> bool {
+        match self {
+            OutputGate::Resolved(names) => names.contains(col),
+            OutputGate::Unfiltered => true,
+        }
+    }
+}
+
+/// The single emit/anchor classification core for ONE consumer stage, shared by
+/// the raw ([`compute_field_lineage`]), engine-resolved
+/// ([`resolved_pipeline_field_lineage`]), and composition-body ([`body_field_edges`])
+/// lineage paths (#180).
+///
+/// This is the behavior-preserving extraction of the field-edge skeleton that was
+/// triplicated across those three paths: `emit_supports` → `emit_copy_targets` /
+/// `used_cols` / `carry_kind` → derive/carry (`mk` closure + `emitted_so_far`
+/// intra-node chained-emit fallback) → identity-carry loop, plus the no-program
+/// same-name carry fallback. The caller keeps its OWN predecessor fold, row
+/// production, Composition special-casing, `col_meta` stamping, parse-error
+/// (`mark_rows_unknown`) arm, and post-row influence emission; only the
+/// emit/anchor core moves here.
+///
+/// Edges are pushed onto `acc` (DIRECT derive/carry edges via `push_direct`, which
+/// the construction guarantees cannot collide; group-by influence edges via the
+/// shared [`emit_group_by_edges`], which dedups). Emission order is fixed
+/// group-by → emit-supports → identity-carry so the resulting edge list is
+/// byte-identical to each path's prior inline order.
+///
+/// Parameters that capture every known difference between the three paths:
+/// - `to` — the consumer stage/node/slot index in the caller's index space.
+/// - `program` — `Some(p)` runs the full emit/anchor analysis; `None` runs only
+///   the same-name carry fallback (a no-CXL / unresolved node forwarding columns).
+/// - `input_cols` / `producers_of` — the caller's predecessor fold (ordered column
+///   union and per-column producer indices).
+/// - `output_gate` — `Resolved` gates emits/carries on the engine row set;
+///   `Unfiltered` admits everything (the raw path's emit-derived rows).
+/// - `aliases` — input-port alias → producer-index map for alias-qualified Combine
+///   refs (empty for every non-Combine node and for the body path).
+/// - `group_keys` — Aggregate group-key columns: a `GroupBy` influence edge (plus
+///   its role edge) is emitted for each, and they are skipped by the emit/carry
+///   loops (a group key defines grain, it is not a value derive). Empty for the
+///   body path and for non-Aggregate nodes.
+/// - `fan_in_policy` — how a no-program multi-producer carry is graded.
+#[allow(clippy::too_many_arguments)]
+fn field_edges_for_stage(
+    acc: &mut EdgeAccumulator,
+    role_edges: &mut Vec<RoleEdge>,
+    to: usize,
+    program: Option<&cxl::ast::Program>,
+    input_cols: &[String],
+    producers_of: &std::collections::HashMap<String, Vec<usize>>,
+    output_gate: &OutputGate<'_>,
+    aliases: &std::collections::HashMap<String, usize>,
+    group_keys: &std::collections::HashSet<String>,
+    fan_in_policy: FanInPolicy,
+) {
+    let Some(program) = program else {
+        // No (resolved) CXL program: the node forwards its input columns. Each
+        // surfaced column carries from every producer of it (#67 fan-in), graded
+        // per `fan_in_policy`. The raw/resolved paths grade a multi-producer carry
+        // conservatively; the body path always draws an exact passthrough.
+        for col in input_cols {
+            if !output_gate.admits(col) {
+                continue;
+            }
+            if let Some(producers) = producers_of.get(col) {
+                let conservative =
+                    fan_in_policy == FanInPolicy::Conservative && producers.len() > 1;
+                for &p in producers {
+                    let edge = if conservative {
+                        FieldEdge::conservative_fan_in(p, col.clone(), to, col.clone())
+                    } else {
+                        FieldEdge::carry(
+                            p,
+                            col.clone(),
+                            to,
+                            col.clone(),
+                            FieldEdgeKind::Passthrough,
+                        )
+                    };
+                    acc.push_direct(edge);
+                }
+            }
+        }
+        return;
+    };
+
+    // Group keys define the grouped-record grain — an INDIRECT GROUP_BY influence,
+    // not a value derive (#147), always Approximate (#148). Emitted first (matching
+    // each path's prior order) so the field + role edges land before the emit
+    // analysis. Empty for every non-Aggregate node, so this is a no-op there.
+    for group_key in group_keys {
+        if !output_gate.admits(group_key) {
+            continue;
+        }
+        emit_group_by_edges(acc, role_edges, to, group_key, producers_of, aliases);
+    }
+
+    // Per-emit let-resolved support, in emit order. The order is load-bearing for
+    // the intra-node chained-emit fallback below.
+    let supports = field_lineage::emit_supports(program);
+    let emitted: std::collections::HashSet<&str> =
+        supports.iter().map(|(name, _)| name.as_str()).collect();
+    // Emits that merely re-emit an input column unchanged (`emit c = c` /
+    // `emit c = src.c`) are passthroughs, not derives, so their edge is a carry.
+    let copies = field_lineage::emit_copy_targets(program, input_cols);
+    // Columns read by a COMPUTED or renamed emit (a pure copy excluded): a same-name
+    // carry of one is an `Access` carry rather than a pure `Passthrough` (#72). Keyed
+    // by bare column so a qualified `orders.line_total` read and a bare `line_total`
+    // carry speak the same vocabulary.
+    let used_cols: std::collections::HashSet<&str> = supports
+        .iter()
+        .filter(|(target, _)| !copies.contains(target.as_str()))
+        .flat_map(|(_, support)| support.iter().map(|m| bare_column(m)))
+        .collect();
+    let carry_kind = |col: &str| {
+        if used_cols.contains(col) {
+            FieldEdgeKind::Access
+        } else {
+            FieldEdgeKind::Passthrough
+        }
+    };
+
+    // Targets fanned out by an `emit each` lose per-element provenance, so their
+    // derive edges are Approximate (#148).
+    let fanned = field_lineage::emit_each_fanned_targets(program);
+    let mut emitted_so_far: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (target, support) in &supports {
+        // Skip a target the engine did not produce or a group key (its grain edge is
+        // the GroupBy influence above, not a value derive); still record it as
+        // emitted so a later chained emit reading it resolves intra-node.
+        if !output_gate.admits(target) || group_keys.contains(target.as_str()) {
+            emitted_so_far.insert(target.as_str());
+            continue;
+        }
+        // An identity-copy emit carries its column unchanged (carry); a computed or
+        // renamed emit derives its target.
+        let carried = copies.contains(target.as_str());
+        let target_fanned = fanned.contains(target.as_str());
+        for member in support {
+            // Resolve the (possibly alias-qualified) support member to its bare column
+            // on the right predecessor(s); `col` is the bare name so the carry/Access
+            // split and the edge's `from_field` both read the column, not the dotted ref.
+            let col = bare_column(member);
+            // A carry edge is Exact (identity reproduces the value); a derive edge is
+            // Exact unless fanned by `emit each` (#148).
+            let mk = |p: usize, from_field: String, consumer: usize| {
+                if carried {
+                    FieldEdge::carry(p, from_field, consumer, target.clone(), carry_kind(col))
+                } else {
+                    FieldEdge::derive(p, from_field, consumer, target.clone(), target_fanned)
+                }
+            };
+            let anchors = resolve_support_anchors(member, producers_of, aliases);
+            if !anchors.is_empty() {
+                // A support column present in several inputs derives its target from
+                // each of them (#67); an alias-qualified ref resolves to its single
+                // declared port.
+                for (p, from_field) in anchors {
+                    acc.push_direct(mk(p, from_field, to));
+                }
+            } else if emitted_so_far.contains(col) && output_gate.admits(col) {
+                // An intra-node chained emit (`emit d = c + 1` after the node emitted
+                // `c`) derives from the earlier emit on the same card.
+                acc.push_direct(mk(to, col.to_string(), to));
+            }
+        }
+        emitted_so_far.insert(target.as_str());
+    }
+
+    // Identity edges: each input column carried through unchanged (surfaced on the
+    // consumer, not shadowed by an emit, not a group key). A column carried in from
+    // several inputs (a fan-in join key) carries from each (#67). A clean-CXL identity
+    // carry is Exact.
+    for col in input_cols {
+        if output_gate.admits(col)
+            && !emitted.contains(col.as_str())
+            && !group_keys.contains(col.as_str())
+            && let Some(producers) = producers_of.get(col)
+        {
+            let kind = carry_kind(col);
+            for &p in producers {
+                acc.push_direct(FieldEdge::carry(p, col.clone(), to, col.clone(), kind));
+            }
+        }
+    }
+}
+
 /// Compute per-index output field rows and the field-level lineage edges over a
 /// classified slot list. **The shared lineage core** for both the composition
 /// canvas ([`derive_composition_view`]) and the pipeline canvas
@@ -2006,6 +2235,15 @@ fn compute_field_lineage(
             continue;
         }
 
+        // The raw Aggregate arm keeps its own emit loop rather than routing through
+        // the shared `field_edges_for_stage` analyzer (#180): it emits a `derive`
+        // for EVERY aggregate emit (it never computes `emit_copy_targets`), whereas
+        // the shared analyzer — and the engine-resolved path — would reclassify an
+        // identity-copy emit as a `carry`. Folding this arm in would therefore change
+        // raw-mode edges for an aggregate that copies an input column, so it stays
+        // inline to keep Phase A behavior-preserving. Reconciling the raw/resolved
+        // aggregate emit classification is the Aggregation adapter (GAP 1, #180 PR2).
+        // Its group-key grain edges DO use the shared `emit_group_by_edges` helper.
         if let PipelineNode::Aggregate { config, .. } = node {
             match node_cxl(node).map(field_lineage::parse_clean) {
                 Some(Some(program)) => {
@@ -2120,123 +2358,24 @@ fn compute_field_lineage(
         let cxl = node_cxl(node);
         match cxl.map(field_lineage::parse_clean) {
             Some(Some(program)) => {
-                // Output rows: passthrough (unshadowed inputs) then emitted.
+                // Output rows: passthrough (unshadowed inputs) then emitted. The
+                // emit/anchor edge core is the shared stage analyzer (#180): the raw
+                // path's rows are emit-derived by construction, so it gates nothing
+                // (`OutputGate::Unfiltered`) and carries nothing through a group key
+                // (this is the non-Aggregate arm).
                 out_fields[idx] = field_lineage::transform_output_fields(&input_cols, &program);
-
-                // Per-emit let-resolved support, in emit order. The order is
-                // load-bearing for intra-node chained emits below.
-                let supports = field_lineage::emit_supports(&program);
-                let emitted: std::collections::HashSet<&str> =
-                    supports.iter().map(|(name, _)| name.as_str()).collect();
-                // Emits that merely re-emit an input column unchanged
-                // (`emit c = c` / `emit c = src.c`) are passthroughs, not derives,
-                // so their edge reads as an identity carry.
-                let copies = field_lineage::emit_copy_targets(&program, &input_cols);
-
-                // Columns read by a COMPUTED or renamed emit (a pure copy is
-                // excluded, so `emit c = src.c` does not mark `c` accessed by its
-                // own identity copy). A carried column that ALSO appears here is
-                // an `Access` carry — it rides through unchanged AND feeds a
-                // computation — as opposed to a pure `Passthrough` (#72). The
-                // exclusion deviates from the research's literal "union of all
-                // emit supports" wording on purpose: a pure copy is not an
-                // "access" of the column it copies. (No effect on the canonical
-                // value_tier fixture, which has no copy emits.)
-                // Keyed by BARE column name (`bare_column`): a Combine's computed
-                // emit reads `orders.line_total`, but a carry is classified
-                // against the bare `line_total`, so both sides must speak the
-                // same vocabulary for the Access/Passthrough split to fire.
-                let used_cols: std::collections::HashSet<&str> = supports
-                    .iter()
-                    .filter(|(target, _)| !copies.contains(target.as_str()))
-                    .flat_map(|(_, support)| support.iter().map(|m| bare_column(m)))
-                    .collect();
-                // Classify one identity (`c → c`) carry of bare column `col`: an
-                // `Access` carry when `col` also feeds a computed emit, else a
-                // pure `Passthrough`.
-                let carry_kind = |col: &str| {
-                    if used_cols.contains(col) {
-                        FieldEdgeKind::Access
-                    } else {
-                        FieldEdgeKind::Passthrough
-                    }
-                };
-
-                // Derive edges: each emit's let-resolved support resolved to its
-                // producer. A support column is one of:
-                //  - a predecessor output column → INTER-node derive edge, OR
-                //  - a field this same node emitted in an EARLIER statement →
-                //    INTRA-node derive edge (`emit c = b + 1.0` after `emit b`),
-                //    so chained emits form a same-card cable the hover closure
-                //    walks transitively. `emitted_so_far` tracks the prior emits
-                //    in declaration order; we record the current target only
-                //    after its own edges, so an emit never reads itself.
-                // A support column that is neither resolves to nothing (it names
-                // no producible field — e.g. an accept-any input).
-                let aliases = &input_aliases[idx];
-                // Targets fanned out by an `emit each`: their derives lose
-                // per-element provenance, so they are Approximate (#148).
-                let fanned = field_lineage::emit_each_fanned_targets(&program);
-                let mut emitted_so_far: std::collections::HashSet<&str> =
-                    std::collections::HashSet::new();
-                for (target, support) in &supports {
-                    // An identity-copy emit carries its column unchanged, so its
-                    // edge is a carry (Passthrough/Access); a computed or renamed
-                    // emit derives its target.
-                    let carried = copies.contains(target.as_str());
-                    let target_fanned = fanned.contains(target.as_str());
-                    for member in support {
-                        // Resolve the (possibly alias-qualified) support member to
-                        // its bare column on the right predecessor(s); `col` is the
-                        // bare name so the carry/Access split and the edge's
-                        // `from_field` both read the column, not the dotted ref.
-                        let col = bare_column(member);
-                        let anchors = resolve_support_anchors(member, &producers_of, aliases);
-                        // A carry edge is Exact (identity reproduces the value); a
-                        // derive edge is Exact unless fanned by `emit each` (#148).
-                        let mk = |p: usize, from_field: String, to: usize| {
-                            if carried {
-                                FieldEdge::carry(p, from_field, to, target.clone(), carry_kind(col))
-                            } else {
-                                FieldEdge::derive(p, from_field, to, target.clone(), target_fanned)
-                            }
-                        };
-                        if !anchors.is_empty() {
-                            // A support column present in several inputs derives
-                            // its target from each of them (#67); an alias-qualified
-                            // ref resolves to its single declared port.
-                            for (p, from_field) in anchors {
-                                acc.push_direct(mk(p, from_field, idx));
-                            }
-                        } else if emitted_so_far.contains(col) {
-                            acc.push_direct(mk(idx, col.to_string(), idx));
-                        }
-                    }
-                    emitted_so_far.insert(target.as_str());
-                }
-
-                // Identity edges: each input column carried through unchanged
-                // (not shadowed by an emit of the same name). A column carried in
-                // from several inputs (a fan-in join key) carries from each (#67).
-                for col in &input_cols {
-                    if !emitted.contains(col.as_str())
-                        && let Some(producers) = producers_of.get(col)
-                    {
-                        // An unshadowed carried column is a pure Passthrough
-                        // unless it also feeds a computed emit, which makes it an
-                        // Access carry (#72). A clean-CXL identity carry is Exact.
-                        let kind = carry_kind(col);
-                        for &p in producers {
-                            acc.push_direct(FieldEdge::carry(
-                                p,
-                                col.clone(),
-                                idx,
-                                col.clone(),
-                                kind,
-                            ));
-                        }
-                    }
-                }
+                field_edges_for_stage(
+                    &mut acc,
+                    &mut role_edges,
+                    idx,
+                    Some(&program),
+                    &input_cols,
+                    &producers_of,
+                    &OutputGate::Unfiltered,
+                    &input_aliases[idx],
+                    &std::collections::HashSet::new(),
+                    FanInPolicy::Conservative,
+                );
             }
             Some(None) => {
                 // CXL present but it failed to parse: render passthrough rows so
@@ -2247,35 +2386,23 @@ fn compute_field_lineage(
                 mark_rows_unknown(&mut out_fields[idx]);
             }
             None => {
-                // No CXL block at all: the node forwards its input columns. Both
-                // the rows and the identity carries are safe to draw.
+                // No CXL block at all: the node forwards its input columns. The
+                // shared analyzer's no-program fallback draws the same-name carries,
+                // grading a multi-producer (Merge/Combine) fan-in conservatively
+                // (#67/#148). The raw path applies no output gate.
                 out_fields[idx] = field_lineage::passthrough_output_fields(&input_cols);
-                for col in &input_cols {
-                    // A CXL-less fan-in (Merge) carries a shared column from every
-                    // input that produced it (#67). With no emits on the node,
-                    // every carry is a pure pass-through (#72). A shared column with
-                    // MORE THAN ONE producer is a conservative join-key fan-in: we
-                    // cannot confirm from absent CXL that it rides through
-                    // unchanged, so it is Approximate; a single-producer carry is
-                    // an honest Exact passthrough (#148).
-                    if let Some(producers) = producers_of.get(col) {
-                        let conservative = producers.len() > 1;
-                        for &p in producers {
-                            let edge = if conservative {
-                                FieldEdge::conservative_fan_in(p, col.clone(), idx, col.clone())
-                            } else {
-                                FieldEdge::carry(
-                                    p,
-                                    col.clone(),
-                                    idx,
-                                    col.clone(),
-                                    FieldEdgeKind::Passthrough,
-                                )
-                            };
-                            acc.push_direct(edge);
-                        }
-                    }
-                }
+                field_edges_for_stage(
+                    &mut acc,
+                    &mut role_edges,
+                    idx,
+                    None,
+                    &input_cols,
+                    &producers_of,
+                    &OutputGate::Unfiltered,
+                    &input_aliases[idx],
+                    &std::collections::HashSet::new(),
+                    FanInPolicy::Conservative,
+                );
             }
         }
 
@@ -2576,18 +2703,6 @@ fn resolved_pipeline_field_lineage(
             .as_ref()
             .map(|program| field_lineage::emit_copy_targets(program, &input_cols))
             .unwrap_or_default();
-        let used_cols: std::collections::HashSet<String> = supports
-            .iter()
-            .filter(|(target, _)| !copies.contains(target.as_str()))
-            .flat_map(|(_, support)| support.iter().map(|m| bare_column(m).to_string()))
-            .collect();
-        let carry_kind = |col: &str| {
-            if used_cols.contains(col) {
-                FieldEdgeKind::Access
-            } else {
-                FieldEdgeKind::Passthrough
-            }
-        };
 
         // Composition boundary handling (#154): a Composition node has no CXL of
         // its own, so the engine puts no entry in `artifacts.typed` and
@@ -2647,94 +2762,39 @@ fn resolved_pipeline_field_lineage(
         };
 
         if let Some(program) = &parsed {
-            let aliases = &input_aliases[idx];
-            // Group keys define the grouped-record grain — an INDIRECT GROUP_BY
-            // influence, not a value derive (#147), always Approximate (#148).
-            // Emitted via the shared helper so the raw and resolved paths cannot
-            // drift on the grain representation (retired `is_aggregate_grain`).
-            for group_key in &aggregate_group_keys {
-                if !output_names.contains(group_key) {
-                    continue;
-                }
-                emit_group_by_edges(
-                    &mut acc,
-                    &mut role_edges,
-                    idx,
-                    group_key,
-                    &producers_of,
-                    aliases,
-                );
-            }
-            // Targets fanned out by an `emit each` lose per-element provenance, so
-            // their derive edges are Approximate (#148).
-            let fanned = field_lineage::emit_each_fanned_targets(program);
-            let mut emitted_so_far: std::collections::HashSet<&str> =
-                std::collections::HashSet::new();
-            for (target, support) in &supports {
-                if !output_names.contains(target) || aggregate_group_keys.contains(target) {
-                    emitted_so_far.insert(target.as_str());
-                    continue;
-                }
-                let carried = copies.contains(target.as_str());
-                let target_fanned = fanned.contains(target.as_str());
-                for member in support {
-                    let col = bare_column(member);
-                    let mk = |p: usize, from_field: String, to: usize| {
-                        if carried {
-                            FieldEdge::carry(p, from_field, to, target.clone(), carry_kind(col))
-                        } else {
-                            FieldEdge::derive(p, from_field, to, target.clone(), target_fanned)
-                        }
-                    };
-                    let anchors = resolve_support_anchors(member, &producers_of, aliases);
-                    if !anchors.is_empty() {
-                        for (p, from_field) in anchors {
-                            acc.push_direct(mk(p, from_field, idx));
-                        }
-                    } else if emitted_so_far.contains(col) && output_names.contains(col) {
-                        acc.push_direct(mk(idx, col.to_string(), idx));
-                    }
-                }
-                emitted_so_far.insert(target.as_str());
-            }
-
-            for col in &input_cols {
-                if output_names.contains(col)
-                    && !emitted.contains(col)
-                    && !aggregate_group_keys.contains(col)
-                    && let Some(producers) = producers_of.get(col)
-                {
-                    let kind = carry_kind(col);
-                    for &p in producers {
-                        acc.push_direct(FieldEdge::carry(p, col.clone(), idx, col.clone(), kind));
-                    }
-                }
-            }
+            // The shared stage analyzer (#180): the engine row set is authoritative,
+            // so emits/carries are gated on `output_names` (`OutputGate::Resolved`)
+            // and the aggregate's group keys (skipped by the emit/carry loops, drawn
+            // as `GroupBy` influence + role edges). The fan-in policy is unused on the
+            // `Some(program)` arm. Aliases resolve a Combine body's qualified refs.
+            field_edges_for_stage(
+                &mut acc,
+                &mut role_edges,
+                idx,
+                Some(program),
+                &input_cols,
+                &producers_of,
+                &OutputGate::Resolved(&output_names),
+                &input_aliases[idx],
+                &aggregate_group_keys,
+                FanInPolicy::Conservative,
+            );
         } else if node_cxl(node).is_none() && node_preserves_input_schema(node) {
-            for col in &input_cols {
-                if output_names.contains(col)
-                    && let Some(producers) = producers_of.get(col)
-                {
-                    // A shared column with several producers is a conservative
-                    // CXL-less join-key fan-in → Approximate; a single-producer
-                    // carry is an honest Exact passthrough (#148).
-                    let conservative = producers.len() > 1;
-                    for &p in producers {
-                        let edge = if conservative {
-                            FieldEdge::conservative_fan_in(p, col.clone(), idx, col.clone())
-                        } else {
-                            FieldEdge::carry(
-                                p,
-                                col.clone(),
-                                idx,
-                                col.clone(),
-                                FieldEdgeKind::Passthrough,
-                            )
-                        };
-                        acc.push_direct(edge);
-                    }
-                }
-            }
+            // No CXL: the shared analyzer's no-program fallback carries each
+            // engine-produced input column, grading a multi-producer fan-in
+            // conservatively (#67/#148).
+            field_edges_for_stage(
+                &mut acc,
+                &mut role_edges,
+                idx,
+                None,
+                &input_cols,
+                &producers_of,
+                &OutputGate::Resolved(&output_names),
+                &input_aliases[idx],
+                &aggregate_group_keys,
+                FanInPolicy::Conservative,
+            );
         } else if parsed.is_none() && node_cxl(node).is_some() {
             // CXL present but it failed to parse: edges were suppressed (no derive
             // analysis), so the degradation lives on the rows as `Unknown` (#148).
@@ -3923,135 +3983,37 @@ fn body_field_edges(
         }
 
         // The consumer stage's real output columns; an edge is only emitted into one
-        // of these (a support member naming a non-output column draws nothing).
-        let output_names: std::collections::HashSet<&str> =
-            stage.fields.iter().map(|f| f.name.as_str()).collect();
+        // of these (a support member naming a non-output column draws nothing). The
+        // body row set is authoritative, so the shared analyzer gates on it
+        // (`OutputGate::Resolved`).
+        let output_names: std::collections::HashSet<String> =
+            stage.fields.iter().map(|f| f.name.clone()).collect();
 
-        match body_node_program(body, &stage.id) {
-            Some(program) => {
-                // A body Combine would need alias-qualified anchor resolution, but a
-                // Combine carries no resolved program here (its typed body lives in
-                // `CompileArtifacts`), so `body_node_program` never returns `Some`
-                // for one — the alias map is always empty on this branch. Kept for
-                // symmetry with the top-level path's `resolve_support_anchors` call.
-                let input_aliases: std::collections::HashMap<String, usize> =
-                    std::collections::HashMap::new();
-
-                let supports = field_lineage::emit_supports(program);
-                let emitted: std::collections::HashSet<&str> =
-                    supports.iter().map(|(name, _)| name.as_str()).collect();
-                let copies = field_lineage::emit_copy_targets(program, &input_cols);
-                // A column read by a COMPUTED or renamed emit (a pure copy excluded):
-                // a same-name carry of it is an `Access` carry rather than a pure
-                // `Passthrough` (#72). Keyed by bare column name.
-                let used_cols: std::collections::HashSet<&str> = supports
-                    .iter()
-                    .filter(|(target, _)| !copies.contains(target.as_str()))
-                    .flat_map(|(_, support)| support.iter().map(|m| bare_column(m)))
-                    .collect();
-                let carry_kind = |col: &str| {
-                    if used_cols.contains(col) {
-                        FieldEdgeKind::Access
-                    } else {
-                        FieldEdgeKind::Passthrough
-                    }
-                };
-
-                // Targets fanned out by an `emit each` lose per-element provenance →
-                // Approximate (#148). Let the constructor tag precision; no new logic.
-                let fanned = field_lineage::emit_each_fanned_targets(program);
-                let mut emitted_so_far: std::collections::HashSet<&str> =
-                    std::collections::HashSet::new();
-                for (target, support) in &supports {
-                    if !output_names.contains(target.as_str()) {
-                        emitted_so_far.insert(target.as_str());
-                        continue;
-                    }
-                    // An identity-copy emit carries its column unchanged (carry); a
-                    // computed/renamed emit derives its target.
-                    let carried = copies.contains(target.as_str());
-                    let target_fanned = fanned.contains(target.as_str());
-                    for member in support {
-                        let col = bare_column(member);
-                        let mk = |p: usize, from_field: String, consumer: usize| {
-                            if carried {
-                                FieldEdge::carry(
-                                    p,
-                                    from_field,
-                                    consumer,
-                                    target.clone(),
-                                    carry_kind(col),
-                                )
-                            } else {
-                                FieldEdge::derive(
-                                    p,
-                                    from_field,
-                                    consumer,
-                                    target.clone(),
-                                    target_fanned,
-                                )
-                            }
-                        };
-                        let anchors =
-                            resolve_support_anchors(member, &producers_of, &input_aliases);
-                        if !anchors.is_empty() {
-                            for (p, from_field) in anchors {
-                                acc.push_direct(mk(p, from_field, to));
-                            }
-                        } else if emitted_so_far.contains(col) && output_names.contains(col) {
-                            // An intra-node chained emit (`emit d = c + 1` after the
-                            // node emitted `c`) derives from the earlier emit on the
-                            // same card.
-                            acc.push_direct(mk(to, col.to_string(), to));
-                        }
-                    }
-                    emitted_so_far.insert(target.as_str());
-                }
-
-                // Identity carries: each input column surfaced unchanged on the
-                // consumer (present in its output, not shadowed by an emit) carries
-                // from every producer of it (#67 fan-in).
-                for col in &input_cols {
-                    if output_names.contains(col.as_str())
-                        && !emitted.contains(col.as_str())
-                        && let Some(producers) = producers_of.get(col)
-                    {
-                        let kind = carry_kind(col);
-                        for &p in producers {
-                            acc.push_direct(FieldEdge::carry(
-                                p,
-                                col.clone(),
-                                to,
-                                col.clone(),
-                                kind,
-                            ));
-                        }
-                    }
-                }
-            }
-            None => {
-                // No resolved CXL program (Source/Route/Output/Merge/Cull/Reshape/
-                // Envelope/Aggregation/Combine/nested Composition): keep the original
-                // best-effort same-name passthrough carry. An honest identity carry
-                // → Exact (#148). A nested Composition's output columns come from its
-                // body rows, so these same-name carries draw exactly as before (#174).
-                for col in &input_cols {
-                    if output_names.contains(col.as_str())
-                        && let Some(producers) = producers_of.get(col)
-                    {
-                        for &p in producers {
-                            acc.push_direct(FieldEdge::carry(
-                                p,
-                                col.clone(),
-                                to,
-                                col.clone(),
-                                FieldEdgeKind::Passthrough,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
+        // The body path has no group keys, no Combine alias map (a body Combine
+        // carries no resolved program, so `body_node_program` never returns `Some`
+        // for one), no role edges to surface, and no fan-in policy yet
+        // (`FanInPolicy::ExactOnly` keeps every carry an exact `Passthrough`). Turning
+        // group-by / influence / fan-in grading on inside the body is #180 PR2; the
+        // emit/anchor core itself is the same shared stage analyzer the top-level
+        // paths use, so a computed body column (`emit c = a + 1`) draws its derive
+        // cable identically. `body_node_program` returning `None` (every CXL-less
+        // node, including a nested Composition) selects the no-program same-name carry
+        // fallback, exactly as before (#174).
+        let mut role_edges: Vec<RoleEdge> = Vec::new();
+        let no_aliases: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let no_group_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        field_edges_for_stage(
+            &mut acc,
+            &mut role_edges,
+            to,
+            body_node_program(body, &stage.id),
+            &input_cols,
+            &producers_of,
+            &OutputGate::Resolved(&output_names),
+            &no_aliases,
+            &no_group_keys,
+            FanInPolicy::ExactOnly,
+        );
     }
     acc.edges
 }
