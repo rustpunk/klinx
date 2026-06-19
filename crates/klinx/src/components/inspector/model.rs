@@ -248,6 +248,46 @@ pub enum BoundaryHopKind {
     Recursive(String),
 }
 
+impl BoundaryHopKind {
+    /// The marker glyph for this crossing (#156): `↳` enter, `↥` exit, `↺` recursive.
+    /// Owned here (not spelled inline in the panel RSX) so the marker rendering and the
+    /// precision-badge tooltip share one source of truth and cannot drift.
+    pub fn glyph(&self) -> &'static str {
+        match self {
+            Self::Enter(_) => "\u{21B3}",
+            Self::Exit(_) => "\u{21A5}",
+            Self::Recursive(_) => "\u{21BA}",
+        }
+    }
+
+    /// The human verb phrase preceding the composition name in the marker (#156):
+    /// "enters composition" / "exits composition" / "recursive composition".
+    pub fn verb(&self) -> &'static str {
+        match self {
+            Self::Enter(_) => "enters composition",
+            Self::Exit(_) => "exits composition",
+            Self::Recursive(_) => "recursive composition",
+        }
+    }
+
+    /// The slug-safe `data-boundary` attribute value for CSS tinting (#156).
+    pub fn data_slug(&self) -> &'static str {
+        match self {
+            Self::Enter(_) => "enter",
+            Self::Exit(_) => "exit",
+            Self::Recursive(_) => "recursive",
+        }
+    }
+
+    /// The composition label this crossing names — the per-instance `String` carried by
+    /// every variant.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Enter(label) | Self::Exit(label) | Self::Recursive(label) => label,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TraceEndpointView {
     pub stage_id: String,
@@ -2457,6 +2497,33 @@ mod tests {
         derive_pipeline_view, derive_resolved_pipeline_view,
     };
     use clinker_plan::config::{CompileContext, parse_config};
+
+    /// #156: the boundary-marker presentation (glyph/verb/slug) lives on
+    /// `BoundaryHopKind` so the panel marker and the precision-badge tooltip share one
+    /// source of truth. Pin the exact strings here — they had zero coverage when spelled
+    /// inline in the RSX. The per-instance label is the carried composition name.
+    #[test]
+    fn boundary_hop_kind_presentation_strings() {
+        let enter = BoundaryHopKind::Enter("comp".to_string());
+        let exit = BoundaryHopKind::Exit("comp".to_string());
+        let recursive = BoundaryHopKind::Recursive("comp".to_string());
+
+        assert_eq!(enter.glyph(), "\u{21B3}");
+        assert_eq!(enter.verb(), "enters composition");
+        assert_eq!(enter.data_slug(), "enter");
+
+        assert_eq!(exit.glyph(), "\u{21A5}");
+        assert_eq!(exit.verb(), "exits composition");
+        assert_eq!(exit.data_slug(), "exit");
+
+        assert_eq!(recursive.glyph(), "\u{21BA}");
+        assert_eq!(recursive.verb(), "recursive composition");
+        assert_eq!(recursive.data_slug(), "recursive");
+
+        assert_eq!(enter.label(), "comp");
+        assert_eq!(exit.label(), "comp");
+        assert_eq!(recursive.label(), "comp");
+    }
 
     const VARIANT_PIPELINE: &str = r#"
 pipeline:

@@ -5957,6 +5957,13 @@ input:-webkit-autofill:focus {
   color: var(--klinx-text-dim);
 }
 
+/* "originated N compositions deep" (#156): the cross-boundary depth, set apart from
+   the plain upstream/downstream/role counts with the verdigris accent so the reader
+   sees at a glance that the lineage descended through composition walls. */
+.klinx-field-lineage-depth {
+  color: var(--klinx-verdigris);
+}
+
 .klinx-field-warning,
 .klinx-field-trace-empty {
   margin: 10px 16px;
@@ -6065,6 +6072,59 @@ input:-webkit-autofill:focus {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--klinx-text);
+}
+
+/* Composition-boundary crossing marker (#156): a small inline tag under the hop's
+   stage/field naming the composition wall the lineage crosses. Themed off the
+   neighbouring `.klinx-field-trace-cxl` line — same dim ui font and tucked-under
+   placement — and tinted per crossing kind via `data-boundary`, reusing the same
+   palette as the edge-kind and precision chips so the marker reads as part of the
+   trace row, not a separate widget. */
+.klinx-field-trace-boundary {
+  display: inline-flex;
+  gap: 5px;
+  align-items: baseline;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 7px;
+  border: 1px solid var(--klinx-border-subtle);
+  border-radius: 2px;
+  font-family: var(--klinx-font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--klinx-iron);
+  background: var(--klinx-char);
+}
+
+.klinx-field-trace-boundary-glyph {
+  flex: none;
+  font-size: 11px;
+}
+
+.klinx-field-trace-boundary-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Descending INTO a body reads calm verdigris (same as a DIRECT derive edge). */
+.klinx-field-trace-boundary[data-boundary="enter"] {
+  color: var(--klinx-verdigris);
+  border-color: rgba(67, 179, 174, 0.45);
+}
+
+/* Resurfacing OUT of a body is the quiet iron passthrough tone. */
+.klinx-field-trace-boundary[data-boundary="exit"] {
+  color: var(--klinx-iron);
+  border-color: var(--klinx-border-subtle);
+}
+
+/* A recursive (self-referential) crossing is a dead end — hazard amber, matching the
+   Approximate precision tier it carries. */
+.klinx-field-trace-boundary[data-boundary="recursive"] {
+  color: var(--klinx-hazard);
+  border-color: rgba(212, 160, 23, 0.45);
 }
 
 .klinx-field-trace-main {
