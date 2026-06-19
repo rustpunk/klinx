@@ -57,7 +57,7 @@ pub fn SettingsOverlay() -> Element {
                             {
                                 let current_theme = (tab_mgr.theme)();
                                 rsx! {
-                                    for variant in [KilnTheme::Oxide, KilnTheme::Enamel] {
+                                    for variant in [KilnTheme::Oxide, KilnTheme::Enamel, KilnTheme::Arc] {
                                         button {
                                             class: if current_theme == variant {
                                                 "klinx-settings-theme-btn klinx-settings-theme-btn--active"
@@ -68,6 +68,7 @@ pub fn SettingsOverlay() -> Element {
                                             {match variant {
                                                 KilnTheme::Oxide => "Oxide (Dark)",
                                                 KilnTheme::Enamel => "Enamel (Light)",
+                                                KilnTheme::Arc => "Arc (Dark)",
                                             }}
                                         }
                                     }

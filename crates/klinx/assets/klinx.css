@@ -194,6 +194,69 @@
 [data-theme="enamel"] ::-webkit-scrollbar-thumb { background: var(--klinx-scrollbar-thumb); }
 [data-theme="enamel"] ::-webkit-scrollbar-thumb:hover { background: #4A5462; }
 
+/* ── 2c. Arc Theme Overrides ───────────────────────────────────────────────
+   Dark, high-contrast "electrified" Rustpunk surface: a cold blue-black ground
+   (hue ~258) under glowing ember/patina neons. The energized counterpart to
+   Oxide — values authored in OKLCH per RUSTPUNK_ARC_ADDENDUM.md so the
+   Contrast Law (every fg/bg pair ΔL ≥ 0.40) and Balance Law (ember leads,
+   patina supports) hold by construction. Arc is dark like Oxide, so it inherits
+   the :root canvas scanline/glow component styling.
+   Activated via data-theme="arc" on the root .klinx-app element.
+   ─────────────────────────────────────────────────────────────────────── */
+[data-theme="arc"] {
+  /* Accent colours — neon set mapped onto the rustpunk slots */
+  --klinx-verdigris:   oklch(0.820 0.145 182);  /* --patina   (secondary) */
+  --klinx-hazard:      oklch(0.860 0.170 112);  /* --acid     (warn)      */
+  --klinx-ember:       oklch(0.760 0.178 52);   /* --ember    (primary)   */
+  --klinx-phosphor:    oklch(0.850 0.150 68);   /* --ember-hi (gold)      */
+  --klinx-oxide-red:   oklch(0.780 0.150 30);   /* --coral    (aux)       */
+  --klinx-ok-green:    oklch(0.820 0.145 182);  /* --patina   (online/ok) */
+
+  /* Neutral palette — warm off-white ink down to the muted steel floor */
+  --klinx-bone:        oklch(0.935 0.015 85);   /* --text    */
+  --klinx-iron:        oklch(0.745 0.020 75);   /* --text-2  */
+  --klinx-text-floor:  oklch(0.650 0.022 250);  /* --text-3 (muted floor) */
+
+  /* Surface layers (darkest → lightest) — cold blue-black grounds */
+  --klinx-char:        oklch(0.165 0.020 258);  /* --base */
+  --klinx-char-raised: oklch(0.195 0.022 258);  /* --surface */
+  --klinx-char-surface:oklch(0.130 0.018 258);  /* --void (deepest/code) */
+
+  /* Border tiers */
+  --klinx-border-subtle: oklch(0.330 0.026 258);  /* --line        */
+  --klinx-border-medium: oklch(0.390 0.028 258);
+  --klinx-border-strong: oklch(0.450 0.030 258);  /* --line-bright */
+
+  /* Typography — Arc reads like a powered HUD (shares Oxide's bundled fonts) */
+  --klinx-font-ui:   'Chakra Petch', 'Segoe UI', sans-serif;
+  --klinx-font-code: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+
+  /* Extended palette — Arc overrides */
+  --klinx-canvas-bg:    oklch(0.165 0.020 258);
+  --klinx-canvas-dot:   oklch(0.450 0.030 258 / 0.30);
+  --klinx-panel-deep:   oklch(0.130 0.018 258);
+  --klinx-panel-dark:   oklch(0.195 0.022 258);
+  --klinx-plate-default:oklch(0.195 0.022 258);
+  --klinx-plate-hover:  oklch(0.245 0.024 258);  /* --surface-2 */
+  --klinx-plate-field:  oklch(0.130 0.018 258);  /* inputs on --void */
+  --klinx-text-bright:  oklch(0.935 0.015 85);
+  --klinx-text-dim:     oklch(0.650 0.022 250);
+  --klinx-accent-source:    oklch(0.820 0.145 182);  /* patina   */
+  --klinx-accent-transform: oklch(0.760 0.178 52);   /* ember    */
+  --klinx-accent-output:    oklch(0.780 0.150 30);   /* coral    */
+  --klinx-accent-filter:    oklch(0.885 0.095 222);  /* --arc    */
+  --klinx-accent-derive:    oklch(0.860 0.170 112);  /* acid     */
+  --klinx-accent-compute:   oklch(0.850 0.150 68);   /* ember-hi */
+  --klinx-accent-join:      oklch(0.885 0.095 222);  /* --arc    */
+  --klinx-scrollbar-track:  oklch(0.195 0.022 258);
+  --klinx-scrollbar-thumb:  oklch(0.330 0.026 258);
+}
+
+/* Arc scrollbar overrides */
+[data-theme="arc"] ::-webkit-scrollbar-track { background: var(--klinx-scrollbar-track); }
+[data-theme="arc"] ::-webkit-scrollbar-thumb { background: var(--klinx-scrollbar-thumb); }
+[data-theme="arc"] ::-webkit-scrollbar-thumb:hover { background: var(--klinx-border-strong); }
+
 /* Enamel canvas background — dot grid replaces Blueprint line grid */
 [data-theme="enamel"] .klinx-canvas-panel {
   background-color: var(--klinx-canvas-bg);
