@@ -1748,17 +1748,20 @@ fn trace_tree(
 /// [`enter_body`]. A resolve/map miss returns `false` (degrade to a leaf).
 ///
 /// The in-body BFS that follows an `Enter` rides the body scope's `field_edges`, which
-/// are now derive-aware (#174): a column COMPUTED inside the body (`emit c = a + 1`)
-/// draws a derive cable to the producer column it is computed from, so the trace
-/// follows it to the column's true in-body origin and resurfaces to the outer source —
-/// it no longer dead-ends at the computed column's in-body row. A carried column still
-/// traces straight through.
+/// are derive-aware (#174) and, after #180 PR2, also carry the body's influence and
+/// group-by edges: a column COMPUTED inside the body — by a `Transform` (`emit c = a +
+/// 1`) OR an `Aggregation` (`emit total = sum(x)`, #180 GAP 1) — draws a derive cable to
+/// the producer column it is computed from, so the trace follows it to the column's true
+/// in-body origin and resurfaces to the outer source instead of dead-ending. A carried
+/// column still traces straight through.
 ///
-/// Residual gap (Transform-only coverage): derive cables are emitted for columns
-/// computed by a body `Transform` (the only body node that carries a CXL program on the
-/// plan node). A column computed by a body `Aggregation` or `Combine` still dead-ends at
-/// its in-body row, and body-internal influence edges (Filter/GroupBy/JoinKey/Conditional)
-/// are not drawn — both are follow-ups, not #174 regressions.
+/// Coverage / residual gap: the body now matches the top level on Transform +
+/// Aggregation derive (#180 GAP 1), Route `Conditional` / Cull `Filter` / Aggregate
+/// `GroupBy` influence edges (#180 GAP 2), and graded multi-producer fan-in (#180 GAP 3).
+/// **Combine is NOT at parity** (engine-blocked, clinker#621): a column computed by a
+/// body `Combine` still dead-ends at its in-body row, and a body Combine draws no
+/// `JoinKey` influence edge — its computed columns and typed `where` predicate are not
+/// reachable from a `BoundBody`.
 #[allow(clippy::too_many_arguments)]
 fn descend_into_composition(
     item: &Frontier,
