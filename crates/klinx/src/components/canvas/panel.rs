@@ -1217,16 +1217,25 @@ pub fn CanvasPanel() -> Element {
     //
     // The effect reads the signals that SELECT which view is shown — the
     // composition document, the drill stack, the channel view mode, and the
-    // underlying pipeline/plan signals — so it re-subscribes to each and re-runs
-    // whenever any of them changes (i.e. on exactly the swaps above), resetting
-    // the hover. It does NOT read pan/zoom/hover, so a pure interaction never
-    // clears the highlight. Reading reactive signals *inside* the effect is what
-    // drives re-runs (a captured plain value would not); the write lives in the
-    // effect, never the render body.
+    // pipeline/partial-pipeline presence plus the active tab id — so it
+    // re-subscribes to each and re-runs whenever any of them changes (i.e. on
+    // exactly the swaps above), resetting the hover. It does NOT read pan/zoom/
+    // hover, so a pure interaction never clears the highlight. Reading reactive
+    // signals *inside* the effect is what drives re-runs (a captured plain value
+    // would not); the write lives in the effect, never the render body.
     use_effect(move || {
-        // Fingerprint the active view by reading its selecting signals. We read
-        // the displayed stages' identities under each branch so a composition
-        // switch (same Raw view, different document) also re-runs the effect.
+        // Fingerprint the active view's DOCUMENT IDENTITY — pipeline/composition/
+        // drill/channel-mode/tab — by reading its selecting signals. We read the
+        // displayed stages' identities under each branch so a composition switch
+        // (same Raw view, different document) also re-runs the effect.
+        //
+        // Deliberately NOT in the fingerprint: `compiled_plan` presence. The plan
+        // is compiled asynchronously and flips None→Some ~one tick after the
+        // pipeline settles, all WITHOUT changing which document is shown. Binding
+        // it here would fire this identity-reset a second time on that late
+        // arrival and wipe any hover/pin/selection the user placed in that window.
+        // The body overlay already reads `compiled_plan` reactively and tolerates
+        // None (empty-canvas fallback), so the late compile lands there, not here.
         let comp_ids: Option<Vec<String>> = state
             .composition_view
             .read()
@@ -1240,7 +1249,6 @@ pub fn CanvasPanel() -> Element {
             .collect();
         let mode = *state.channel_view_mode.read();
         let pipeline_present = state.pipeline.read().is_some();
-        let plan_present = state.compiled_plan.read().is_some();
         let partial_present = state.partial_pipeline.read().is_some();
         // The active tab id distinguishes two DIFFERENT loaded pipelines that share
         // the same fingerprint otherwise (both top-level, no drill, same channel
@@ -1256,7 +1264,6 @@ pub fn CanvasPanel() -> Element {
             &drill_key,
             mode,
             pipeline_present,
-            plan_present,
             partial_present,
             active_tab,
         );

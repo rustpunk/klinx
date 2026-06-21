@@ -8,11 +8,31 @@
 //! the single side effect that populates it.
 //!
 //! The effect is a sibling of the schema-validation effect in
-//! [`crate::hooks::pipeline_sync`]: it keys on `(pipeline, workspace)` and
-//! re-derives whenever either changes. `pipeline` is already debounced upstream
-//! (the ~150ms parse debounce in `AppShell`), so compile runs at most once per
-//! typing pause, never per keystroke. A pipeline with no composition nodes skips
-//! the workspace `.comp.yaml` scan entirely, so the common case is cheap.
+//! [`crate::hooks::pipeline_sync`]: it keys on `(pipeline, workspace,
+//! active_file)` and re-derives whenever any of them changes. `pipeline` is
+//! already debounced upstream (the ~150ms parse debounce in `AppShell`), so
+//! compile runs at most once per typing pause, never per keystroke. A pipeline
+//! with no composition nodes skips the workspace `.comp.yaml` scan entirely, so
+//! the common case is cheap.
+//!
+//! The compile itself runs **off the render thread**. A composition pipeline
+//! drives the engine's recursive workspace `.comp.yaml` scan, which is too heavy
+//! to run synchronously inside `use_effect` on the desktop UI thread — doing so
+//! blocks rendering on every debounced parse. Instead the owned
+//! [`PipelineConfig`] is moved into [`tokio::task::spawn_blocking`] (Dioxus
+//! desktop's `spawn` runs futures in a tokio runtime context), and only the
+//! cheap `compiled_plan.set` happens back on the UI thread. This relies on
+//! `CompiledPlan: Send + Sync` and `PipelineConfig: Send + Sync` (asserted by the
+//! `const _` below) so the config can cross the thread boundary and the plan can
+//! come back.
+//!
+//! Each compile carries a monotonic **generation**. The effect bumps the
+//! generation at the start of EVERY run — including the no-pipeline / no-anchor
+//! clears, not just dispatches — and the async continuation drops its result if a
+//! newer run has since occurred, so a slow in-flight compile can never clobber a
+//! newer pipeline's plan nor resurrect a stale plan over a clear. The generation
+//! and `compiled_plan` signals are read only via `.peek()` inside the
+//! effect/async block, so the effect does not subscribe to them and cannot loop.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,8 +42,13 @@ use dioxus::prelude::*;
 use clinker_plan::config::{CompileContext, PipelineConfig};
 use clinker_plan::plan::CompiledPlan;
 
-use crate::tab::{TabEntry, TabId};
 use crate::workspace::Workspace;
+
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<CompiledPlan>();
+    assert_send_sync::<PipelineConfig>();
+};
 
 /// Wire the active pipeline → `compiled_plan` compile effect.
 ///
@@ -35,65 +60,99 @@ use crate::workspace::Workspace;
 /// anchor compilation, or the pipeline fails to compile, the signal is cleared to
 /// `None`; every reader already tolerates `None` by taking the no-plan path.
 ///
-/// All signals are passed by value (`Signal<T>` is `Copy`).
+/// The compile runs off the render thread (`spawn_blocking`) under a generation
+/// guard; see the module docs. `active_file` is a deduping [`Memo`] (built in
+/// `AppShell`) over the active tab's path, so a Save-As — which writes the
+/// `tabs` signal — re-fires this effect, while unrelated tab-snapshot churn does
+/// not.
+///
+/// All signals are passed by value (`Signal<T>` / `Memo<T>` are `Copy`).
 pub fn use_compiled_plan(
     pipeline: Signal<Option<PipelineConfig>>,
     workspace: Signal<Option<Workspace>>,
-    tabs: Signal<Vec<TabEntry>>,
-    active_tab_id: Signal<Option<TabId>>,
+    active_file: Memo<Option<PathBuf>>,
     mut compiled_plan: Signal<Option<Arc<CompiledPlan>>>,
 ) {
+    // Monotonic compile generation. Declared once, before the effect, so it
+    // survives across re-runs and lets a newer dispatch invalidate an older
+    // in-flight compile. Read only via `.peek()` inside the effect/async block
+    // so the effect never subscribes to it.
+    let mut compile_gen = use_signal(|| 0u64);
+
     use_effect(move || {
-        // Subscribe to the two inputs that change the compiled output. A tab
-        // switch also resets `pipeline` (from the arriving tab's snapshot), so
-        // this fires on tab switches too — letting the active-file lookup below
-        // read non-reactively without missing a switch.
+        // Subscribe to the three inputs that change the compiled output. A tab
+        // switch resets `pipeline` (from the arriving tab's snapshot); a Save-As
+        // changes `active_file`. Both correctly re-fire the compile.
         let pl = (pipeline)();
         let ws = (workspace)();
+        let af = (active_file)();
 
-        // Clear the plan only when one is currently set, so a run with nothing
-        // to compile never notifies readers redundantly. (The success path
-        // below is deliberately unguarded — a fresh plan always carries new
-        // information.)
-        let mut clear = move || {
-            if compiled_plan.peek().is_some() {
-                compiled_plan.set(None);
-            }
-        };
+        // Bump the generation FIRST — before the early-return clears below — so
+        // that EVERY effect run, including the no-pipeline / no-anchor clears,
+        // supersedes any in-flight compile. Otherwise a slow compile dispatched
+        // under a prior valid pipeline would, on resume, still match its
+        // generation and resurrect a stale plan over a clear (e.g. the user
+        // breaks the YAML while a compile is in flight → `pipeline` → None →
+        // clear → the old compile lands a body for a pipeline that no longer
+        // parses). Read via `.peek()` so the effect never subscribes to it.
+        let generation = *compile_gen.peek() + 1;
+        compile_gen.set(generation);
 
-        let Some(config) = pl.as_ref() else {
+        // Own the config — it moves into `spawn_blocking` below, so it cannot be
+        // a borrow into `pl`.
+        let Some(config) = pl else {
             // No pipeline (parse error / partial / empty tab): nothing to
             // compile. Clear so a stale plan never lingers under a freshly
             // broken pipeline.
-            clear();
+            clear_plan(&mut compiled_plan);
             return;
         };
 
-        // Workspace-relative directory of the active pipeline file, for relative
-        // `use:` path resolution during composition binding. Read `tabs` /
-        // `active_tab_id` non-reactively: a tab switch resets `pipeline` (above),
-        // so the peeked path is always current for the pipeline being compiled,
-        // and we avoid recompiling on unrelated tab-list churn (snapshot syncs).
-        let active_file = {
-            let tabs_snapshot = tabs.peek();
-            active_file_path(&tabs_snapshot, *active_tab_id.peek())
-        };
-
-        let Some((root, pipeline_dir)) = compile_root(ws.as_ref(), active_file.as_deref()) else {
+        let Some((root, pipeline_dir)) = compile_root(ws.as_ref(), af.as_deref()) else {
             // Neither a workspace nor a saved file to anchor compilation against
             // (an unsaved scratch tab) — nothing to compile.
-            clear();
+            clear_plan(&mut compiled_plan);
             return;
         };
 
-        match compile_active(config, &root, pipeline_dir) {
-            Some(plan) => compiled_plan.set(Some(plan)),
-            // Compile diagnostics surface through the parse / schema-warning
-            // paths already; here we only clear the plan so dependent surfaces
-            // fall back to the no-plan path instead of showing a stale body.
-            None => clear(),
-        }
+        // Run the heavy compile off the UI thread. Only the `spawn_blocking`
+        // closure runs on the blocking pool; the async continuation (the
+        // generation check and the `compiled_plan` write) resumes on the Dioxus
+        // desktop executor that polls `spawn` — the same thread that owns the
+        // signal — so writing `compiled_plan` here is sound.
+        spawn(async move {
+            let plan =
+                tokio::task::spawn_blocking(move || compile_active(&config, &root, pipeline_dir))
+                    .await
+                    .ok()
+                    .flatten();
+
+            // A newer compile — or a clear — was dispatched while this one ran;
+            // drop its result so it cannot clobber the fresher state.
+            if *compile_gen.peek() != generation {
+                return;
+            }
+
+            match plan {
+                Some(p) => compiled_plan.set(Some(p)),
+                // Compile diagnostics surface through the parse / schema-warning
+                // paths already; here we only clear the plan so dependent
+                // surfaces fall back to the no-plan path instead of a stale body.
+                None => clear_plan(&mut compiled_plan),
+            }
+        });
     });
+}
+
+/// Clear `compiled_plan` only when one is currently set, so a run with nothing
+/// to compile never notifies readers redundantly. Shared by the synchronous
+/// no-pipeline / no-anchor early returns and the async compile-failure branch
+/// (the success path is deliberately unguarded — a fresh plan always carries new
+/// information).
+fn clear_plan(compiled_plan: &mut Signal<Option<Arc<CompiledPlan>>>) {
+    if compiled_plan.peek().is_some() {
+        compiled_plan.set(None);
+    }
 }
 
 /// Resolve the workspace root and workspace-relative pipeline directory the
@@ -107,11 +166,32 @@ pub fn use_compiled_plan(
 /// composition-free pipeline). Returns `None` only when there is neither a
 /// workspace nor a saved file to anchor compilation (an unsaved scratch tab).
 fn compile_root(ws: Option<&Workspace>, active_file: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
+    // Canonicalize the root and the active file used to derive `pipeline_dir`.
+    // The engine documents `CompileContext.workspace_root` as canonical; a
+    // symlinked or `..`-laden root would shift the `.comp.yaml` symbol-table keys
+    // relative to `pipeline_dir`, forcing the weaker filename-match fallback.
+    // Fall back to the path as-is when it does not yet exist on disk (e.g. tests
+    // and unsaved-but-named files), so canonicalize failure is non-fatal.
+    //
+    // Deliberately localized here rather than canonicalizing `Workspace.root` at
+    // load: the canonical form is needed only for the engine's symbol-table
+    // keying, and keeping it out of `Workspace.root` avoids leaking a
+    // canonicalized path (a `\\?\` verbatim path on Windows) into session
+    // persistence, the title bar, and the last-workspace tracker.
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+
     if let Some(ws) = ws {
-        return Some((ws.root.clone(), pipeline_dir_for(active_file, &ws.root)));
+        let root = canonical(&ws.root);
+        let af = active_file.map(canonical);
+        return Some((root.clone(), pipeline_dir_for(af.as_deref(), &root)));
     }
-    let dir = active_file.and_then(Path::parent)?;
-    Some((dir.to_path_buf(), PathBuf::new()))
+    // No workspace: anchor on the active file's own directory. `Path::parent` of
+    // a bare filename is `Some("")` (not `None`), which would wrongly compile
+    // against an empty root — filter that out.
+    let dir = active_file
+        .and_then(Path::parent)
+        .filter(|p| !p.as_os_str().is_empty())?;
+    Some((canonical(dir), PathBuf::new()))
 }
 
 /// Compile `config` against `workspace_root`, resolving relative `use:` paths
@@ -128,15 +208,6 @@ fn compile_active(
 ) -> Option<Arc<CompiledPlan>> {
     let ctx = CompileContext::with_pipeline_dir(workspace_root, pipeline_dir);
     config.compile(&ctx).ok().map(Arc::new)
-}
-
-/// File path of the active tab, if any. Pulled out so the effect can compute the
-/// pipeline directory from a borrowed snapshot of the tab list.
-fn active_file_path(tabs: &[TabEntry], active_tab_id: Option<TabId>) -> Option<PathBuf> {
-    let id = active_tab_id?;
-    tabs.iter()
-        .find(|t| t.id == id)
-        .and_then(|t| t.file_path.clone())
 }
 
 /// Workspace-relative directory of the pipeline file, for resolving relative
@@ -189,21 +260,6 @@ mod tests {
         assert_eq!(dir, PathBuf::new());
     }
 
-    #[test]
-    fn active_file_path_finds_the_active_tabs_path() {
-        let path = PathBuf::from("/ws/flow.yaml");
-        let file_tab = TabEntry::from_file(path.clone(), String::new());
-        let active = file_tab.id;
-        let tabs = vec![TabEntry::new_untitled(&[]), file_tab];
-        assert_eq!(active_file_path(&tabs, Some(active)), Some(path));
-    }
-
-    #[test]
-    fn active_file_path_is_none_when_no_tab_is_active() {
-        let tabs = vec![TabEntry::new_untitled(&[])];
-        assert_eq!(active_file_path(&tabs, None), None);
-    }
-
     fn workspace_at(root: &str) -> Workspace {
         Workspace {
             root: PathBuf::from(root),
@@ -234,6 +290,13 @@ mod tests {
     fn compile_root_is_none_with_no_workspace_and_no_file() {
         // An unsaved scratch tab has nothing to anchor compilation against.
         assert_eq!(compile_root(None, None), None);
+    }
+
+    #[test]
+    fn compile_root_is_none_with_no_workspace_and_a_bare_filename() {
+        // `Path::parent("flow.yaml")` is `Some("")`, not `None`; without the
+        // empty-path filter this would wrongly compile against an empty root.
+        assert_eq!(compile_root(None, Some(Path::new("flow.yaml"))), None);
     }
 
     /// End-to-end proof that the production compile core (`compile_active`)

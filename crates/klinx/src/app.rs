@@ -522,9 +522,18 @@ pub fn AppShell() -> Element {
     // ── Compile the active pipeline → compiled_plan ──────────────────────
     // Populates `compiled_plan` so the composition drill, the #171 body
     // overlay, and inspector provenance read a live plan instead of `None`
-    // (#184). Keyed on `(pipeline, workspace)`; resolves relative `use:` paths
-    // against the active file's workspace-relative directory.
-    crate::hooks::use_compiled_plan(pipeline, workspace, tabs, active_tab_id, compiled_plan);
+    // (#184). The compile runs off the render thread under a generation guard.
+    // Keyed on `(pipeline, workspace, active_file)`; resolves relative `use:`
+    // paths against the active file's workspace-relative directory.
+    //
+    // `active_file` is a deduping memo over the active tab's path: it subscribes
+    // to `tabs` + `active_tab_id` but only changes value when the active file
+    // path actually changes, so a Save-As (which writes `tabs`) re-fires the
+    // compile while unrelated tab-snapshot churn does not.
+    let active_file_path = use_memo(move || {
+        crate::tab::active_tab_file_path(&tabs.read(), (active_tab_id)()).cloned()
+    });
+    crate::hooks::use_compiled_plan(pipeline, workspace, active_file_path, compiled_plan);
 
     let current_ctx = (active_context)();
 
