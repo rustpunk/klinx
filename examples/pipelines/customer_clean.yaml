@@ -1,0 +1,34 @@
+# Imports the `clean_names` composition to normalize raw name fields.
+#
+# Demonstrates a `composition` node end-to-end: open this pipeline on the canvas
+# and use the `>` affordance on the `clean` node to drill into the composition
+# body (the in-context overlay) or open it full. The composition signature lives
+# at compositions/clean_names.comp.yaml.
+pipeline:
+  name: customer_clean
+
+nodes:
+  - type: source
+    name: people
+    config:
+      name: people
+      type: csv
+      path: ./data/people.csv
+      schema:
+        - { name: first_name, type: string }
+        - { name: last_name, type: string }
+
+  - type: composition
+    name: clean
+    input: people
+    use: ./compositions/clean_names.comp.yaml
+    inputs:
+      names: people
+
+  - type: output
+    name: cleaned_people
+    input: clean
+    config:
+      name: cleaned_people
+      type: csv
+      path: ./data/cleaned_people.csv

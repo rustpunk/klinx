@@ -13,12 +13,14 @@
 //! and these extractions are behavior-preserving.
 
 pub mod channels;
+pub mod compiled_plan;
 pub mod git_state;
 pub mod pipeline_sync;
 pub mod schema_index;
 pub mod session_persistence;
 
 pub use channels::use_channels;
+pub use compiled_plan::use_compiled_plan;
 pub use git_state::use_git_state;
 pub use pipeline_sync::use_pipeline_sync;
 pub use schema_index::use_schema_index;

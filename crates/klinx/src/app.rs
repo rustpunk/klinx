@@ -519,6 +519,13 @@ pub fn AppShell() -> Element {
         schema_warnings,
     );
 
+    // ── Compile the active pipeline → compiled_plan ──────────────────────
+    // Populates `compiled_plan` so the composition drill, the #171 body
+    // overlay, and inspector provenance read a live plan instead of `None`
+    // (#184). Keyed on `(pipeline, workspace)`; resolves relative `use:` paths
+    // against the active file's workspace-relative directory.
+    crate::hooks::use_compiled_plan(pipeline, workspace, tabs, active_tab_id, compiled_plan);
+
     let current_ctx = (active_context)();
 
     rsx! {
