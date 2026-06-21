@@ -355,6 +355,27 @@ pub fn promote_overlay_to_drill(
     drill.append(overlay);
 }
 
+/// A composition-binding diagnostic surfaced to the user (#187).
+///
+/// Emitted when a `composition` node's `use:` reference fails to bind (engine
+/// codes E101–E109): the engine drops that node's body from the compiled DAG
+/// **non-fatally** (its non-fatal gate keeps any `"E10"`-prefixed error and omits
+/// the node), so without surfacing this the drill / overlay / inspector provenance
+/// silently no-op — indistinguishable from "this node has no composition body".
+/// The canvas and inspector key off `node` to flag the offending node and explain
+/// why.
+///
+/// - `node` is the offending composition node's name; `None` for a pipeline-level
+///   diagnostic not attributable to a single node.
+/// - `code` is the engine diagnostic code (e.g. `"E103"`); empty for a synthesized
+///   fallback entry produced when a dropped node had no engine message naming it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompositionDiagnostic {
+    pub node: Option<String>,
+    pub code: String,
+    pub message: String,
+}
+
 /// A selected output field on the currently visible canvas.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectedField {
@@ -436,6 +457,12 @@ pub struct AppState {
     /// Compiled plan with channel overlay applied. None when no channel is
     /// loaded or in Raw mode. Wrapped in Arc because CompiledPlan is not Clone.
     pub compiled_plan: Signal<Option<Arc<CompiledPlan>>>,
+    /// Composition-binding diagnostics from the last compile (#187). Empty when
+    /// every `composition` node bound cleanly (or no plan is compiled). Populated
+    /// alongside `compiled_plan` by `use_compiled_plan`; the canvas flags the
+    /// offending node and the inspector lists the reason. See
+    /// [`CompositionDiagnostic`].
+    pub composition_diagnostics: Signal<Vec<CompositionDiagnostic>>,
 }
 
 /// Read the current `AppState` from context.

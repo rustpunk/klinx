@@ -38,6 +38,9 @@ pub fn SelectedInspector() -> Element {
         .iter()
         .map(|warning| format!("{warning:?}"))
         .collect::<Vec<_>>();
+    // #187: composition-binding diagnostics, filtered per-node inside
+    // `node_diagnostics` by the offending node name they carry.
+    let composition_diagnostics = (state.composition_diagnostics)();
     let channel_mode = *state.channel_view_mode.read();
     // Hold the compiled-plan read guard across the build (#155), mirroring the
     // pipeline guard: the lineage trace's `BodyScopeResolver` borrows the plan to
@@ -56,6 +59,7 @@ pub fn SelectedInspector() -> Element {
             compiled_plan_available,
             visible_errors: &visible_errors,
             schema_warnings: &schema_warning_strings,
+            composition_diagnostics: &composition_diagnostics,
         },
     );
     drop(pipeline_guard);

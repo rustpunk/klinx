@@ -84,6 +84,11 @@ pub fn AppShell() -> Element {
     let lineage_reveal_mode = use_signal(crate::state::LineageRevealMode::default);
     let compiled_plan: Signal<Option<std::sync::Arc<clinker_plan::plan::CompiledPlan>>> =
         use_signal(|| None);
+    // #187: composition-binding diagnostics from the last compile. Populated by
+    // `use_compiled_plan` alongside `compiled_plan` (no tab snapshot — the compile
+    // hook repopulates it on every tab/pipeline change, like `compiled_plan`).
+    let composition_diagnostics: Signal<Vec<crate::state::CompositionDiagnostic>> =
+        use_signal(Vec::new);
     let composition_drill_stack: Signal<Vec<crate::state::CompositionDrillFrame>> =
         use_signal(Vec::new);
     // #171: the in-context body-overlay stack, parallel to the drill stack. Empty
@@ -361,6 +366,7 @@ pub fn AppShell() -> Element {
         channel_view_mode,
         lineage_reveal_mode,
         compiled_plan,
+        composition_diagnostics,
         composition_drill_stack,
         composition_overlay_stack,
     };
@@ -533,7 +539,13 @@ pub fn AppShell() -> Element {
     let active_file_path = use_memo(move || {
         crate::tab::active_tab_file_path(&tabs.read(), (active_tab_id)()).cloned()
     });
-    crate::hooks::use_compiled_plan(pipeline, workspace, active_file_path, compiled_plan);
+    crate::hooks::use_compiled_plan(
+        pipeline,
+        workspace,
+        active_file_path,
+        compiled_plan,
+        composition_diagnostics,
+    );
 
     let current_ctx = (active_context)();
 

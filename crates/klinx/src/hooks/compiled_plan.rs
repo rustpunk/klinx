@@ -39,10 +39,32 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use clinker_plan::config::{CompileContext, PipelineConfig};
+use clinker_core_types::Diagnostic;
+use clinker_plan::config::{CompileContext, PipelineConfig, PipelineNode};
 use clinker_plan::plan::CompiledPlan;
 
+use crate::state::CompositionDiagnostic;
 use crate::workspace::Workspace;
+
+/// Engine diagnostic codes for composition binding failures that survive on the
+/// SUCCESS path of [`PipelineConfig::compile_with_diagnostics`].
+///
+/// The engine's final non-fatal gate keeps any error whose code starts with
+/// `"E10"` and drops the offending composition node from the DAG, returning the
+/// rest as `Ok` (`clinker-plan` `config/pipeline.rs`: `!d.code.starts_with("E10")`
+/// is the fatal predicate). So E101–E109 ride along on the Ok path — exactly the
+/// silent no-op #187 surfaces — while a node-named diagnostic attributes to that
+/// node. (E111 empty-body and E112 runtime-depth do NOT start with `"E10"`, so
+/// they are fatal / runtime and never reach this filter; the hard-error path is a
+/// separate gap, see the `compile_active` `None` branch.)
+///
+/// Listed explicitly rather than prefix-matched so the set is a deliberate
+/// decision. In practice the node-attributable plan-compile codes are E101–E104,
+/// E107, and E108; E105/E106/E109 are kept for registry parity but are not emitted
+/// by the plan composition-bind path, so they simply never match.
+const COMPOSITION_DIAGNOSTIC_CODES: &[&str] = &[
+    "E101", "E102", "E103", "E104", "E105", "E106", "E107", "E108", "E109",
+];
 
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -66,12 +88,20 @@ const _: fn() = || {
 /// `tabs` signal — re-fires this effect, while unrelated tab-snapshot churn does
 /// not.
 ///
+/// Composition-binding diagnostics (#187) ride alongside the plan:
+/// `compile_with_diagnostics` returns the non-fatal E101–E109 diagnostics for any
+/// `composition` node whose `use:` failed to bind, and `composition_diagnostics`
+/// is set under the same generation guard so the canvas / inspector can flag the
+/// offending node instead of silently no-opping the drill. It is cleared whenever
+/// the plan is cleared.
+///
 /// All signals are passed by value (`Signal<T>` / `Memo<T>` are `Copy`).
 pub fn use_compiled_plan(
     pipeline: Signal<Option<PipelineConfig>>,
     workspace: Signal<Option<Workspace>>,
     active_file: Memo<Option<PathBuf>>,
     mut compiled_plan: Signal<Option<Arc<CompiledPlan>>>,
+    mut composition_diagnostics: Signal<Vec<CompositionDiagnostic>>,
 ) {
     // Monotonic compile generation. Declared once, before the effect, so it
     // survives across re-runs and lets a newer dispatch invalidate an older
@@ -105,6 +135,7 @@ pub fn use_compiled_plan(
             // compile. Clear so a stale plan never lingers under a freshly
             // broken pipeline.
             clear_plan(&mut compiled_plan);
+            clear_diagnostics(&mut composition_diagnostics);
             return;
         };
 
@@ -112,6 +143,7 @@ pub fn use_compiled_plan(
             // Neither a workspace nor a saved file to anchor compilation against
             // (an unsaved scratch tab) — nothing to compile.
             clear_plan(&mut compiled_plan);
+            clear_diagnostics(&mut composition_diagnostics);
             return;
         };
 
@@ -121,7 +153,7 @@ pub fn use_compiled_plan(
         // desktop executor that polls `spawn` — the same thread that owns the
         // signal — so writing `compiled_plan` here is sound.
         spawn(async move {
-            let plan =
+            let compiled =
                 tokio::task::spawn_blocking(move || compile_active(&config, &root, pipeline_dir))
                     .await
                     .ok()
@@ -133,12 +165,23 @@ pub fn use_compiled_plan(
                 return;
             }
 
-            match plan {
-                Some(p) => compiled_plan.set(Some(p)),
-                // Compile diagnostics surface through the parse / schema-warning
-                // paths already; here we only clear the plan so dependent
-                // surfaces fall back to the no-plan path instead of a stale body.
-                None => clear_plan(&mut compiled_plan),
+            match compiled {
+                Some((plan, diagnostics)) => {
+                    compiled_plan.set(Some(plan));
+                    // Composition-binding diagnostics ride with the plan (#187).
+                    // Set-if-changed so a clean compile (the common case, empty
+                    // diagnostics) does not notify the canvas/inspector on every
+                    // debounced re-compile.
+                    set_diagnostics(&mut composition_diagnostics, diagnostics);
+                }
+                // Hard compile failure (E200/E153/…). Those surface through the
+                // parse / schema-warning paths already; here we only clear the
+                // plan and its composition diagnostics so dependent surfaces fall
+                // back to the no-plan path instead of a stale body.
+                None => {
+                    clear_plan(&mut compiled_plan);
+                    clear_diagnostics(&mut composition_diagnostics);
+                }
             }
         });
     });
@@ -152,6 +195,27 @@ pub fn use_compiled_plan(
 fn clear_plan(compiled_plan: &mut Signal<Option<Arc<CompiledPlan>>>) {
     if compiled_plan.peek().is_some() {
         compiled_plan.set(None);
+    }
+}
+
+/// Clear composition diagnostics only when some are currently set, so a run with
+/// nothing to compile never notifies readers redundantly. Mirrors [`clear_plan`].
+fn clear_diagnostics(diagnostics: &mut Signal<Vec<CompositionDiagnostic>>) {
+    if !diagnostics.peek().is_empty() {
+        diagnostics.set(Vec::new());
+    }
+}
+
+/// Replace composition diagnostics only when they differ from the current set.
+/// A clean compile (the common case) yields an empty `next`, so this no-ops when
+/// the signal is already empty — keeping a debounced re-compile from re-rendering
+/// the canvas/inspector on every keystroke pause.
+fn set_diagnostics(
+    diagnostics: &mut Signal<Vec<CompositionDiagnostic>>,
+    next: Vec<CompositionDiagnostic>,
+) {
+    if *diagnostics.peek() != next {
+        diagnostics.set(next);
     }
 }
 
@@ -195,8 +259,9 @@ fn compile_root(ws: Option<&Workspace>, active_file: Option<&Path>) -> Option<(P
 }
 
 /// Compile `config` against `workspace_root`, resolving relative `use:` paths
-/// from `pipeline_dir`. Returns `None` on any compile error (the readers all
-/// tolerate `None`).
+/// from `pipeline_dir`. Returns `None` on a hard compile error (the readers all
+/// tolerate `None`), otherwise the plan plus any composition-binding diagnostics
+/// (#187) collected during a successful — but partially-degraded — compile.
 ///
 /// This is the pure core of [`use_compiled_plan`], extracted so the resolution
 /// path — the workspace `.comp.yaml` scan plus relative `use:` binding — is
@@ -205,9 +270,93 @@ fn compile_active(
     config: &PipelineConfig,
     workspace_root: &Path,
     pipeline_dir: PathBuf,
-) -> Option<Arc<CompiledPlan>> {
+) -> Option<(Arc<CompiledPlan>, Vec<CompositionDiagnostic>)> {
     let ctx = CompileContext::with_pipeline_dir(workspace_root, pipeline_dir);
-    config.compile(&ctx).ok().map(Arc::new)
+    // `compile_with_diagnostics` returns the non-fatal diagnostics (including the
+    // E101–E109 composition-binding errors that the plain `compile` discarded) on
+    // the success path; a dropped composition node still yields `Ok` with the
+    // node omitted from the DAG.
+    let (plan, engine_diagnostics) = config.compile_with_diagnostics(&ctx).ok()?;
+    let failed = failed_composition_nodes(config, &plan);
+    let diagnostics = build_composition_diagnostics(&failed, &engine_diagnostics);
+    Some((Arc::new(plan), diagnostics))
+}
+
+/// The names of every `composition` node in `config` that the engine dropped from
+/// the compiled DAG — i.e. declared in the config but absent from
+/// [`composition_body_assignments`](clinker_plan::plan::bind_schema::CompileArtifacts::composition_body_assignments).
+///
+/// This body-assignment diff is the authoritative source of "which compositions
+/// failed to bind": it reads the engine's own record of what bound, so it is
+/// immune to diagnostic message-format drift. The engine messages then only
+/// *enrich* each failed node with a reason (see [`build_composition_diagnostics`]).
+fn failed_composition_nodes(config: &PipelineConfig, plan: &CompiledPlan) -> Vec<String> {
+    let bound = &plan.artifacts().composition_body_assignments;
+    config
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.value, PipelineNode::Composition { .. }))
+        .map(|node| node.value.name().to_string())
+        .filter(|name| !bound.contains_key(name))
+        .collect()
+}
+
+/// True when `code` is one of the engine's composition binding/expansion
+/// diagnostics (the [`COMPOSITION_DIAGNOSTIC_CODES`] set).
+fn is_composition_diagnostic(code: &str) -> bool {
+    COMPOSITION_DIAGNOSTIC_CODES.contains(&code)
+}
+
+/// True when `message` names composition node `node`.
+///
+/// The engine formats node names with `{node_name:?}` — i.e. quoted —
+/// (`composition node "clean": …`), so matching the quoted form avoids a
+/// substring collision between e.g. `clean` and `clean_extra`. A failure of this
+/// heuristic only costs a richer message (the node is still flagged from the
+/// body-assignment diff and gets the generic fallback in
+/// [`build_composition_diagnostics`]); a test pins the engine's current format.
+fn diagnostic_names_node(message: &str, node: &str) -> bool {
+    message.contains(&format!("{node:?}"))
+}
+
+/// Build the user-facing composition diagnostics for a successful compile.
+///
+/// `failed_nodes` (from [`failed_composition_nodes`]) is the authoritative set of
+/// dropped composition nodes and drives the canvas flag. For each, the engine's
+/// composition diagnostics that name it supply the *why* (one entry per matching
+/// message, preserving the engine `code`). A dropped node that no engine message
+/// named still gets a single generic entry, so a flagged node is never left
+/// without a reason to show.
+fn build_composition_diagnostics(
+    failed_nodes: &[String],
+    engine_diagnostics: &[Diagnostic],
+) -> Vec<CompositionDiagnostic> {
+    let mut out = Vec::new();
+    for node in failed_nodes {
+        let before = out.len();
+        for diagnostic in engine_diagnostics
+            .iter()
+            .filter(|d| is_composition_diagnostic(&d.code))
+            .filter(|d| diagnostic_names_node(&d.message, node))
+        {
+            out.push(CompositionDiagnostic {
+                node: Some(node.clone()),
+                code: diagnostic.code.clone(),
+                message: diagnostic.message.clone(),
+            });
+        }
+        if out.len() == before {
+            out.push(CompositionDiagnostic {
+                node: Some(node.clone()),
+                code: String::new(),
+                message: format!(
+                    "composition `{node}` failed to bind — its `use:` body was \
+                     dropped from the compiled pipeline"
+                ),
+            });
+        }
+    }
+    out
 }
 
 /// Workspace-relative directory of the pipeline file, for resolving relative
@@ -317,7 +466,7 @@ mod tests {
 
         let config = parse_config(&yaml).expect("example pipeline parses");
         // The pipeline file sits at the workspace root → empty pipeline_dir.
-        let plan = compile_active(&config, &ws_root, PathBuf::new())
+        let (plan, diagnostics) = compile_active(&config, &ws_root, PathBuf::new())
             .expect("example pipeline compiles against the examples workspace");
 
         let frame = crate::state::resolve_composition_frame(&plan, "clean")
@@ -326,5 +475,165 @@ mod tests {
             plan.body_of(frame.body_id).is_some(),
             "the resolved body is present in the compiled plan",
         );
+        assert!(
+            diagnostics.is_empty(),
+            "a cleanly-binding example pipeline carries no composition diagnostics, got {diagnostics:?}",
+        );
+    }
+
+    /// The #187 headline scenario: a `composition` node whose `use:` path does not
+    /// resolve compiles non-fatally (the plan is still populated) but the node is
+    /// dropped from the DAG — and `compile_active` now surfaces that as an E103
+    /// diagnostic keyed to the node, instead of the old silent no-op.
+    #[test]
+    fn mispathed_use_surfaces_an_e103_diagnostic_for_the_node() {
+        use clinker_plan::config::parse_config;
+
+        let ws_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/pipelines")
+            .canonicalize()
+            .expect("examples workspace exists");
+
+        // A composition node pointing at a non-existent `.comp.yaml`. The output
+        // reads from the source (not the broken composition) so dropping `clean`
+        // still leaves a valid, compilable DAG.
+        let yaml = r#"
+pipeline:
+  name: broken_use
+nodes:
+  - type: source
+    name: people
+    config:
+      name: people
+      type: csv
+      path: ./data/people.csv
+      schema:
+        - { name: first_name, type: string }
+        - { name: last_name, type: string }
+  - type: composition
+    name: clean
+    input: people
+    use: ./compositions/does_not_exist.comp.yaml
+    inputs:
+      names: people
+  - type: output
+    name: out
+    input: people
+    config:
+      name: out
+      type: csv
+      path: ./data/out.csv
+"#;
+
+        let config = parse_config(yaml).expect("pipeline parses");
+        let (plan, diagnostics) = compile_active(&config, &ws_root, PathBuf::new())
+            .expect("a mis-pathed `use:` is non-fatal: the plan still compiles");
+
+        // The body is dropped → the drill would resolve to nothing …
+        assert!(
+            crate::state::resolve_composition_frame(&plan, "clean").is_none(),
+            "the mis-pathed composition node has no bound body",
+        );
+        // … but the failure is no longer silent.
+        let clean: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.node.as_deref() == Some("clean"))
+            .collect();
+        assert!(
+            !clean.is_empty(),
+            "the dropped composition node is flagged, got {diagnostics:?}",
+        );
+        assert!(
+            clean.iter().any(|d| d.code == "E103"),
+            "the mis-pathed `use:` surfaces as E103, got {clean:?}",
+        );
+    }
+
+    fn diag(code: &str, message: &str) -> Diagnostic {
+        use clinker_core_types::span::{FileId, Span};
+        use std::num::NonZeroU32;
+        let file = FileId::new(NonZeroU32::new(1).expect("1 is non-zero"));
+        Diagnostic::error(
+            code,
+            message,
+            clinker_core_types::LabeledSpan::new(Span::point(file, 0), None),
+        )
+    }
+
+    #[test]
+    fn is_composition_diagnostic_matches_the_e10x_family_only() {
+        assert!(is_composition_diagnostic("E101"));
+        assert!(is_composition_diagnostic("E103"));
+        assert!(is_composition_diagnostic("E108"));
+        assert!(is_composition_diagnostic("E109"));
+        // Not on the non-fatal Ok-path set: E111/E112 are fatal/runtime (do not
+        // start with "E10"); E110 is an unused gap; E200/E004 are non-composition.
+        assert!(!is_composition_diagnostic("E110"));
+        assert!(!is_composition_diagnostic("E111"));
+        assert!(!is_composition_diagnostic("E112"));
+        assert!(!is_composition_diagnostic("E200"));
+        assert!(!is_composition_diagnostic("E004"));
+    }
+
+    #[test]
+    fn diagnostic_names_node_matches_the_quoted_engine_format() {
+        // The engine emits `composition node "clean": …` (the `{:?}` quoted form).
+        let msg = r#"composition node "clean": `use: x` does not match any .comp.yaml"#;
+        assert!(diagnostic_names_node(msg, "clean"));
+        // A prefix must not match a longer name and vice-versa (the quoting guards
+        // against the `clean` / `clean_extra` substring collision).
+        assert!(!diagnostic_names_node(msg, "clea"));
+        let msg_extra = r#"composition node "clean_extra": broken"#;
+        assert!(!diagnostic_names_node(msg_extra, "clean"));
+        assert!(diagnostic_names_node(msg_extra, "clean_extra"));
+    }
+
+    #[test]
+    fn build_composition_diagnostics_attributes_engine_messages_to_failed_nodes() {
+        let failed = vec!["clean".to_string()];
+        let engine = vec![
+            diag(
+                "E103",
+                r#"composition node "clean": `use: x` does not match"#,
+            ),
+            // A non-composition diagnostic is ignored.
+            diag("E200", r#"composition node "clean": type error"#),
+            // A composition diagnostic for a different (bound) node is ignored.
+            diag("E104", r#"composition node "other": missing input"#),
+        ];
+        let got = build_composition_diagnostics(&failed, &engine);
+        assert_eq!(got.len(), 1, "only the matching E103 is surfaced: {got:?}");
+        assert_eq!(got[0].node.as_deref(), Some("clean"));
+        assert_eq!(got[0].code, "E103");
+    }
+
+    #[test]
+    fn build_composition_diagnostics_synthesizes_a_fallback_for_unnamed_failures() {
+        // A dropped node with no engine message naming it (e.g. a cycle whose
+        // message lists paths, not the node) still gets a flagged entry.
+        let failed = vec!["loop_node".to_string()];
+        let engine = vec![diag(
+            "E107",
+            "cycle in composition `use:` graph: a.comp.yaml -> b.comp.yaml -> a.comp.yaml",
+        )];
+        let got = build_composition_diagnostics(&failed, &engine);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].node.as_deref(), Some("loop_node"));
+        assert_eq!(got[0].code, "", "fallback entry carries no engine code");
+        assert!(got[0].message.contains("loop_node"));
+    }
+
+    #[test]
+    fn build_composition_diagnostics_keeps_every_message_for_a_node() {
+        // A schema mismatch can emit several E102s for one node (one per column);
+        // all are preserved so the inspector lists each.
+        let failed = vec!["clean".to_string()];
+        let engine = vec![
+            diag("E102", r#"composition node "clean": column "a" missing"#),
+            diag("E102", r#"composition node "clean": column "b" missing"#),
+        ];
+        let got = build_composition_diagnostics(&failed, &engine);
+        assert_eq!(got.len(), 2, "both column errors surface: {got:?}");
+        assert!(got.iter().all(|d| d.node.as_deref() == Some("clean")));
     }
 }
