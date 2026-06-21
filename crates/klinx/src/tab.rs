@@ -207,3 +207,43 @@ impl TabEntry {
         self.file_path.as_ref().map(|p| p.display().to_string())
     }
 }
+
+/// File path of the active tab, if any.
+///
+/// Shared by the compile effect's active-file memo (`use_compiled_plan`) and
+/// session persistence (`workspace::save_full_session`), which both need the
+/// active tab's `file_path` and previously duplicated this lookup.
+pub fn active_tab_file_path(tabs: &[TabEntry], active: Option<TabId>) -> Option<&PathBuf> {
+    let id = active?;
+    tabs.iter()
+        .find(|t| t.id == id)
+        .and_then(|t| t.file_path.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_tab_file_path_finds_the_active_tabs_path() {
+        let path = PathBuf::from("/ws/flow.yaml");
+        let file_tab = TabEntry::from_file(path.clone(), String::new());
+        let active = file_tab.id;
+        let tabs = vec![TabEntry::new_untitled(&[]), file_tab];
+        assert_eq!(active_tab_file_path(&tabs, Some(active)), Some(&path));
+    }
+
+    #[test]
+    fn active_tab_file_path_is_none_when_no_tab_is_active() {
+        let tabs = vec![TabEntry::new_untitled(&[])];
+        assert_eq!(active_tab_file_path(&tabs, None), None);
+    }
+
+    #[test]
+    fn active_tab_file_path_is_none_for_an_unsaved_active_tab() {
+        let untitled = TabEntry::new_untitled(&[]);
+        let active = untitled.id;
+        let tabs = vec![untitled];
+        assert_eq!(active_tab_file_path(&tabs, Some(active)), None);
+    }
+}

@@ -508,12 +508,8 @@ pub fn save_full_session(
 ) {
     let Some(ws) = workspace else { return };
 
-    let active_file = active_tab_id.and_then(|id| {
-        tabs.iter()
-            .find(|t| t.id == id)
-            .and_then(|t| t.file_path.as_ref())
-            .map(|p| p.display().to_string())
-    });
+    let active_file =
+        crate::tab::active_tab_file_path(tabs, active_tab_id).map(|p| p.display().to_string());
 
     let state = build_state_snapshot(
         tabs,
