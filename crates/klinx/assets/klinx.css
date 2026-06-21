@@ -5301,6 +5301,33 @@ input:-webkit-autofill:focus {
   border-color: var(--klinx-verdigris) !important;
   border-style: dashed;
 }
+/* #187: composition whose `use:` failed to bind — the dashed border goes red so
+   the broken node reads as "still a composition (dashed), but broken (red)". The
+   top accent is set inline per stage-kind (`border-top-color: var(...)`), so the
+   override needs `!important` to win — matching the dashed-border `!important`
+   already used for the selected-composition rule below. */
+.klinx-node--composition-error {
+  border-color: rgba(204, 51, 51, 0.55);
+  border-top-color: #CC3333 !important;
+  background: rgba(204, 51, 51, 0.08);
+}
+.klinx-node--composition-error:hover {
+  border-color: rgba(204, 51, 51, 0.8);
+}
+.klinx-node--composition-error.klinx-node--selected {
+  border-color: #CC3333 !important;
+}
+.klinx-node--composition-error .klinx-node-badge {
+  color: #CC3333;
+}
+/* The drill affordance becomes a `⚠` for an unbound composition: red, and it
+   routes to the inspector (select) rather than opening a body. */
+.klinx-node-drill-btn--error {
+  color: #CC3333;
+}
+.klinx-node-drill-btn--error:hover {
+  color: var(--klinx-bone);
+}
 
 /* ── 8b-port. Composition contract ports — dashed boundary cards ──────────── */
 /* Input/output ports are the composition's `_compose` contract, not real body

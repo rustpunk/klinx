@@ -402,6 +402,11 @@ pub struct InspectorBuildContext<'a> {
     pub compiled_plan_available: bool,
     pub visible_errors: &'a [String],
     pub schema_warnings: &'a [String],
+    /// Composition-binding diagnostics (#187). The node inspector folds the ones
+    /// keyed to the selected node into the DIAGNOSTICS section so a dropped
+    /// composition body explains why its drill no-ops. See
+    /// [`crate::state::CompositionDiagnostic`].
+    pub composition_diagnostics: &'a [crate::state::CompositionDiagnostic],
 }
 
 pub fn build_selected_inspector(
@@ -492,7 +497,14 @@ fn build_node_detail(stage_id: &str, ctx: InspectorBuildContext<'_>) -> Selected
         .and_then(node_cxl_source)
         .map(|source| crate::cxl_bridge::validate_expr(&source).errors)
         .unwrap_or_default();
-    let diagnostics = node_diagnostics(stage, &cxl_errors, ctx.visible_errors, ctx.schema_warnings);
+    let diagnostics = node_diagnostics(
+        stage_id,
+        stage,
+        &cxl_errors,
+        ctx.visible_errors,
+        ctx.schema_warnings,
+        ctx.composition_diagnostics,
+    );
     let mut status_chips = status_chips(
         diagnostics
             .iter()
@@ -595,10 +607,12 @@ fn cxl_diagnostic_message(diagnostic: &crate::cxl_bridge::CxlDiagnostic) -> Stri
 }
 
 fn node_diagnostics(
+    stage_id: &str,
     stage: Option<&StageView>,
     cxl_errors: &[crate::cxl_bridge::CxlDiagnostic],
     visible_errors: &[String],
     schema_warnings: &[String],
+    composition_diagnostics: &[crate::state::CompositionDiagnostic],
 ) -> Vec<InspectorDiagnostic> {
     let mut diagnostics = Vec::new();
     if let Some(error) = stage.and_then(|stage| stage.error_message.as_ref()) {
@@ -608,6 +622,23 @@ fn node_diagnostics(
             tone: StatusTone::Error,
         });
     }
+    // #187: composition-binding failures keyed to THIS node. Unlike the
+    // unfiltered parse/schema lists below, these carry the offending node name so
+    // they show only on the node that failed to bind.
+    diagnostics.extend(
+        composition_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.node.as_deref() == Some(stage_id))
+            .map(|diagnostic| InspectorDiagnostic {
+                label: "binding".to_string(),
+                message: if diagnostic.code.is_empty() {
+                    diagnostic.message.clone()
+                } else {
+                    format!("[{}] {}", diagnostic.code, diagnostic.message)
+                },
+                tone: StatusTone::Error,
+            }),
+    );
     // Edit-time CXL syntax validation: a malformed `cxl:` block surfaces as an
     // Error diagnostic, which flips the node status chip off "ok" (#141).
     diagnostics.extend(cxl_errors.iter().map(|diagnostic| InspectorDiagnostic {
@@ -2631,6 +2662,7 @@ nodes:
                 compiled_plan_available: false,
                 visible_errors: &[],
                 schema_warnings: &[],
+                composition_diagnostics: &[],
             },
         );
         match model {

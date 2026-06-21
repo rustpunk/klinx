@@ -168,6 +168,25 @@ pub fn CanvasNode(
     let is_selected = state.selected_stages.read().contains(stage_id.as_str());
     let is_error = matches!(&stage.kind, StageKind::Error);
 
+    // Composition-binding diagnostics for THIS node (#187). A `composition` whose
+    // `use:` failed to bind is dropped from the compiled plan, so its `▶` drill
+    // would silently no-op; surface that as an inline `⚠` affordance + an
+    // error-toned card border instead. Only composition nodes can carry these, so
+    // the read is skipped (and the signal subscription avoided) for other kinds.
+    let binding_errors: Vec<String> = if is_composition {
+        state
+            .composition_diagnostics
+            .read()
+            .iter()
+            .filter(|diagnostic| diagnostic.node.as_deref() == Some(stage_id.as_str()))
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let has_binding_error = !binding_errors.is_empty();
+    let binding_error_title = binding_errors.join("\n");
+
     // Hover + pin contexts for the field-lineage reveal. Acquired once in the
     // component body (hooks must not run inside event handlers/conditionals); the
     // inner `Signal` is `Copy`, so the handlers capture them directly.
@@ -281,6 +300,11 @@ pub fn CanvasNode(
     }
     if field_display.override_mode.is_some() {
         node_class.push_str(" klinx-node--display-override");
+    }
+    // #187: a composition whose `use:` failed to bind gets an error-toned border
+    // over the dashed composition styling, so the broken node reads at a glance.
+    if has_binding_error {
+        node_class.push_str(" klinx-node--composition-error");
     }
 
     let display_button_label = field_display
@@ -542,18 +566,43 @@ pub fn CanvasNode(
             // Drill-in button for composition nodes — opens the in-context body
             // overlay (#171). The full-swap drill lives behind the overlay's
             // "OPEN FULL" escape hatch, so the card needs no second button.
+            //
+            // #187: when the composition's `use:` failed to bind there is no body
+            // to drill into — the `▶` becomes a `⚠` whose tooltip carries the
+            // reason(s) and whose click selects the node, routing the user to the
+            // inspector's DIAGNOSTICS section for the full detail.
             if is_composition {
-                button {
-                    class: "klinx-node-drill-btn",
-                    title: "Open composition body",
-                    onclick: {
-                        let stage_id = stage.id.clone();
-                        move |e: MouseEvent| {
-                            e.stop_propagation();
-                            open_composition_overlay(&state, &stage_id);
-                        }
-                    },
-                    "▶"
+                if has_binding_error {
+                    button {
+                        class: "klinx-node-drill-btn klinx-node-drill-btn--error",
+                        title: "{binding_error_title}",
+                        onclick: {
+                            let stage_id = stage.id.clone();
+                            move |e: MouseEvent| {
+                                e.stop_propagation();
+                                let mut selected_stages = state.selected_stages;
+                                let mut single = std::collections::HashSet::new();
+                                single.insert(stage_id.clone());
+                                selected_stages.set(single);
+                                let mut selected_field = state.selected_field;
+                                selected_field.set(None);
+                            }
+                        },
+                        "⚠"
+                    }
+                } else {
+                    button {
+                        class: "klinx-node-drill-btn",
+                        title: "Open composition body",
+                        onclick: {
+                            let stage_id = stage.id.clone();
+                            move |e: MouseEvent| {
+                                e.stop_propagation();
+                                open_composition_overlay(&state, &stage_id);
+                            }
+                        },
+                        "▶"
+                    }
                 }
             }
 
