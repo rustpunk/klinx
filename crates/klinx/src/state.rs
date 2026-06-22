@@ -372,16 +372,24 @@ pub fn promote_overlay_to_drill(
 
 /// A composition-binding diagnostic surfaced to the user (#187).
 ///
-/// Emitted when a `composition` node's `use:` reference fails to bind (engine
-/// codes E101–E109): the engine drops that node's body from the compiled DAG
-/// **non-fatally** (its non-fatal gate keeps any `"E10"`-prefixed error and omits
-/// the node), so without surfacing this the drill / overlay / inspector provenance
-/// silently no-op — indistinguishable from "this node has no composition body".
-/// The canvas and inspector key off `node` to flag the offending node and explain
-/// why.
+/// A composition-binding or hard compile diagnostic surfaced from the compile
+/// hook, so a degraded or failed compile is never a silent no-op —
+/// indistinguishable from "this node has no composition body". The canvas and
+/// inspector key off `node` to flag the offending node; the YAML error bar shows
+/// the `node: None` (pipeline-level) entries. Two paths produce these:
+///
+/// - **Non-fatal binding failure (#187):** a `composition` node's `use:` fails to
+///   bind (engine codes E101–E109). The engine drops that node's body from the
+///   compiled DAG non-fatally (its gate keeps any `"E10"`-prefixed error and omits
+///   the node) but the plan still compiles. Always node-attributed.
+/// - **Hard compile failure (#189):** the compile returns `Err` (any
+///   error-severity code not starting `"E10"` — e.g. E111 empty-body, E200 type
+///   error, E153). There is no plan; the error-severity diagnostics are surfaced
+///   so the resolved/compiled tooling does not go dark unexplained.
 ///
 /// - `node` is the offending composition node's name; `None` for a pipeline-level
-///   diagnostic not attributable to a single node.
+///   diagnostic not attributable to a single composition node (a general hard
+///   compile error).
 /// - `code` is the engine diagnostic code (e.g. `"E103"`); empty for a synthesized
 ///   fallback entry produced when a dropped node had no engine message naming it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -484,10 +492,14 @@ pub struct AppState {
     /// Compiled plan with channel overlay applied. None when no channel is
     /// loaded or in Raw mode. Wrapped in Arc because CompiledPlan is not Clone.
     pub compiled_plan: Signal<Option<Arc<CompiledPlan>>>,
-    /// Composition-binding diagnostics from the last compile (#187). Empty when
-    /// every `composition` node bound cleanly (or no plan is compiled). Populated
-    /// alongside `compiled_plan` by `use_compiled_plan`; the canvas flags the
-    /// offending node and the inspector lists the reason. See
+    /// Composition-binding and hard compile diagnostics from the last compile
+    /// (#187, #189). Empty when every `composition` node bound cleanly and the
+    /// pipeline compiled (or there was nothing to compile). Populated by
+    /// `use_compiled_plan`: on a successful compile the node-attributed binding
+    /// failures ride alongside `compiled_plan`; on a hard compile failure the plan
+    /// is cleared but the error-severity diagnostics are still set here. The canvas
+    /// flags node-attributed entries and the inspector lists the reason; the YAML
+    /// error bar shows the pipeline-level (`node: None`) entries. See
     /// [`CompositionDiagnostic`].
     pub composition_diagnostics: Signal<Vec<CompositionDiagnostic>>,
 }
