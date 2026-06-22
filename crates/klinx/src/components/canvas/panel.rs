@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
 use crate::pipeline_view::{
     CanvasConnectorPath, EdgeNature, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow,
-    LayoutBounds, NODE_WIDTH, Precision, RoleEdge, StagePortSide, StageView, field_lineage_full,
+    LayoutBounds, Precision, RoleEdge, StagePortSide, StageView, field_lineage_full,
     field_lineage_full_capped, fit_transform, group_endpoints_by_node, layout_bounds,
     lineage_closure, lineage_keep_nodes, pan_to_reveal,
 };
@@ -731,6 +731,11 @@ fn append_highlights(
 }
 
 fn rendered_card_height(stage: &StageView, display: &FieldDisplayInfo) -> f32 {
+    // An exploded composition node (#171 Phase 3) renders as a framed container at
+    // its embedded body's footprint height — no field rows, so no show-more footer.
+    if stage.explode_footprint.is_some() {
+        return stage.effective_height();
+    }
     let footer_height =
         if !stage.fields.is_empty() && (display.hidden_count > 0 || display.can_reduce) {
             FIELD_ROW_HEIGHT
@@ -1111,7 +1116,7 @@ pub fn CanvasPanel() -> Element {
                 .map(|(stage, display)| LayoutBounds {
                     min_x: stage.canvas_x,
                     min_y: stage.canvas_y,
-                    max_x: stage.canvas_x + NODE_WIDTH,
+                    max_x: stage.canvas_x + stage.effective_width(),
                     max_y: stage.canvas_y + rendered_card_height(stage, display),
                 })
         });
@@ -1163,7 +1168,7 @@ pub fn CanvasPanel() -> Element {
         .map(|(stage, display)| ConnectorObstacle {
             x: stage.canvas_x,
             y: stage.canvas_y,
-            width: NODE_WIDTH,
+            width: stage.effective_width(),
             height: rendered_card_height(stage, display),
         })
         .collect::<Vec<_>>();
@@ -1611,7 +1616,7 @@ pub fn CanvasPanel() -> Element {
     } else {
         let max_x = stages
             .iter()
-            .map(|s| s.canvas_x + NODE_WIDTH)
+            .map(|s| s.canvas_x + s.effective_width())
             .fold(0.0_f32, f32::max);
         // Use each card's own height: a field-bearing card extends below
         // `NODE_HEIGHT`, so its bottom-row cables (and their hover hit-areas)
@@ -2201,7 +2206,7 @@ pub(super) fn build_body_canvas(view: crate::pipeline_view::PipelineView, zoom: 
         .map(|(stage, display)| ConnectorObstacle {
             x: stage.canvas_x,
             y: stage.canvas_y,
-            width: NODE_WIDTH,
+            width: stage.effective_width(),
             height: rendered_card_height(stage, display),
         })
         .collect();
@@ -2247,7 +2252,7 @@ pub(super) fn build_body_canvas(view: crate::pipeline_view::PipelineView, zoom: 
     } else {
         let max_x = cards
             .iter()
-            .map(|(s, _)| s.canvas_x + NODE_WIDTH)
+            .map(|(s, _)| s.canvas_x + s.effective_width())
             .fold(0.0_f32, f32::max);
         let max_y = cards
             .iter()
@@ -2325,6 +2330,7 @@ mod tests {
                 .collect(),
             branches: Vec::<RouteBranch>::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         }
     }
 
@@ -2384,6 +2390,7 @@ mod tests {
             }],
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         };
         let stages = vec![consumer.clone(), consumer.clone(), consumer.clone()];
 

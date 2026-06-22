@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 
 use crate::pipeline_view::{
-    FieldKind, HEADER_PORT_Y, NODE_WIDTH, Precision, StageKind, StagePortKind, StagePortRow,
-    StagePortSide, StageView,
+    FieldKind, HEADER_PORT_Y, Precision, StageKind, StagePortKind, StagePortRow, StagePortSide,
+    StageView,
 };
 use crate::state::SelectedField;
 use crate::state::{resolve_composition_frame, use_app_state};
@@ -333,7 +333,7 @@ pub fn CanvasNode(
         "left: {x}px; top: {y}px; width: {w}px; border-top-color: var(--klinx-stage-accent);",
         x = stage.canvas_x,
         y = stage.canvas_y,
-        w = NODE_WIDTH
+        w = stage.effective_width(),
     );
 
     const BORDER_TOP: f32 = 3.0;

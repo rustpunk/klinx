@@ -2809,6 +2809,7 @@ nodes:
             fields,
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         }
     }
 
