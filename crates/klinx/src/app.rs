@@ -102,6 +102,12 @@ pub fn AppShell() -> Element {
     let composition_pip_stack: Signal<Vec<crate::state::CompositionDrillFrame>> =
         use_signal(Vec::new);
 
+    // #171 Phase 3: composition nodes exploded in place. A SET (not a stack) so
+    // several can be exploded at once; per-tab transient, cleared by the canvas D1
+    // view-swap effect like the overlay/pip stacks.
+    let composition_explode_set: Signal<std::collections::HashSet<String>> =
+        use_signal(std::collections::HashSet::new);
+
     // ── Session restore (single call on first mount per use_signal) ─────
     // restore_session() is called in the first use_signal closure. The result
     // is cached — subsequent closures read from the same signal. On re-renders,
@@ -375,6 +381,7 @@ pub fn AppShell() -> Element {
         composition_drill_stack,
         composition_overlay_stack,
         composition_pip_stack,
+        composition_explode_set,
     };
 
     let mut app_state_signal = use_signal(|| current_app_state);

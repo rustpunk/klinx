@@ -3,6 +3,7 @@ mod body_sub_canvas;
 pub mod breadcrumbs;
 mod composition_pip;
 mod connector;
+mod exploded_body;
 pub mod extract_modal;
 mod node;
 mod panel;

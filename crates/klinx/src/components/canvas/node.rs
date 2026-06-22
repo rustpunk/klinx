@@ -5,7 +5,7 @@ use crate::pipeline_view::{
     StageView,
 };
 use crate::state::SelectedField;
-use crate::state::{resolve_composition_frame, use_app_state};
+use crate::state::{resolve_composition_frame, toggle_composition_explode, use_app_state};
 
 use super::{CanvasHover, CompositionDrillTarget, LineageTarget, PinnedField};
 
@@ -610,6 +610,30 @@ pub fn CanvasNode(
                         },
                         "▶"
                     }
+                }
+            }
+
+            // #171 Phase 3: explode-in-place toggle, beside the `▶` (which still
+            // opens the lightbox overlay). Only when there is a body to explode — a
+            // failed `use:` shows the `⚠` above instead. Adds this node to
+            // `composition_explode_set`; the panel then renders it as a framed
+            // embedded mini-DAG (with its own collapse control) in place of this
+            // card, so this affordance only ever shows the explode state.
+            if is_composition && !has_binding_error {
+                button {
+                    class: "klinx-node-explode-btn",
+                    title: "Explode the body in place",
+                    onclick: {
+                        let stage_id = stage.id.clone();
+                        move |e: MouseEvent| {
+                            e.stop_propagation();
+                            let mut set = state.composition_explode_set;
+                            let mut next = set.peek().clone();
+                            toggle_composition_explode(&mut next, &stage_id);
+                            set.set(next);
+                        }
+                    },
+                    "\u{229E}"
                 }
             }
 
