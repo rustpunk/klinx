@@ -7,7 +7,7 @@ use crate::pipeline_view::{
 use crate::state::SelectedField;
 use crate::state::{resolve_composition_frame, use_app_state};
 
-use super::{CanvasHover, LineageTarget, PinnedField};
+use super::{CanvasHover, CompositionDrillTarget, LineageTarget, PinnedField};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum GlobalNodeDisplayMode {
@@ -186,6 +186,13 @@ pub fn CanvasNode(
     };
     let has_binding_error = !binding_errors.is_empty();
     let binding_error_title = binding_errors.join("\n");
+
+    // Which navigation stack a `▶` drill targets (#171 Phase 2). Resolved from the
+    // surrounding surface's context: the top-level canvas and the lightbox provide
+    // none → `Overlay` (default); the picture-in-picture inset provides `Pip` so a
+    // nested drill stays in the inset. Read non-reactively (a stable per-surface
+    // value), copied into the drill closure below.
+    let drill_target = try_consume_context::<CompositionDrillTarget>().unwrap_or_default();
 
     // Hover + pin contexts for the field-lineage reveal. Acquired once in the
     // component body (hooks must not run inside event handlers/conditionals); the
@@ -598,7 +605,7 @@ pub fn CanvasNode(
                             let stage_id = stage.id.clone();
                             move |e: MouseEvent| {
                                 e.stop_propagation();
-                                open_composition_overlay(&state, &stage_id);
+                                open_composition_body(&state, &stage_id, drill_target);
                             }
                         },
                         "▶"
@@ -877,17 +884,24 @@ fn BranchPortView(name: String, predicate: Option<String>, is_default: bool) -> 
 
 /// The `▶` drill action for a composition node card (#171).
 ///
-/// A composition node's `▶` always pushes the in-context OVERLAY stack — on the
-/// top-level canvas it opens a fresh lightbox; inside the overlay a nested `▶`
-/// pushes the same stack so drilling stays in the lightbox (the overlay re-mounts
-/// against the new top frame). The full-swap drill remains reachable only via the
-/// overlay's "OPEN FULL" escape hatch, never directly from a node card.
+/// `target` selects which navigation stack the drill pushes (#171 Phase 2): the
+/// top-level canvas and the lightbox overlay push the OVERLAY stack (a fresh
+/// lightbox, or a nested level within it); the picture-in-picture inset pushes its
+/// OWN stack so a nested `▶` keeps drilling inside the inset rather than spawning
+/// a modal lightbox over it. `target` is resolved from the [`CompositionDrillTarget`]
+/// context the surrounding surface provides (defaulting to `Overlay`). The
+/// full-swap drill remains reachable only via the overlay/inset "OPEN FULL"
+/// escape hatch, never directly from a node card.
 ///
 /// Shared frame resolution lives in [`resolve_composition_frame`]; this only
-/// routes the resolved frame onto the overlay stack. A no-op when the compiled
+/// routes the resolved frame onto the chosen stack. A no-op when the compiled
 /// plan has no body for `node_name` — the same silent no-op the drill has always
 /// had when no plan is compiled (`compiled_plan` is `None`).
-fn open_composition_overlay(state: &crate::state::AppState, node_name: &str) {
+fn open_composition_body(
+    state: &crate::state::AppState,
+    node_name: &str,
+    target: CompositionDrillTarget,
+) {
     let Some(frame) = ({
         let compiled_guard = state.compiled_plan.read();
         compiled_guard
@@ -896,6 +910,23 @@ fn open_composition_overlay(state: &crate::state::AppState, node_name: &str) {
     }) else {
         return;
     };
-    let mut overlay = state.composition_overlay_stack;
-    overlay.write().push(frame);
+    // The three composition view modes are mutually exclusive: opening into one
+    // surface closes the other in-context surface so a stale inset/overlay never
+    // lingers behind the newly-opened one. This matters because a docked PiP keeps
+    // the parent canvas interactive — drilling a *different* node's `▶` there would
+    // otherwise leave the old inset orphaned behind a fresh lightbox. (A nested
+    // drill within a surface targets its own stack, so the cleared "other" stack is
+    // already empty and this is a no-op.)
+    let (mut target_stack, mut other_stack) = match target {
+        CompositionDrillTarget::Overlay => {
+            (state.composition_overlay_stack, state.composition_pip_stack)
+        }
+        CompositionDrillTarget::Pip => {
+            (state.composition_pip_stack, state.composition_overlay_stack)
+        }
+    };
+    if !other_stack.peek().is_empty() {
+        other_stack.write().clear();
+    }
+    target_stack.write().push(frame);
 }

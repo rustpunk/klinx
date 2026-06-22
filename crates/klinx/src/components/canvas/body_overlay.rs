@@ -36,14 +36,11 @@ use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 
 use crate::pipeline_view::derive_body_view_unlaid;
-use crate::state::{promote_overlay_to_drill, use_app_state};
+use crate::state::{move_composition_frames, promote_overlay_to_drill, use_app_state};
 
+use super::body_sub_canvas::BodySubCanvas;
 use super::breadcrumbs::{BreadcrumbBar, BreadcrumbTarget};
-use super::connector::Connector;
-use super::node::CanvasNode;
-use super::panel::{
-    PanViewport, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP_LINE, ZOOM_STEP_PIXEL, build_body_canvas,
-};
+use super::panel::{ZOOM_MAX, ZOOM_MIN, ZOOM_STEP_LINE, ZOOM_STEP_PIXEL, build_body_canvas};
 use super::{CanvasHover, HoverTarget, PinnedField};
 
 /// The in-context composition body overlay (#171).
@@ -136,15 +133,6 @@ pub fn BodyOverlay() -> Element {
         // hook order is identical whether or not the overlay is showing.
         return rsx! {};
     };
-    // The memo yields an OWNED `BodyCanvas` (it is `Clone`); destructure it into the
-    // pieces the rsx renders. `svg_w`/`svg_h` are `Copy`; `cards`/`connections` are
-    // moved into the loops below.
-    let super::panel::BodyCanvas {
-        cards,
-        connections,
-        svg_w,
-        svg_h,
-    } = canvas;
 
     // ── Inner pan handlers (left/middle-drag on the sub-canvas background) ──
     let drag_down = {
@@ -379,6 +367,27 @@ pub fn BodyOverlay() -> Element {
                         "+"
                     }
 
+                    // Dock to corner (#171 Phase 2): hand the lightbox frames to the
+                    // picture-in-picture inset stack at the same depth, then clear the
+                    // overlay. The parent canvas becomes fully interactive while the
+                    // body stays visible in the corner. Sequential writes avoid two
+                    // live `write()` borrows at once (mirrors OPEN FULL below).
+                    button {
+                        class: "klinx-body-overlay-btn",
+                        title: "Dock this body to a corner (keep the canvas interactive)",
+                        onclick: move |_| {
+                            let mut overlay = state.composition_overlay_stack;
+                            let mut pip = state.composition_pip_stack;
+                            let mut frames = overlay.peek().clone();
+                            {
+                                let mut pip_frames = pip.write();
+                                move_composition_frames(&mut frames, &mut pip_frames);
+                            }
+                            overlay.write().clear();
+                        },
+                        "\u{2750}"
+                    }
+
                     // Escape hatch to the existing full-swap drill: move the
                     // overlay frames onto the drill stack, then clear the overlay.
                     // Sequential writes (take + drop each guard in turn) avoid
@@ -422,60 +431,14 @@ pub fn BodyOverlay() -> Element {
                     onmouseleave: drag_leave,
                     onwheel: on_wheel,
 
-                    // Re-key by depth so navigating a breadcrumb level remounts the
-                    // viewport (and resets its pan) for the newly-shown body.
-                    PanViewport {
-                        key: "{depth}",
-                        pan_x,
-                        pan_y,
-                        zoom,
-
-                        // NOTE: this card/connector/SVG rsx is hand-copied from
-                        // `panel.rs` (the contained-overlay cost). It hardcodes
-                        // `dimmed:false` and DROPS the main canvas's Filter-mode
-                        // `filter_keep_nodes` gate and the `--recede` hover class —
-                        // Phase 1 draws the body's plain node-level DAG only. The
-                        // future `CanvasSurface` extraction supersedes this copy and
-                        // restores the reveal behavior in the overlay (Phase 2).
-                        svg {
-                            class: "klinx-canvas-svg klinx-canvas-svg--base",
-                            width: "{svg_w}",
-                            height: "{svg_h}",
-                            g {
-                                class: "klinx-canvas-edges",
-                                for conn in connections {
-                                    Connector {
-                                        key: "{conn.from.id}-{conn.to.id}-{conn.from_branch:?}",
-                                        from: conn.from,
-                                        to: conn.to,
-                                        from_branch: conn.from_branch,
-                                        path: conn.path,
-                                    }
-                                }
-                            }
-                        }
-
-                        for (index, (stage, display)) in cards.into_iter().enumerate() {
-                            CanvasNode {
-                                key: "{stage.id}",
-                                stage,
-                                index,
-                                field_display: display,
-                                // Phase 1: the overlay sub-canvas is a read-only
-                                // body preview — field search/expand/display
-                                // actions are no-ops here (a Phase-2 follow-up
-                                // wires the in-overlay reveal). A nested `▶` still
-                                // works: it lives inside CanvasNode and pushes the
-                                // overlay stack via the shared AppState context.
-                                on_field_query: move |_: String| {},
-                                on_field_toggle: move |_| {},
-                                on_display_action: move |_| {},
-                                dimmed: false,
-                                highlighted_fields: Vec::new(),
-                                highlighted_role_ports: Vec::new(),
-                            }
-                        }
-                    }
+                    // Shared inner render (#171 Phase 2): the overlay and the
+                    // picture-in-picture inset both render the body via
+                    // `BodySubCanvas`, so the card/connector/SVG block lives in one
+                    // place rather than being hand-copied per surface. The overlay
+                    // provides the CanvasHover/PinnedField contexts above; it does
+                    // NOT provide a CompositionDrillTarget, so a nested `▶` defaults
+                    // to the overlay stack (drilling stays in the lightbox).
+                    BodySubCanvas { canvas, pan_x, pan_y, zoom, depth }
                 }
             }
         }

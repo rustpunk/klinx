@@ -1289,6 +1289,17 @@ pub fn CanvasPanel() -> Element {
                 overlay.write().clear();
             }
         }
+        // #171 Phase 2: likewise close a docked picture-in-picture inset when the
+        // active view's identity changes, so it never lingers over a different
+        // graph. Same peek-guard + not-in-fingerprint reasoning as the overlay
+        // above: docking/navigating the inset mutates only the PiP stack, which is
+        // not in the fingerprint, so this never self-clears or loops.
+        {
+            let mut pip = state.composition_pip_stack;
+            if !pip.peek().is_empty() {
+                pip.write().clear();
+            }
+        }
         // Reset the reveal depth so a cap raised on the old graph never carries
         // into the new one (#123). The reveal MODE is a persistent UI preference
         // and is intentionally NOT reset here.
@@ -2087,6 +2098,13 @@ pub fn CanvasPanel() -> Element {
             // renders nothing when it is empty, keeping the panel's rsx free of a
             // gating conditional and the overlay's hooks unconditional.
             super::body_overlay::BodyOverlay {}
+
+            // ── Picture-in-picture composition body inset (#171 Phase 2) ──
+            // The non-modal sibling: a fixed corner panel that leaves the parent
+            // canvas interactive. Mounted unconditionally for the same reason as
+            // the overlay — it reads the PiP stack itself and renders nothing when
+            // empty.
+            super::composition_pip::CompositionPip {}
         }
     }
 }

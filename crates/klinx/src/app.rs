@@ -96,6 +96,11 @@ pub fn AppShell() -> Element {
     // D1 view-swap effect clears it on a tab/pipeline switch.
     let composition_overlay_stack: Signal<Vec<crate::state::CompositionDrillFrame>> =
         use_signal(Vec::new);
+    // #171 Phase 2: the picture-in-picture inset stack — the non-modal sibling of
+    // the overlay stack. Like the overlay it is per-tab transient state the canvas
+    // D1 view-swap effect clears on a tab/pipeline switch.
+    let composition_pip_stack: Signal<Vec<crate::state::CompositionDrillFrame>> =
+        use_signal(Vec::new);
 
     // ── Session restore (single call on first mount per use_signal) ─────
     // restore_session() is called in the first use_signal closure. The result
@@ -369,6 +374,7 @@ pub fn AppShell() -> Element {
         composition_diagnostics,
         composition_drill_stack,
         composition_overlay_stack,
+        composition_pip_stack,
     };
 
     let mut app_state_signal = use_signal(|| current_app_state);

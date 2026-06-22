@@ -4,16 +4,19 @@ use crate::state::use_app_state;
 
 /// Which drill stack a [`BreadcrumbBar`] navigates (#171).
 ///
-/// The same breadcrumb rendering drives two stacks: the full-swap drill stack
-/// (the top-level canvas mount) and the in-context overlay stack (the in-overlay
-/// mount). The variant selects which `AppState` signal the root/segment clicks
-/// clear/truncate, so one component serves both without duplicating the markup.
+/// The same breadcrumb rendering drives three stacks: the full-swap drill stack
+/// (the top-level canvas mount), the in-context overlay stack (the lightbox
+/// mount), and the picture-in-picture stack (the corner-inset mount, #171 Phase
+/// 2). The variant selects which `AppState` signal the root/segment clicks
+/// clear/truncate, so one component serves all three without duplicating the markup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BreadcrumbTarget {
     /// Navigate the full-swap drill stack (`composition_drill_stack`).
     Drill,
     /// Navigate the in-context overlay stack (`composition_overlay_stack`).
     Overlay,
+    /// Navigate the picture-in-picture inset stack (`composition_pip_stack`).
+    Pip,
 }
 
 /// Breadcrumb navigation bar for composition drill-in.
@@ -37,6 +40,7 @@ pub fn BreadcrumbBar(
     let stack_signal = match target {
         BreadcrumbTarget::Drill => state.composition_drill_stack,
         BreadcrumbTarget::Overlay => state.composition_overlay_stack,
+        BreadcrumbTarget::Pip => state.composition_pip_stack,
     };
 
     rsx! {

@@ -1,5 +1,7 @@
 mod body_overlay;
+mod body_sub_canvas;
 pub mod breadcrumbs;
+mod composition_pip;
 mod connector;
 pub mod extract_modal;
 mod node;
@@ -8,6 +10,24 @@ mod panel;
 pub use panel::CanvasPanel;
 
 use dioxus::prelude::*;
+
+/// Which composition navigation stack a node-card `▶` drill targets (#171).
+///
+/// `CanvasNode` is reused verbatim by three surfaces — the top-level canvas, the
+/// lightbox overlay (Phase 1), and the picture-in-picture inset (Phase 2). A
+/// nested `▶` should keep drilling within the surface it was clicked on, so each
+/// surface provides this context and the node card reads it to choose its stack.
+/// A surface that provides none defaults to [`Overlay`](CompositionDrillTarget::Overlay):
+/// the top-level canvas and the lightbox both push the overlay stack, so their
+/// existing behavior is preserved without a provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CompositionDrillTarget {
+    /// Push the lightbox overlay stack (`composition_overlay_stack`).
+    #[default]
+    Overlay,
+    /// Push the picture-in-picture inset stack (`composition_pip_stack`).
+    Pip,
+}
 
 const FIELD_HOVER_ENTER_DELAY_MS: u64 = 180;
 const FIELD_HOVER_EXIT_DELAY_MS: u64 = 150;
