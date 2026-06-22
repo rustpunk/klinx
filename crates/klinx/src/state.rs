@@ -370,6 +370,15 @@ pub fn promote_overlay_to_drill(
     move_composition_frames(overlay, drill);
 }
 
+/// Toggle a composition node's in-place explode (#171 Phase 3): insert its name
+/// if absent (explode), remove it if present (collapse). A free function over the
+/// set so the toggle is one place and unit-testable without a Dioxus runtime.
+pub fn toggle_composition_explode(set: &mut std::collections::HashSet<String>, node_name: &str) {
+    if !set.remove(node_name) {
+        set.insert(node_name.to_string());
+    }
+}
+
 /// A composition-binding diagnostic surfaced to the user (#187).
 ///
 /// A composition-binding or hard compile diagnostic surfaced from the compile
@@ -502,6 +511,13 @@ pub struct AppState {
     /// error bar shows the pipeline-level (`node: None`) entries. See
     /// [`CompositionDiagnostic`].
     pub composition_diagnostics: Signal<Vec<CompositionDiagnostic>>,
+    /// Names of the `composition` nodes currently EXPLODED in place on the main
+    /// canvas (#171 Phase 3). Unlike the single-active overlay/pip stacks, this is
+    /// a SET: several compositions can be exploded at once — each renders its body
+    /// as a mini-DAG embedded at the node's position, with siblings reflowing
+    /// around the enlarged footprint. Empty = nothing exploded. Toggled per node
+    /// by [`toggle_composition_explode`]; cleared on a view swap.
+    pub composition_explode_set: Signal<std::collections::HashSet<String>>,
 }
 
 /// Read the current `AppState` from context.
@@ -641,6 +657,27 @@ mod tests {
         for mode in [LineageRevealMode::Highlight, LineageRevealMode::Filter] {
             assert_eq!(mode.toggled().toggled(), mode, "toggling twice is identity");
         }
+    }
+
+    /// #171 Phase 3: the explode toggle inserts a node on first click and removes
+    /// it on the next, and several nodes can be exploded at once (a SET, unlike the
+    /// single-active overlay/pip stacks).
+    #[test]
+    fn toggle_composition_explode_inserts_then_removes_and_allows_many() {
+        use std::collections::HashSet;
+        let mut set: HashSet<String> = HashSet::new();
+        toggle_composition_explode(&mut set, "clean");
+        assert!(set.contains("clean"), "first toggle explodes the node");
+        toggle_composition_explode(&mut set, "clean");
+        assert!(!set.contains("clean"), "second toggle collapses it");
+
+        toggle_composition_explode(&mut set, "a");
+        toggle_composition_explode(&mut set, "b");
+        assert_eq!(
+            set.len(),
+            2,
+            "independent nodes can be exploded simultaneously"
+        );
     }
 
     /// #123: each mode carries a DISTINCT, slug-safe `data-reveal-mode` attribute

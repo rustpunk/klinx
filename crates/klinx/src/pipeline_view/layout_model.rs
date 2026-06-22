@@ -778,6 +778,28 @@ impl LayoutGraph {
 
     fn assign_node_positions(&mut self, node_layer_orders: &[usize]) {
         let ranks = self.sorted_ranks();
+        let Some(&max_rank) = ranks.last() else {
+            return;
+        };
+
+        // Per-rank column x, accumulated left-to-right. Each rank's column is as
+        // wide as its widest node, so an exploded (wide) composition node pushes
+        // every later rank right; an EMPTY rank still reserves one standard
+        // NODE_WIDTH column. With every node at NODE_WIDTH and dense ranks this is
+        // bit-identical to the legacy `rank * (NODE_WIDTH + NODE_GAP)`, so all
+        // existing layout positions/snapshots are unchanged.
+        let mut col_x = vec![0.0_f32; max_rank + 1];
+        let mut running_x = 0.0;
+        for (rank, slot) in col_x.iter_mut().enumerate() {
+            *slot = running_x;
+            let col_width = self
+                .nodes
+                .iter()
+                .filter(|node| node.rank == rank)
+                .map(|node| node.width)
+                .fold(NODE_WIDTH, f32::max);
+            running_x += col_width + NODE_GAP;
+        }
 
         for rank in ranks {
             let mut node_indices = self
@@ -796,7 +818,7 @@ impl LayoutGraph {
                 )
             });
 
-            let x = rank as f32 * (NODE_WIDTH + NODE_GAP);
+            let x = col_x[rank];
             let mut y = 0.0;
             for node_index in node_indices {
                 self.nodes[node_index].x = x;
@@ -940,8 +962,12 @@ impl LayoutNode {
             kind: stage.kind.clone(),
             x: 0.0,
             y: 0.0,
-            width: NODE_WIDTH,
-            height: stage.card_height(),
+            // An exploded composition node (#171 Phase 3) carries an explicit
+            // footprint so the layout reserves room for its embedded body and
+            // siblings reflow around it; every ordinary node is NODE_WIDTH ×
+            // card_height (effective_* returns exactly those when not exploded).
+            width: stage.effective_width(),
+            height: stage.effective_height(),
             rank: 0,
             input_ports,
             output_ports,
@@ -1693,6 +1719,7 @@ mod tests {
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         }
     }
 
@@ -1850,6 +1877,47 @@ mod tests {
                     y: HEADER_PORT_Y
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn explode_footprint_widens_its_column_and_reflows_later_ranks() {
+        // a → b → c chain with node `a` exploded to 3× width (#171 Phase 3): its
+        // column widens so `b`/`c` shift right by the extra width. An all-default
+        // chain stays at the legacy `rank * (NODE_WIDTH + NODE_GAP)` spacing, as
+        // `simple_chain_assigns_layers_and_node_ports` pins — so this exercises the
+        // NEW variable-width branch, not the uniform one.
+        let mut a = stage("a");
+        a.explode_footprint = Some((NODE_WIDTH * 3.0, 200.0));
+        let view = PipelineView {
+            stages: vec![a, stage("b"), stage("c")],
+            connections: vec![Connection::plain(0, 1), Connection::plain(1, 2)],
+            connection_paths: Vec::new(),
+            field_edges: Vec::new(),
+            field_edge_paths: Vec::new(),
+            role_edges: Vec::new(),
+            role_edge_paths: Vec::new(),
+        };
+        let graph = LayoutGraph::from_pipeline_view(&view);
+        let x = |id: &str| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .unwrap_or_else(|| panic!("missing layout node {id}"))
+                .x
+        };
+
+        assert_eq!(x("a"), 0.0, "rank 0 anchors at the origin column");
+        assert_eq!(
+            x("b"),
+            NODE_WIDTH * 3.0 + NODE_GAP,
+            "the exploded 3x column pushes rank 1 right by its full width",
+        );
+        assert_eq!(
+            x("c"),
+            NODE_WIDTH * 3.0 + NODE_GAP + NODE_WIDTH + NODE_GAP,
+            "rank 2 follows at the standard column width past the wide column",
         );
     }
 

@@ -382,9 +382,34 @@ pub struct StageView {
     /// connect both to a role input and to a grouped output field without
     /// drawing duplicate cables into the same row.
     pub role_ports: Vec<StagePortRow>,
+    /// Explicit border-box footprint `(width, height)` that overrides the default
+    /// [`NODE_WIDTH`] × [`StageView::card_height`] sizing. `None` for every
+    /// ordinary card — the common case, so width math stays exactly
+    /// [`NODE_WIDTH`]. `Some` only for a composition node exploded in place
+    /// (#171 Phase 3), whose footprint is its embedded body's laid-out size so the
+    /// layout reserves room and siblings reflow around it. Read via
+    /// [`StageView::effective_width`] / [`StageView::effective_height`].
+    pub explode_footprint: Option<(f32, f32)>,
 }
 
 impl StageView {
+    /// Border-box width of this card — [`NODE_WIDTH`] for every ordinary node,
+    /// or the exploded footprint's width (#171 Phase 3). Every output-side anchor
+    /// and the renderer read this so a widened node's right edge, cables, and DOM
+    /// card stay in lockstep.
+    pub fn effective_width(&self) -> f32 {
+        self.explode_footprint
+            .map_or(NODE_WIDTH, |(width, _)| width)
+    }
+
+    /// Border-box height of this card — its [`StageView::card_height`] for an
+    /// ordinary node, or the exploded footprint's height (#171 Phase 3). Used by
+    /// the layout (to reserve vertical room so siblings reflow) and the renderer.
+    pub fn effective_height(&self) -> f32 {
+        self.explode_footprint
+            .map_or_else(|| self.card_height(), |(_, height)| height)
+    }
+
     /// Node-level OUTPUT port — the default cable origin. Anchored on the
     /// node-name label's mid-line ([`HEADER_PORT_Y`] from the card top), inline
     /// with the name, so node→node cables connect at the header regardless of how
@@ -392,7 +417,10 @@ impl StageView {
     /// anchors ([`StageView::field_anchor_out`]); a Route node's OUTPUTS are its
     /// branch ports ([`StageView::branch_anchor_out`]), not this port.
     pub fn port_out(&self) -> (f32, f32) {
-        (self.canvas_x + NODE_WIDTH, self.canvas_y + HEADER_PORT_Y)
+        (
+            self.canvas_x + self.effective_width(),
+            self.canvas_y + HEADER_PORT_Y,
+        )
     }
 
     /// Node-level INPUT port — the header-level entry point, inline with the node
@@ -433,7 +461,7 @@ impl StageView {
 
     /// World-space coordinate of field row `i`'s RIGHT (output) anchor dot.
     pub fn field_anchor_out(&self, i: usize) -> (f32, f32) {
-        (self.canvas_x + NODE_WIDTH, self.field_row_y(i))
+        (self.canvas_x + self.effective_width(), self.field_row_y(i))
     }
 
     /// Index of the field named `name` in this stage's output rows, if present.
@@ -456,7 +484,7 @@ impl StageView {
     #[allow(dead_code)]
     pub fn role_port_anchor_out(&self, i: usize) -> (f32, f32) {
         (
-            self.canvas_x + NODE_WIDTH,
+            self.canvas_x + self.effective_width(),
             self.role_port_row_y(StagePortSide::Output, i),
         )
     }
@@ -516,7 +544,7 @@ impl StageView {
     /// World-space coordinate of branch-port row `i`'s RIGHT (output) anchor —
     /// the point a downstream edge that consumes that branch attaches to.
     pub fn branch_anchor_out(&self, i: usize) -> (f32, f32) {
-        (self.canvas_x + NODE_WIDTH, self.branch_row_y(i))
+        (self.canvas_x + self.effective_width(), self.branch_row_y(i))
     }
 
     /// Full world-space card height. Field rows and branch ports both stack
@@ -645,14 +673,14 @@ pub fn layout_bounds(stages: &[StageView]) -> Option<LayoutBounds> {
     let mut b = LayoutBounds {
         min_x: first.canvas_x,
         min_y: first.canvas_y,
-        max_x: first.canvas_x + NODE_WIDTH,
-        max_y: first.canvas_y + first.card_height(),
+        max_x: first.canvas_x + first.effective_width(),
+        max_y: first.canvas_y + first.effective_height(),
     };
     for s in &stages[1..] {
         b.min_x = b.min_x.min(s.canvas_x);
         b.min_y = b.min_y.min(s.canvas_y);
-        b.max_x = b.max_x.max(s.canvas_x + NODE_WIDTH);
-        b.max_y = b.max_y.max(s.canvas_y + s.card_height());
+        b.max_x = b.max_x.max(s.canvas_x + s.effective_width());
+        b.max_y = b.max_y.max(s.canvas_y + s.effective_height());
     }
     Some(b)
 }
@@ -3114,6 +3142,7 @@ fn input_port_stage(name: &str, decl: &PortDecl, x: f32, y: f32) -> StageView {
         fields: Vec::new(),
         branches: Vec::new(),
         role_ports: Vec::new(),
+        explode_footprint: None,
     }
 }
 
@@ -3133,6 +3162,7 @@ fn output_port_stage(name: &str, alias: &OutputAlias, x: f32, y: f32) -> StageVi
         fields: Vec::new(),
         branches: Vec::new(),
         role_ports: Vec::new(),
+        explode_footprint: None,
     }
 }
 
@@ -3157,6 +3187,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         },
         PipelineNode::Transform {
             header,
@@ -3176,6 +3207,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 fields: Vec::new(),
                 branches: Vec::new(),
                 role_ports: Vec::new(),
+                explode_footprint: None,
             }
         }
         PipelineNode::Aggregate {
@@ -3201,6 +3233,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 fields: Vec::new(),
                 branches: Vec::new(),
                 role_ports: Vec::new(),
+                explode_footprint: None,
             }
         }
         PipelineNode::Route {
@@ -3232,6 +3265,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 fields: Vec::new(),
                 branches: Vec::new(),
                 role_ports: Vec::new(),
+                explode_footprint: None,
             }
         }
         PipelineNode::Merge { header, .. } => StageView {
@@ -3247,6 +3281,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         },
         PipelineNode::Combine {
             header,
@@ -3266,6 +3301,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 fields: Vec::new(),
                 branches: Vec::new(),
                 role_ports: Vec::new(),
+                explode_footprint: None,
             }
         }
         PipelineNode::Output {
@@ -3284,6 +3320,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         },
         PipelineNode::Composition { header, r#use, .. } => StageView {
             id: header.name.clone(),
@@ -3298,6 +3335,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         },
         // Reshape: per-group synthesis. Subtitle names the partition key (the
         // grouping that every rule observes) and the rule count, the two facts
@@ -3320,6 +3358,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         },
         // Cull: per-group removal. Subtitle mirrors Reshape (partition key + rule
         // count). Schema-preserving, so its passthrough field rows are honest and
@@ -3341,6 +3380,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         },
         // Envelope: frames body records into documents. Subtitle names the
         // framing strategy. Output shape differs from input, so its field rows
@@ -3361,6 +3401,7 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         },
     }
 }
@@ -3474,6 +3515,7 @@ pub fn derive_partial_pipeline_view(
                     fields: Vec::new(),
                     branches: Vec::new(),
                     role_ports: Vec::new(),
+                    explode_footprint: None,
                 });
             }
             PartialItem::Err { index, message } => {
@@ -3490,6 +3532,7 @@ pub fn derive_partial_pipeline_view(
                     fields: Vec::new(),
                     branches: Vec::new(),
                     role_ports: Vec::new(),
+                    explode_footprint: None,
                 });
             }
         }
@@ -3530,6 +3573,7 @@ pub fn derive_partial_pipeline_view(
                     fields: Vec::new(),
                     branches: Vec::new(),
                     role_ports: Vec::new(),
+                    explode_footprint: None,
                 });
             }
             PartialItem::Err { index, message } => {
@@ -3546,6 +3590,7 @@ pub fn derive_partial_pipeline_view(
                     fields: Vec::new(),
                     branches: Vec::new(),
                     role_ports: Vec::new(),
+                    explode_footprint: None,
                 });
             }
         }
@@ -3576,6 +3621,7 @@ pub fn derive_partial_pipeline_view(
                     fields: Vec::new(),
                     branches: Vec::new(),
                     role_ports: Vec::new(),
+                    explode_footprint: None,
                 });
             }
             PartialItem::Err { index, message } => {
@@ -3592,6 +3638,7 @@ pub fn derive_partial_pipeline_view(
                     fields: Vec::new(),
                     branches: Vec::new(),
                     role_ports: Vec::new(),
+                    explode_footprint: None,
                 });
             }
         }
@@ -3783,6 +3830,7 @@ fn build_body_view(
                 .unwrap_or_default(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         });
     }
 
@@ -10172,6 +10220,7 @@ nodes:
             fields: Vec::new(),
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         }
     }
 

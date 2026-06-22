@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 use crate::pipeline_view::layout_model::{CanvasLayoutEngine, apply_canvas_layout};
 use crate::pipeline_view::{
     CanvasConnectorPath, EdgeNature, FIELD_ROW_HEIGHT, FieldEdge, FieldEdgeKind, FieldRow,
-    LayoutBounds, NODE_WIDTH, Precision, RoleEdge, StagePortSide, StageView, field_lineage_full,
+    LayoutBounds, Precision, RoleEdge, StagePortSide, StageView, field_lineage_full,
     field_lineage_full_capped, fit_transform, group_endpoints_by_node, layout_bounds,
     lineage_closure, lineage_keep_nodes, pan_to_reveal,
 };
@@ -108,6 +108,18 @@ pub(super) const ZOOM_STEP_LINE: f32 = 1.10;
 pub(super) const ZOOM_STEP_PIXEL: f32 = 0.001;
 /// Screen-space padding kept around the node graph when fitting it to view.
 const FIT_MARGIN: f32 = 60.0;
+/// Explode-in-place frame geometry (#171 Phase 3). The exploded composition node's
+/// reserved footprint is the embedded body's size plus a top header band (for the
+/// composition's name + collapse control) and padding on the other three sides;
+/// [`super::exploded_body::ExplodedBody`] places the body region at
+/// `(EXPLODE_PAD, EXPLODE_HEADER_BAND)` inside the frame, so these MUST match the
+/// footprint reserved in `inject_explode_footprints`.
+pub(super) const EXPLODE_PAD: f32 = 14.0;
+pub(super) const EXPLODE_HEADER_BAND: f32 = 38.0;
+/// The embedded body is laid out at a FIXED density (zoom 1.0) and scaled by the
+/// shared main-canvas `PanViewport` transform; building it at the live zoom would
+/// recompute the footprint on every zoom tick and reflow the whole canvas.
+const EXPLODE_BODY_ZOOM: f32 = 1.0;
 /// Breathing room kept on each edge when auto-panning a freshly selected field's
 /// node into view (#163). Smaller than [`FIT_MARGIN`] — this nudges a single
 /// off-screen card just clear of the canvas↔Inspector boundary rather than
@@ -730,7 +742,31 @@ fn append_highlights(
     }
 }
 
+/// Grow each exploded composition node's footprint to its embedded body's size so
+/// the layout reserves room and siblings reflow around it (#171 Phase 3). The
+/// footprint adds the header band + padding around the body's laid-out size; it
+/// MUST match the body-region offset `ExplodedBody` renders at. A node whose body
+/// did not resolve is absent from `bodies` and keeps its default 160px footprint.
+fn inject_explode_footprints(stages: &mut [StageView], bodies: &HashMap<String, BodyCanvas>) {
+    if bodies.is_empty() {
+        return;
+    }
+    for stage in stages.iter_mut() {
+        if let Some(body) = bodies.get(&stage.id) {
+            stage.explode_footprint = Some((
+                body.svg_w + 2.0 * EXPLODE_PAD,
+                body.svg_h + EXPLODE_HEADER_BAND + EXPLODE_PAD,
+            ));
+        }
+    }
+}
+
 fn rendered_card_height(stage: &StageView, display: &FieldDisplayInfo) -> f32 {
+    // An exploded composition node (#171 Phase 3) renders as a framed container at
+    // its embedded body's footprint height — no field rows, so no show-more footer.
+    if stage.explode_footprint.is_some() {
+        return stage.effective_height();
+    }
     let footer_height =
         if !stage.fields.is_empty() && (display.hidden_count > 0 || display.can_reduce) {
             FIELD_ROW_HEIGHT
@@ -869,7 +905,37 @@ pub fn CanvasPanel() -> Element {
     let influence_ribbon_on = *show_influence_ribbon.read();
     let is_filter_mode = reveal_mode == LineageRevealMode::Filter;
     let closure_cap = reveal_closure_cap(reveal_mode, active_hop_cap);
-    let pipeline_view = current_pipeline_view(state);
+    // #171 Phase 3: body render model for each exploded composition node, keyed on
+    // the explode set + compiled plan (NOT zoom — see EXPLODE_BODY_ZOOM). Empty
+    // unless a composition is exploded; a node whose body fails to resolve is
+    // simply absent, so it keeps its ordinary card. Read below to grow the
+    // exploded nodes' footprints BEFORE layout so siblings reflow around them.
+    let explode_bodies = use_memo(move || -> HashMap<String, BodyCanvas> {
+        let names = state.composition_explode_set.read();
+        if names.is_empty() {
+            return HashMap::new();
+        }
+        let plan_guard = state.compiled_plan.read();
+        let Some(plan) = plan_guard.as_ref() else {
+            return HashMap::new();
+        };
+        names
+            .iter()
+            .filter_map(|name| {
+                let frame = crate::state::resolve_composition_frame(plan, name)?;
+                // Skip a node whose body did not resolve — it keeps its ordinary
+                // card rather than reserving a default-sized empty frame.
+                plan.body_of(frame.body_id)?;
+                Some((
+                    name.clone(),
+                    build_body_canvas_for(plan, frame.body_id, EXPLODE_BODY_ZOOM),
+                ))
+            })
+            .collect()
+    });
+
+    let mut pipeline_view = current_pipeline_view(state);
+    inject_explode_footprints(&mut pipeline_view.stages, &explode_bodies.read());
     let pipeline_view =
         apply_canvas_layout(pipeline_view, CanvasLayoutEngine::PortAwareSugiyama).view;
     let connections_model = pipeline_view.connections;
@@ -879,6 +945,27 @@ pub fn CanvasPanel() -> Element {
     let role_edges = pipeline_view.role_edges;
     let role_edge_paths = pipeline_view.role_edge_paths;
     let raw_stages = pipeline_view.stages;
+
+    // #171 Phase 3: the exploded composition nodes (those with a resolved body),
+    // paired with their body render. Each is drawn as a framed `ExplodedBody` at
+    // its laid-out position instead of an ordinary card, so it is filtered out of
+    // `node_cards` below (by `exploded_ids`). Built from the laid-out `raw_stages`
+    // so the frame inherits the reflowed position.
+    let exploded_renders: Vec<(StageView, BodyCanvas)> = {
+        let bodies = explode_bodies.read();
+        if bodies.is_empty() {
+            Vec::new()
+        } else {
+            raw_stages
+                .iter()
+                .filter_map(|stage| Some((stage.clone(), bodies.get(&stage.id)?.clone())))
+                .collect()
+        }
+    };
+    let exploded_ids: HashSet<String> = exploded_renders
+        .iter()
+        .map(|(stage, _)| stage.id.clone())
+        .collect();
 
     // ── Field-level lineage hover state ──────────────────────────────────────
     // The current pointer [`HoverTarget`], provided as a canvas-scoped context so
@@ -1111,7 +1198,7 @@ pub fn CanvasPanel() -> Element {
                 .map(|(stage, display)| LayoutBounds {
                     min_x: stage.canvas_x,
                     min_y: stage.canvas_y,
-                    max_x: stage.canvas_x + NODE_WIDTH,
+                    max_x: stage.canvas_x + stage.effective_width(),
                     max_y: stage.canvas_y + rendered_card_height(stage, display),
                 })
         });
@@ -1163,7 +1250,7 @@ pub fn CanvasPanel() -> Element {
         .map(|(stage, display)| ConnectorObstacle {
             x: stage.canvas_x,
             y: stage.canvas_y,
-            width: NODE_WIDTH,
+            width: stage.effective_width(),
             height: rendered_card_height(stage, display),
         })
         .collect::<Vec<_>>();
@@ -1298,6 +1385,16 @@ pub fn CanvasPanel() -> Element {
             let mut pip = state.composition_pip_stack;
             if !pip.peek().is_empty() {
                 pip.write().clear();
+            }
+        }
+        // #171 Phase 3: collapse any in-place explodes when the active view's
+        // identity changes — an exploded node name from the old graph is
+        // meaningless in the new one. Same peek-guard + not-in-fingerprint
+        // reasoning as the overlay/pip clears above.
+        {
+            let mut explode = state.composition_explode_set;
+            if !explode.peek().is_empty() {
+                explode.write().clear();
             }
         }
         // Reset the reveal depth so a cap raised on the old graph never carries
@@ -1611,7 +1708,7 @@ pub fn CanvasPanel() -> Element {
     } else {
         let max_x = stages
             .iter()
-            .map(|s| s.canvas_x + NODE_WIDTH)
+            .map(|s| s.canvas_x + s.effective_width())
             .fold(0.0_f32, f32::max);
         // Use each card's own height: a field-bearing card extends below
         // `NODE_HEIGHT`, so its bottom-row cables (and their hover hit-areas)
@@ -1631,6 +1728,10 @@ pub fn CanvasPanel() -> Element {
         .cloned()
         .zip(field_displays.iter().cloned())
         .enumerate()
+        // #171 Phase 3: an exploded composition node is drawn as a framed
+        // `ExplodedBody`, not an ordinary card. Filter AFTER `enumerate` so the
+        // remaining cards keep the index that maps to field-edge node identity.
+        .filter(|(_, (stage, _))| !exploded_ids.contains(&stage.id))
         .map(|(index, (stage, display))| {
             let query_stage_id = stage.id.clone();
             let expand_stage_id = stage.id.clone();
@@ -2030,6 +2131,18 @@ pub fn CanvasPanel() -> Element {
                     }
                 }
 
+                // #171 Phase 3: exploded composition nodes, each drawn as a framed
+                // mini-DAG at its laid-out position (its ordinary card was filtered
+                // out of `node_cards` above). Inside the same PanViewport, so it
+                // pans/zooms with the parent.
+                for (exploded_stage, body_canvas) in exploded_renders {
+                    super::exploded_body::ExplodedBody {
+                        key: "{exploded_stage.id}",
+                        stage: exploded_stage,
+                        canvas: body_canvas,
+                    }
+                }
+
                 // Active field-level cables — ONLY the hovered/pinned field's
                 // lineage closure, never the whole field-edge set. The overlay
                 // is above default cables but below cards, so field rows mask
@@ -2150,6 +2263,25 @@ pub(super) struct BodyCanvas {
 /// Auto density choice so the cards thin out as the user zooms the overlay out,
 /// exactly like the main canvas. All projection logic stays here in `panel.rs`;
 /// the overlay only consumes the result.
+/// Build the inner [`BodyCanvas`] for a resolved composition `body_id` — the
+/// `body_of → derive_body_view_unlaid → build_body_canvas` chain shared by the
+/// lightbox overlay (#171 Phase 1), the picture-in-picture inset (Phase 2), and
+/// the explode-in-place memo (Phase 3). Falls back to an empty view (so the
+/// default-sized empty canvas) when the plan has no such body: the overlay/inset
+/// render that empty preview, while the explode memo skips a no-body node before
+/// it ever calls this (so it never reserves a frame for an empty body).
+pub(super) fn build_body_canvas_for(
+    plan: &clinker_plan::plan::CompiledPlan,
+    body_id: clinker_plan::plan::composition_body::CompositionBodyId,
+    zoom: f32,
+) -> BodyCanvas {
+    let view = plan
+        .body_of(body_id)
+        .map(crate::pipeline_view::derive_body_view_unlaid)
+        .unwrap_or_default();
+    build_body_canvas(view, zoom)
+}
+
 pub(super) fn build_body_canvas(view: crate::pipeline_view::PipelineView, zoom: f32) -> BodyCanvas {
     let view = apply_canvas_layout(view, CanvasLayoutEngine::PortAwareSugiyama).view;
     let connections_model = view.connections;
@@ -2201,7 +2333,7 @@ pub(super) fn build_body_canvas(view: crate::pipeline_view::PipelineView, zoom: 
         .map(|(stage, display)| ConnectorObstacle {
             x: stage.canvas_x,
             y: stage.canvas_y,
-            width: NODE_WIDTH,
+            width: stage.effective_width(),
             height: rendered_card_height(stage, display),
         })
         .collect();
@@ -2247,7 +2379,7 @@ pub(super) fn build_body_canvas(view: crate::pipeline_view::PipelineView, zoom: 
     } else {
         let max_x = cards
             .iter()
-            .map(|(s, _)| s.canvas_x + NODE_WIDTH)
+            .map(|(s, _)| s.canvas_x + s.effective_width())
             .fold(0.0_f32, f32::max);
         let max_y = cards
             .iter()
@@ -2266,7 +2398,7 @@ pub(super) fn build_body_canvas(view: crate::pipeline_view::PipelineView, zoom: 
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use clinker_plan::config::parse_config;
 
@@ -2280,9 +2412,10 @@ mod tests {
         ConnectorEndpoints, ConnectorObstacle, obstacle_aware_channel_paths,
     };
     use super::{
-        CLICK_DRAG_SLOP_PX, FIELD_ROW_CAP, FieldDisplayState, FieldProjectionContext,
-        FieldRankSignals, GlobalNodeDisplayMode, GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP,
-        ResolvedNodeDisplayMode, build_field_rank_signals, field_matches_by_node,
+        BodyCanvas, CLICK_DRAG_SLOP_PX, EXPLODE_HEADER_BAND, EXPLODE_PAD, FIELD_ROW_CAP,
+        FieldDisplayState, FieldProjectionContext, FieldRankSignals, GlobalNodeDisplayMode,
+        GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP, ResolvedNodeDisplayMode,
+        build_field_rank_signals, field_matches_by_node, inject_explode_footprints,
         is_drag_beyond_slop, preview_rank, project_stage_fields, rendered_card_height,
         resolve_node_display_mode, text_matches_query,
     };
@@ -2297,6 +2430,44 @@ mod tests {
         assert!(is_drag_beyond_slop(CLICK_DRAG_SLOP_PX + 0.5, 0.0));
         assert!(is_drag_beyond_slop(0.0, -10.0));
         assert!(is_drag_beyond_slop(3.0, 3.0)); // 3²+3²=18 > 16
+    }
+
+    #[test]
+    fn inject_explode_footprints_sizes_only_exploded_nodes() {
+        // #171 Phase 3: the exploded node's footprint wraps its body's size plus
+        // the frame header band + padding; a node with no resolved body is left at
+        // the default 160px (None) so it keeps its ordinary card.
+        let mut clean = wide_stage(0);
+        clean.id = "clean".to_string();
+        let mut other = wide_stage(0);
+        other.id = "other".to_string();
+        let mut stages = vec![clean, other];
+
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            "clean".to_string(),
+            BodyCanvas {
+                cards: Vec::new(),
+                connections: Vec::new(),
+                svg_w: 300.0,
+                svg_h: 200.0,
+            },
+        );
+
+        inject_explode_footprints(&mut stages, &bodies);
+
+        assert_eq!(
+            stages[0].explode_footprint,
+            Some((
+                300.0 + 2.0 * EXPLODE_PAD,
+                200.0 + EXPLODE_HEADER_BAND + EXPLODE_PAD,
+            )),
+            "the exploded node's footprint wraps its body size + frame chrome",
+        );
+        assert_eq!(
+            stages[1].explode_footprint, None,
+            "a node with no resolved body keeps its default footprint",
+        );
     }
 
     fn wide_stage(count: usize) -> StageView {
@@ -2325,6 +2496,7 @@ mod tests {
                 .collect(),
             branches: Vec::<RouteBranch>::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         }
     }
 
@@ -2384,6 +2556,7 @@ mod tests {
             }],
             branches: Vec::new(),
             role_ports: Vec::new(),
+            explode_footprint: None,
         };
         let stages = vec![consumer.clone(), consumer.clone(), consumer.clone()];
 
