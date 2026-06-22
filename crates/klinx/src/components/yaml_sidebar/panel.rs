@@ -23,7 +23,31 @@ pub fn YamlSidebar() -> Element {
     // from the raw parse so it doesn't pop up or flicker mid-keystroke. It
     // settles ~500ms after typing stops and syncs immediately on tab switch /
     // file open / inspector edits (see the error-settle effect in app.rs, #43).
-    let errors = (state.visible_errors)();
+    let visible = (state.visible_errors)();
+    // Pipeline-level hard compile errors (#189): error-severity diagnostics the
+    // compile hook could not attribute to a single composition node (e.g. an E200
+    // type error) surface as `node: None` entries. The error bar is their home —
+    // visible regardless of selection, unlike the inspector (which renders nothing
+    // without a selection). Node-attributed entries are flagged on their node and
+    // not repeated here. These change only at compile cadence (after the parse
+    // debounce), so they do not reintroduce the mid-keystroke churn the
+    // `visible_errors` indirection prevents.
+    let compile_errors = (state.composition_diagnostics)()
+        .iter()
+        .filter(|diagnostic| diagnostic.node.is_none())
+        .map(|diagnostic| {
+            if diagnostic.code.is_empty() {
+                diagnostic.message.clone()
+            } else {
+                format!("[{}] {}", diagnostic.code, diagnostic.message)
+            }
+        })
+        .collect::<Vec<_>>();
+    let errors = visible
+        .iter()
+        .cloned()
+        .chain(compile_errors)
+        .collect::<Vec<_>>();
 
     // Tokenize only when the YAML text changes — not on every re-render (e.g.
     // selection or error-bar churn). `tokenize` is a pure fn of the text.

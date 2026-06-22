@@ -55,8 +55,9 @@ use crate::workspace::Workspace;
 /// is the fatal predicate). So E101–E109 ride along on the Ok path — exactly the
 /// silent no-op #187 surfaces — while a node-named diagnostic attributes to that
 /// node. (E111 empty-body and E112 runtime-depth do NOT start with `"E10"`, so
-/// they are fatal / runtime and never reach this filter; the hard-error path is a
-/// separate gap, see the `compile_active` `None` branch.)
+/// they are fatal / runtime and never reach this filter; the fatal `Err`-path
+/// diagnostics are surfaced separately by [`build_compile_error_diagnostics`] —
+/// #189 — without going through this Ok-path set.)
 ///
 /// Listed explicitly rather than prefix-matched so the set is a deliberate
 /// decision. In practice the node-attributable plan-compile codes are E101–E104,
@@ -88,12 +89,17 @@ const _: fn() = || {
 /// `tabs` signal — re-fires this effect, while unrelated tab-snapshot churn does
 /// not.
 ///
-/// Composition-binding diagnostics (#187) ride alongside the plan:
-/// `compile_with_diagnostics` returns the non-fatal E101–E109 diagnostics for any
-/// `composition` node whose `use:` failed to bind, and `composition_diagnostics`
-/// is set under the same generation guard so the canvas / inspector can flag the
-/// offending node instead of silently no-opping the drill. It is cleared whenever
-/// the plan is cleared.
+/// Composition / compile diagnostics ride through `composition_diagnostics` under
+/// the same generation guard, so the canvas / inspector can flag the offending
+/// node (or the YAML error bar a pipeline-level failure) instead of silently
+/// no-opping. Two paths feed it:
+/// - **Non-fatal (#187):** a successful compile returns the E101–E109 diagnostics
+///   for any `composition` node whose `use:` failed to bind; the plan is still
+///   set, the node flagged.
+/// - **Hard failure (#189):** a failed compile (E111 empty-body, E200 type error,
+///   …) carries no plan, but its error-severity diagnostics are still surfaced
+///   (the plan is cleared, the diagnostics set). They are cleared only when there
+///   is nothing to compile or the blocking compile panics.
 ///
 /// All signals are passed by value (`Signal<T>` / `Memo<T>` are `Copy`).
 pub fn use_compiled_plan(
@@ -153,11 +159,13 @@ pub fn use_compiled_plan(
         // desktop executor that polls `spawn` — the same thread that owns the
         // signal — so writing `compiled_plan` here is sound.
         spawn(async move {
-            let compiled =
+            // `spawn_blocking(...).await` is `Err` only if the blocking compile
+            // panicked (a `JoinError`); `compile_active` itself always returns a
+            // `CompileOutcome`, never a sentinel `None`.
+            let outcome =
                 tokio::task::spawn_blocking(move || compile_active(&config, &root, pipeline_dir))
                     .await
-                    .ok()
-                    .flatten();
+                    .ok();
 
             // A newer compile — or a clear — was dispatched while this one ran;
             // drop its result so it cannot clobber the fresher state.
@@ -165,19 +173,34 @@ pub fn use_compiled_plan(
                 return;
             }
 
-            match compiled {
-                Some((plan, diagnostics)) => {
+            match outcome {
+                // Successful compile: a plan plus any non-fatal composition
+                // diagnostics (#187). Set-if-changed so a clean compile (the
+                // common case, empty diagnostics) does not notify the
+                // canvas/inspector on every debounced re-compile.
+                Some(CompileOutcome {
+                    plan: Some(plan),
+                    diagnostics,
+                }) => {
                     compiled_plan.set(Some(plan));
-                    // Composition-binding diagnostics ride with the plan (#187).
-                    // Set-if-changed so a clean compile (the common case, empty
-                    // diagnostics) does not notify the canvas/inspector on every
-                    // debounced re-compile.
                     set_diagnostics(&mut composition_diagnostics, diagnostics);
                 }
-                // Hard compile failure (E200/E153/…). Those surface through the
-                // parse / schema-warning paths already; here we only clear the
-                // plan and its composition diagnostics so dependent surfaces fall
-                // back to the no-plan path instead of a stale body.
+                // Hard compile failure (#189): there is no plan, but the
+                // error-severity diagnostics still ride through
+                // `composition_diagnostics` so the canvas flags the offending
+                // composition node and the YAML error bar explains a
+                // pipeline-level failure — instead of a silent drop to the raw
+                // fallback. Clear the plan so resolved-mode readers take the
+                // no-plan path.
+                Some(CompileOutcome {
+                    plan: None,
+                    diagnostics,
+                }) => {
+                    clear_plan(&mut compiled_plan);
+                    set_diagnostics(&mut composition_diagnostics, diagnostics);
+                }
+                // The blocking compile panicked: nothing trustworthy to show.
+                // Clear both so dependent surfaces take the no-plan path.
                 None => {
                     clear_plan(&mut compiled_plan);
                     clear_diagnostics(&mut composition_diagnostics);
@@ -258,10 +281,25 @@ fn compile_root(ws: Option<&Workspace>, active_file: Option<&Path>) -> Option<(P
     Some((canonical(dir), PathBuf::new()))
 }
 
+/// The result of one off-thread compile.
+///
+/// Both compile outcomes carry diagnostics, so neither is silent:
+/// - **Success** — `plan: Some` plus any non-fatal composition-binding
+///   diagnostics (#187): a `composition` node whose `use:` failed to bind is
+///   dropped from the DAG but the rest of the pipeline still compiles.
+/// - **Hard failure** — `plan: None` plus the error-severity diagnostics that
+///   explain why the compiled tooling went dark (#189). The engine's fatal gate
+///   fires on any error-severity diagnostic whose code does **not** start with
+///   `"E10"` (e.g. E111 empty-body, E200 CXL type error, E153), discarding the
+///   plan; surfacing those diagnostics is what keeps a hard failure from looking
+///   like a node that simply has no composition body.
+struct CompileOutcome {
+    plan: Option<Arc<CompiledPlan>>,
+    diagnostics: Vec<CompositionDiagnostic>,
+}
+
 /// Compile `config` against `workspace_root`, resolving relative `use:` paths
-/// from `pipeline_dir`. Returns `None` on a hard compile error (the readers all
-/// tolerate `None`), otherwise the plan plus any composition-binding diagnostics
-/// (#187) collected during a successful — but partially-degraded — compile.
+/// from `pipeline_dir`, into a [`CompileOutcome`].
 ///
 /// This is the pure core of [`use_compiled_plan`], extracted so the resolution
 /// path — the workspace `.comp.yaml` scan plus relative `use:` binding — is
@@ -270,16 +308,89 @@ fn compile_active(
     config: &PipelineConfig,
     workspace_root: &Path,
     pipeline_dir: PathBuf,
-) -> Option<(Arc<CompiledPlan>, Vec<CompositionDiagnostic>)> {
+) -> CompileOutcome {
     let ctx = CompileContext::with_pipeline_dir(workspace_root, pipeline_dir);
-    // `compile_with_diagnostics` returns the non-fatal diagnostics (including the
-    // E101–E109 composition-binding errors that the plain `compile` discarded) on
-    // the success path; a dropped composition node still yields `Ok` with the
-    // node omitted from the DAG.
-    let (plan, engine_diagnostics) = config.compile_with_diagnostics(&ctx).ok()?;
-    let failed = failed_composition_nodes(config, &plan);
-    let diagnostics = build_composition_diagnostics(&failed, &engine_diagnostics);
-    Some((Arc::new(plan), diagnostics))
+    match config.compile_with_diagnostics(&ctx) {
+        // Success path: `compile_with_diagnostics` returns the non-fatal
+        // diagnostics (including the E101–E109 composition-binding errors that
+        // the plain `compile` discarded); a dropped composition node still yields
+        // `Ok` with the node omitted from the DAG.
+        Ok((plan, engine_diagnostics)) => {
+            let failed = failed_composition_nodes(config, &plan);
+            let diagnostics = build_composition_diagnostics(&failed, &engine_diagnostics);
+            CompileOutcome {
+                plan: Some(Arc::new(plan)),
+                diagnostics,
+            }
+        }
+        // Hard failure path (#189): the whole `Err(Vec<Diagnostic>)` was
+        // previously discarded, so a pipeline that parses but fails to compile
+        // (E111 empty-body, E200 type error, …) dropped the resolved/compiled
+        // tooling to the raw fallback with no surfaced reason. Capture the
+        // error-severity diagnostics instead.
+        Err(engine_diagnostics) => CompileOutcome {
+            plan: None,
+            diagnostics: build_compile_error_diagnostics(config, &engine_diagnostics),
+        },
+    }
+}
+
+/// Build user-facing diagnostics from a HARD compile failure — the `Err` path of
+/// [`PipelineConfig::compile_with_diagnostics`] (#189).
+///
+/// Unlike the success path there is no plan, so the body-assignment diff that
+/// [`failed_composition_nodes`] uses to identify a dropped composition is
+/// unavailable; attribution falls back to the engine message. Each error-severity
+/// diagnostic becomes a [`CompositionDiagnostic`] that is either:
+/// - attributed to a `composition` node (`node: Some`) when its message carries
+///   the engine's `composition node "X":` prefix (e.g. E111 `composition node
+///   "clean": body file … has zero nodes`), so the canvas flags that node exactly
+///   like the non-fatal #187 case; or
+/// - kept pipeline-level (`node: None`) otherwise (e.g. an E200 type error in a
+///   transform), which the YAML error bar surfaces independently of selection.
+///
+/// Attribution uses the full `composition node "X"` prefix
+/// ([`diagnostic_attributes_to_composition`]), NOT a bare quoted-name match: on
+/// this path there is no `is_composition_diagnostic` code filter nor
+/// body-assignment diff to guard a stray match, so a hard error that merely quotes
+/// a field or rule named like a composition (e.g. an E200 `order_by field
+/// "clean"`) must not be mis-attributed to that composition.
+///
+/// Warnings are dropped: only the error-severity diagnostics explain the failure
+/// (the fatal gate fires on an error-severity, non-`E10x` code), and the non-fatal
+/// warnings have no plan to annotate here.
+fn build_compile_error_diagnostics(
+    config: &PipelineConfig,
+    engine_diagnostics: &[Diagnostic],
+) -> Vec<CompositionDiagnostic> {
+    let composition_names: Vec<&str> = composition_node_names(config).collect();
+    engine_diagnostics
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.severity, clinker_core_types::Severity::Error))
+        .map(|diagnostic| CompositionDiagnostic {
+            node: composition_names
+                .iter()
+                .copied()
+                .find(|name| diagnostic_attributes_to_composition(&diagnostic.message, name))
+                .map(str::to_string),
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+        })
+        .collect()
+}
+
+/// True when a HARD compile error `message` attributes to composition `node` —
+/// i.e. it carries the engine's `composition node "X":` prefix (the quoted
+/// `{node:?}` form), as E111 empty-body does.
+///
+/// Stricter than [`diagnostic_names_node`], which matches the bare quoted name
+/// anywhere. On the success path the bare match is safe because it only *enriches*
+/// a node the body-assignment diff already flagged, gated by the E10x code filter.
+/// The Err path has neither guard, so it must require the `composition node`
+/// prefix or an unrelated hard error quoting a like-named field/rule would be
+/// mis-attributed to a correctly-bound composition.
+fn diagnostic_attributes_to_composition(message: &str, node: &str) -> bool {
+    message.contains(&format!("composition node {node:?}"))
 }
 
 /// The names of every `composition` node in `config` that the engine dropped from
@@ -292,13 +403,22 @@ fn compile_active(
 /// *enrich* each failed node with a reason (see [`build_composition_diagnostics`]).
 fn failed_composition_nodes(config: &PipelineConfig, plan: &CompiledPlan) -> Vec<String> {
     let bound = &plan.artifacts().composition_body_assignments;
+    composition_node_names(config)
+        .map(str::to_string)
+        .filter(|name| !bound.contains_key(name))
+        .collect()
+}
+
+/// The names of every `composition` node declared in `config`, in declaration
+/// order. The shared projection behind both the success-path body-assignment diff
+/// ([`failed_composition_nodes`]) and the Err-path attribution
+/// ([`build_compile_error_diagnostics`]).
+fn composition_node_names(config: &PipelineConfig) -> impl Iterator<Item = &str> {
     config
         .nodes
         .iter()
         .filter(|node| matches!(node.value, PipelineNode::Composition { .. }))
-        .map(|node| node.value.name().to_string())
-        .filter(|name| !bound.contains_key(name))
-        .collect()
+        .map(|node| node.value.name())
 }
 
 /// True when `code` is one of the engine's composition binding/expansion
@@ -466,8 +586,11 @@ mod tests {
 
         let config = parse_config(&yaml).expect("example pipeline parses");
         // The pipeline file sits at the workspace root → empty pipeline_dir.
-        let (plan, diagnostics) = compile_active(&config, &ws_root, PathBuf::new())
+        let outcome = compile_active(&config, &ws_root, PathBuf::new());
+        let plan = outcome
+            .plan
             .expect("example pipeline compiles against the examples workspace");
+        let diagnostics = outcome.diagnostics;
 
         let frame = crate::state::resolve_composition_frame(&plan, "clean")
             .expect("composition node `clean` binds to a body in the compiled plan");
@@ -526,8 +649,11 @@ nodes:
 "#;
 
         let config = parse_config(yaml).expect("pipeline parses");
-        let (plan, diagnostics) = compile_active(&config, &ws_root, PathBuf::new())
+        let outcome = compile_active(&config, &ws_root, PathBuf::new());
+        let plan = outcome
+            .plan
             .expect("a mis-pathed `use:` is non-fatal: the plan still compiles");
+        let diagnostics = outcome.diagnostics;
 
         // The body is dropped → the drill would resolve to nothing …
         assert!(
@@ -635,5 +761,190 @@ nodes:
         let got = build_composition_diagnostics(&failed, &engine);
         assert_eq!(got.len(), 2, "both column errors surface: {got:?}");
         assert!(got.iter().all(|d| d.node.as_deref() == Some("clean")));
+    }
+
+    fn warn(code: &str, message: &str) -> Diagnostic {
+        use clinker_core_types::span::{FileId, Span};
+        use std::num::NonZeroU32;
+        let file = FileId::new(NonZeroU32::new(1).expect("1 is non-zero"));
+        Diagnostic::warning(
+            code,
+            message,
+            clinker_core_types::LabeledSpan::new(Span::point(file, 0), None),
+        )
+    }
+
+    /// A single composition pipeline config (a `clean` composition + an `out`
+    /// output) for exercising the Err-path attribution against a real
+    /// `PipelineConfig::nodes` taxonomy. The `use:` need not resolve — these tests
+    /// feed synthetic diagnostics, not a live compile.
+    fn config_with_composition_named(name: &str) -> PipelineConfig {
+        use clinker_plan::config::parse_config;
+        let yaml = format!(
+            r#"
+pipeline:
+  name: hard_fail
+nodes:
+  - type: source
+    name: people
+    config:
+      name: people
+      type: csv
+      path: ./data/people.csv
+      schema:
+        - {{ name: first_name, type: string }}
+  - type: composition
+    name: {name}
+    input: people
+    use: ./compositions/x.comp.yaml
+    inputs:
+      names: people
+  - type: output
+    name: out
+    input: people
+    config:
+      name: out
+      type: csv
+      path: ./data/out.csv
+"#
+        );
+        parse_config(&yaml).expect("pipeline parses")
+    }
+
+    #[test]
+    fn build_compile_error_diagnostics_attributes_composition_and_keeps_rest_pipeline_level() {
+        let config = config_with_composition_named("clean");
+        let engine = vec![
+            // Names the composition node (quoted) → attributed so the canvas flags it.
+            diag(
+                "E111",
+                r#"composition node "clean": body file x.comp.yaml has zero nodes"#,
+            ),
+            // A hard error naming a non-composition node → pipeline-level (the YAML
+            // error bar shows it; per-node CXL attribution is #161's job, not this).
+            diag("E200", r#"transform node "out": type error in cxl"#),
+            // A warning is dropped: only error-severity diagnostics explain a hard
+            // failure, and there is no plan to annotate with non-fatal warnings.
+            warn("W101", r#"composition node "clean": deprecated form"#),
+        ];
+
+        let got = build_compile_error_diagnostics(&config, &engine);
+
+        assert_eq!(got.len(), 2, "the warning is dropped, got {got:?}");
+        let e111 = got
+            .iter()
+            .find(|d| d.code == "E111")
+            .expect("E111 is surfaced");
+        assert_eq!(
+            e111.node.as_deref(),
+            Some("clean"),
+            "an error naming the composition is attributed to it",
+        );
+        let e200 = got
+            .iter()
+            .find(|d| d.code == "E200")
+            .expect("E200 is surfaced");
+        assert_eq!(
+            e200.node, None,
+            "an error not naming a composition stays pipeline-level",
+        );
+    }
+
+    #[test]
+    fn build_compile_error_diagnostics_does_not_misattribute_a_field_named_like_a_composition() {
+        // A composition node named `clean` binds fine, but an unrelated hard error
+        // quotes a FIELD also named "clean". Attribution must require the engine's
+        // `composition node "clean"` prefix — a bare quoted-name match would flag
+        // the innocent composition and hide the real error from the bar.
+        let config = config_with_composition_named("clean");
+        let engine = vec![diag(
+            "E200",
+            r#"reshape node "shape": order_by field "clean" is not present in the upstream schema"#,
+        )];
+
+        let got = build_compile_error_diagnostics(&config, &engine);
+
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            got[0].node, None,
+            "a hard error merely quoting a field named like a composition stays pipeline-level",
+        );
+    }
+
+    /// The #189 headline scenario, end-to-end through the production compile core.
+    /// An empty-body composition is a HARD compile failure: E111 does not start
+    /// `"E10"`, so the engine's fatal gate discards the plan. Previously the whole
+    /// `Err` was dropped and the node silently vanished; `compile_active` now
+    /// returns no plan but surfaces the E111 attributed to the node so the canvas
+    /// flags it. Also guards against engine E111 message-format drift (the
+    /// node-attribution relies on the quoted `{node:?}` form).
+    #[test]
+    fn empty_body_composition_is_a_hard_failure_surfaced_for_the_node() {
+        use clinker_plan::config::parse_config;
+
+        // An isolated temp workspace holding one empty-body `.comp.yaml`, so the
+        // shared `examples/` workspace scan is untouched.
+        let tmp = std::env::temp_dir().join("klinx_test_189_empty_body");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("compositions")).expect("create temp workspace");
+        std::fs::write(
+            tmp.join("compositions/empty.comp.yaml"),
+            "_compose:\n  name: empty\n  inputs:\n    names:\n      schema:\n        \
+             - { name: first_name, type: string }\n  outputs:\n    out: first_name\n  \
+             config_schema: {}\nnodes: []\n",
+        )
+        .expect("write empty-body composition");
+
+        let yaml = r#"
+pipeline:
+  name: empty_body
+nodes:
+  - type: source
+    name: people
+    config:
+      name: people
+      type: csv
+      path: ./data/people.csv
+      schema:
+        - { name: first_name, type: string }
+  - type: composition
+    name: clean
+    input: people
+    use: ./compositions/empty.comp.yaml
+    inputs:
+      names: people
+  - type: output
+    name: out
+    input: people
+    config:
+      name: out
+      type: csv
+      path: ./data/out.csv
+"#;
+
+        let config = parse_config(yaml).expect("pipeline parses");
+        let outcome = compile_active(&config, &tmp, PathBuf::new());
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(
+            outcome.plan.is_none(),
+            "an empty-body composition is a hard compile failure → no plan",
+        );
+        let e111: Vec<_> = outcome
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "E111")
+            .collect();
+        assert_eq!(
+            e111.len(),
+            1,
+            "exactly one E111 is surfaced, got {:?}",
+            outcome.diagnostics,
+        );
+        assert_eq!(
+            e111[0].node.as_deref(),
+            Some("clean"),
+            "the E111 is attributed to the offending composition node",
+        );
     }
 }
