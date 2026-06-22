@@ -23,12 +23,14 @@
 use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 
-use crate::pipeline_view::derive_body_view_unlaid;
+use crate::pipeline_view::PipelineView;
 use crate::state::{move_composition_frames, use_app_state};
 
 use super::body_sub_canvas::BodySubCanvas;
 use super::breadcrumbs::{BreadcrumbBar, BreadcrumbTarget};
-use super::panel::{ZOOM_MAX, ZOOM_MIN, ZOOM_STEP_LINE, ZOOM_STEP_PIXEL, build_body_canvas};
+use super::panel::{
+    ZOOM_MAX, ZOOM_MIN, ZOOM_STEP_LINE, ZOOM_STEP_PIXEL, build_body_canvas, build_body_canvas_for,
+};
 use super::{CanvasHover, CompositionDrillTarget, HoverTarget, PinnedField};
 
 /// The picture-in-picture composition body inset (#171 Phase 2).
@@ -75,15 +77,11 @@ pub fn CompositionPip() -> Element {
     let canvas = use_memo(move || {
         let stack = state.composition_pip_stack.read();
         let frame = stack.last()?;
-        let view = {
-            let compiled_guard = state.compiled_plan.read();
-            compiled_guard
-                .as_ref()
-                .and_then(|plan| plan.body_of(frame.body_id))
-                .map(derive_body_view_unlaid)
-                .unwrap_or_default()
-        };
-        Some(build_body_canvas(view, *zoom.read()))
+        let zoom = *zoom.read();
+        Some(match state.compiled_plan.read().as_ref() {
+            Some(plan) => build_body_canvas_for(plan, frame.body_id, zoom),
+            None => build_body_canvas(PipelineView::default(), zoom),
+        })
     });
 
     // Breadcrumb labels + depth from the same stack read in the body (so the

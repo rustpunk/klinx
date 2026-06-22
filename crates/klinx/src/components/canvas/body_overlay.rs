@@ -35,12 +35,14 @@
 use dioxus::html::geometry::WheelDelta;
 use dioxus::prelude::*;
 
-use crate::pipeline_view::derive_body_view_unlaid;
+use crate::pipeline_view::PipelineView;
 use crate::state::{move_composition_frames, promote_overlay_to_drill, use_app_state};
 
 use super::body_sub_canvas::BodySubCanvas;
 use super::breadcrumbs::{BreadcrumbBar, BreadcrumbTarget};
-use super::panel::{ZOOM_MAX, ZOOM_MIN, ZOOM_STEP_LINE, ZOOM_STEP_PIXEL, build_body_canvas};
+use super::panel::{
+    ZOOM_MAX, ZOOM_MIN, ZOOM_STEP_LINE, ZOOM_STEP_PIXEL, build_body_canvas, build_body_canvas_for,
+};
 use super::{CanvasHover, HoverTarget, PinnedField};
 
 /// The in-context composition body overlay (#171).
@@ -105,20 +107,16 @@ pub fn BodyOverlay() -> Element {
     // O(nodes+edges) layout + obstacle routing on every hover. Returns `None` only
     // when the overlay is CLOSED (no frame); when a frame exists but the body can't
     // resolve it falls back to an empty canvas (mirroring `current_pipeline_view`),
-    // so the overlay chrome still shows. `derive_body_view_unlaid` skips the wasted
-    // barycenter pass since `build_body_canvas` re-lays-out anyway.
+    // so the overlay chrome still shows. The body-resolution chain is shared with
+    // the inset and the explode memo via `build_body_canvas_for`.
     let canvas = use_memo(move || {
         let stack = state.composition_overlay_stack.read();
         let frame = stack.last()?;
-        let view = {
-            let compiled_guard = state.compiled_plan.read();
-            compiled_guard
-                .as_ref()
-                .and_then(|plan| plan.body_of(frame.body_id))
-                .map(derive_body_view_unlaid)
-                .unwrap_or_default()
-        };
-        Some(build_body_canvas(view, *zoom.read()))
+        let zoom = *zoom.read();
+        Some(match state.compiled_plan.read().as_ref() {
+            Some(plan) => build_body_canvas_for(plan, frame.body_id, zoom),
+            None => build_body_canvas(PipelineView::default(), zoom),
+        })
     });
 
     // Breadcrumb labels + depth come from the SAME stack read in the component body

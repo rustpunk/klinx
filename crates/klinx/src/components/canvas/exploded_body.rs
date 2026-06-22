@@ -31,7 +31,7 @@ use crate::state::{toggle_composition_explode, use_app_state};
 use super::connector::Connector;
 use super::node::CanvasNode;
 use super::panel::{BodyCanvas, EXPLODE_HEADER_BAND, EXPLODE_PAD};
-use super::{CanvasHover, HoverTarget, PinnedField};
+use super::{CanvasHover, EmbeddedCanvas, HoverTarget, PinnedField};
 
 /// Render an exploded composition node as a framed mini-DAG at its position on the
 /// main canvas (#171 Phase 3).
@@ -59,6 +59,9 @@ pub(super) fn ExplodedBody(stage: StageView, canvas: BodyCanvas) -> Element {
         )
     });
     use_context_provider(|| PinnedField(Signal::new(None)));
+    // A read-only body preview: suppress the top-level explode `⊞` on any nested
+    // composition card inside this frame (#171 Phase 3).
+    use_context_provider(|| EmbeddedCanvas);
 
     let BodyCanvas {
         cards,
@@ -86,11 +89,26 @@ pub(super) fn ExplodedBody(stage: StageView, canvas: BodyCanvas) -> Element {
             "data-stage-kind": kind_attr,
             style: "left: {frame_x}px; top: {frame_y}px; width: {frame_w}px; height: {frame_h}px;",
 
-            // Header band: badge + composition name + collapse control.
+            // Header band: badge + composition name + collapse control. Clicking
+            // it single-selects the node so the exploded composition is still
+            // inspectable (the ordinary card — the usual selection target — is
+            // filtered out while exploded); the collapse button stops propagation.
             div {
                 class: "klinx-exploded-frame-header",
                 style: "height: {EXPLODE_HEADER_BAND}px;",
                 onmousedown: move |e: MouseEvent| e.stop_propagation(),
+                onclick: {
+                    let node_id = node_id.clone();
+                    move |e: MouseEvent| {
+                        e.stop_propagation();
+                        let mut selected_stages = state.selected_stages;
+                        let mut single = std::collections::HashSet::new();
+                        single.insert(node_id.clone());
+                        selected_stages.set(single);
+                        let mut selected_field = state.selected_field;
+                        selected_field.set(None);
+                    }
+                },
                 span { class: "klinx-exploded-frame-badge", "{badge}" }
                 span { class: "klinx-exploded-frame-label", "{label}" }
                 span { style: "flex: 1;" }

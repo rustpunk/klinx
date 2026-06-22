@@ -7,7 +7,7 @@ use crate::pipeline_view::{
 use crate::state::SelectedField;
 use crate::state::{resolve_composition_frame, toggle_composition_explode, use_app_state};
 
-use super::{CanvasHover, CompositionDrillTarget, LineageTarget, PinnedField};
+use super::{CanvasHover, CompositionDrillTarget, EmbeddedCanvas, LineageTarget, PinnedField};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum GlobalNodeDisplayMode {
@@ -193,6 +193,13 @@ pub fn CanvasNode(
     // nested drill stays in the inset. Read non-reactively (a stable per-surface
     // value), copied into the drill closure below.
     let drill_target = try_consume_context::<CompositionDrillTarget>().unwrap_or_default();
+
+    // True when this card is rendered inside a read-only body PREVIEW (overlay /
+    // inset / explode frame). The explode `⊞` toggles the TOP-LEVEL explode set,
+    // so it must not appear on a nested composition card inside an embedded body
+    // (#171 Phase 3) — there it would be a dead control or a name-collision
+    // phantom explode. Read non-reactively (a stable per-surface value).
+    let embedded = try_consume_context::<EmbeddedCanvas>().is_some();
 
     // Hover + pin contexts for the field-lineage reveal. Acquired once in the
     // component body (hooks must not run inside event handlers/conditionals); the
@@ -619,7 +626,7 @@ pub fn CanvasNode(
             // `composition_explode_set`; the panel then renders it as a framed
             // embedded mini-DAG (with its own collapse control) in place of this
             // card, so this affordance only ever shows the explode state.
-            if is_composition && !has_binding_error {
+            if is_composition && !has_binding_error && !embedded {
                 button {
                     class: "klinx-node-explode-btn",
                     title: "Explode the body in place",

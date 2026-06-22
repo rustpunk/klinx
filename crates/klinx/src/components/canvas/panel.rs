@@ -923,9 +923,13 @@ pub fn CanvasPanel() -> Element {
             .iter()
             .filter_map(|name| {
                 let frame = crate::state::resolve_composition_frame(plan, name)?;
-                let body = plan.body_of(frame.body_id)?;
-                let view = crate::pipeline_view::derive_body_view_unlaid(body);
-                Some((name.clone(), build_body_canvas(view, EXPLODE_BODY_ZOOM)))
+                // Skip a node whose body did not resolve — it keeps its ordinary
+                // card rather than reserving a default-sized empty frame.
+                plan.body_of(frame.body_id)?;
+                Some((
+                    name.clone(),
+                    build_body_canvas_for(plan, frame.body_id, EXPLODE_BODY_ZOOM),
+                ))
             })
             .collect()
     });
@@ -2259,6 +2263,25 @@ pub(super) struct BodyCanvas {
 /// Auto density choice so the cards thin out as the user zooms the overlay out,
 /// exactly like the main canvas. All projection logic stays here in `panel.rs`;
 /// the overlay only consumes the result.
+/// Build the inner [`BodyCanvas`] for a resolved composition `body_id` — the
+/// `body_of → derive_body_view_unlaid → build_body_canvas` chain shared by the
+/// lightbox overlay (#171 Phase 1), the picture-in-picture inset (Phase 2), and
+/// the explode-in-place memo (Phase 3). Falls back to an empty view (so the
+/// default-sized empty canvas) when the plan has no such body: the overlay/inset
+/// render that empty preview, while the explode memo skips a no-body node before
+/// it ever calls this (so it never reserves a frame for an empty body).
+pub(super) fn build_body_canvas_for(
+    plan: &clinker_plan::plan::CompiledPlan,
+    body_id: clinker_plan::plan::composition_body::CompositionBodyId,
+    zoom: f32,
+) -> BodyCanvas {
+    let view = plan
+        .body_of(body_id)
+        .map(crate::pipeline_view::derive_body_view_unlaid)
+        .unwrap_or_default();
+    build_body_canvas(view, zoom)
+}
+
 pub(super) fn build_body_canvas(view: crate::pipeline_view::PipelineView, zoom: f32) -> BodyCanvas {
     let view = apply_canvas_layout(view, CanvasLayoutEngine::PortAwareSugiyama).view;
     let connections_model = view.connections;

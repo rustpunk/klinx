@@ -16,6 +16,7 @@
 
 use dioxus::prelude::*;
 
+use super::EmbeddedCanvas;
 use super::connector::Connector;
 use super::node::CanvasNode;
 use super::panel::{BodyCanvas, PanViewport};
@@ -37,6 +38,10 @@ pub(super) fn BodySubCanvas(
     zoom: ReadSignal<f32>,
     depth: usize,
 ) -> Element {
+    // Mark this as a read-only body preview so the reused `CanvasNode` suppresses
+    // the top-level-only explode `⊞` on any nested composition card (#171 Phase 3).
+    use_context_provider(|| EmbeddedCanvas);
+
     let BodyCanvas {
         cards,
         connections,

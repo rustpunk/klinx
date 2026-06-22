@@ -30,6 +30,17 @@ pub enum CompositionDrillTarget {
     Pip,
 }
 
+/// Marker provided by the read-only body PREVIEW surfaces (the lightbox/inset
+/// [`body_sub_canvas::BodySubCanvas`] and the explode frame
+/// [`exploded_body::ExplodedBody`]) so the reused [`node::CanvasNode`] can tell it
+/// is rendering inside an embedded body, not on the top-level canvas. Used to
+/// suppress affordances that only make sense at the top level — currently the
+/// explode-in-place `⊞` toggle (#171 Phase 3), which mutates the top-level
+/// `composition_explode_set` and would be a dead control (or a name-collision
+/// phantom explode) on a nested composition card.
+#[derive(Clone, Copy)]
+pub(super) struct EmbeddedCanvas;
+
 const FIELD_HOVER_ENTER_DELAY_MS: u64 = 180;
 const FIELD_HOVER_EXIT_DELAY_MS: u64 = 150;
 const FIELD_HOVER_SKIP_DELAY_MS: u64 = 300;
