@@ -341,18 +341,33 @@ pub fn resolve_composition_frame(
     })
 }
 
+/// Move every composition frame from one navigation stack onto another,
+/// preserving order and any frames already on the target, and empty the source.
+///
+/// The three composition view-mode stacks — full-swap `composition_drill_stack`,
+/// lightbox `composition_overlay_stack`, and corner-inset `composition_pip_stack`
+/// (#171 Phase 2) — are mutually exclusive for a given navigation: transitioning
+/// between modes hands the frames from one to the next at the same depth. Every
+/// transition (overlay→drill "OPEN FULL", overlay→pip "dock to corner",
+/// pip→overlay "expand", pip→drill) is this same move, so it lives in one pure,
+/// unit-testable transform over the two frame vectors.
+pub fn move_composition_frames(
+    from: &mut Vec<CompositionDrillFrame>,
+    to: &mut Vec<CompositionDrillFrame>,
+) {
+    to.append(from);
+}
+
 /// Promote the in-context overlay frames to the full-swap drill stack (#171).
 ///
 /// The overlay's "OPEN FULL" escape hatch: the user has navigated some depth
 /// inside the overlay and wants the classic full-canvas drill at that same depth.
-/// Moves every overlay frame onto the drill stack (appending, preserving order
-/// and any frames already there) and empties the overlay stack. A pure transform
-/// over the two frame vectors so the move is unit-testable.
+/// A thin alias over [`move_composition_frames`] kept for call-site clarity.
 pub fn promote_overlay_to_drill(
     overlay: &mut Vec<CompositionDrillFrame>,
     drill: &mut Vec<CompositionDrillFrame>,
 ) {
-    drill.append(overlay);
+    move_composition_frames(overlay, drill);
 }
 
 /// A composition-binding diagnostic surfaced to the user (#187).
@@ -454,6 +469,18 @@ pub struct AppState {
     /// `CompositionDrillFrame` verbatim — a frame means the same thing whether it
     /// is shown in the overlay or in the full-swap canvas.
     pub composition_overlay_stack: Signal<Vec<CompositionDrillFrame>>,
+    /// Composition body PICTURE-IN-PICTURE stack (#171 Phase 2). Empty = no inset
+    /// open.
+    ///
+    /// The non-modal sibling of `composition_overlay_stack`: rather than a modal
+    /// lightbox over a dimmed parent, the body renders in a small pinned corner
+    /// panel while the parent canvas stays **fully interactive**. The overlay's
+    /// "dock to corner" button moves its frames here (and the inset's "expand"
+    /// button moves them back) via [`move_composition_frames`]; "open full"
+    /// promotes to `composition_drill_stack`. Reuses `CompositionDrillFrame`
+    /// verbatim — a frame means the same body whether shown full-swap, in the
+    /// lightbox, or in the inset.
+    pub composition_pip_stack: Signal<Vec<CompositionDrillFrame>>,
     /// Compiled plan with channel overlay applied. None when no channel is
     /// loaded or in Raw mode. Wrapped in Arc because CompiledPlan is not Clone.
     pub compiled_plan: Signal<Option<Arc<CompiledPlan>>>,
@@ -737,6 +764,33 @@ mod tests {
         let mut drill = vec![frame("a", 1)];
         promote_overlay_to_drill(&mut overlay, &mut drill);
         assert_eq!(drill.len(), 1);
+    }
+
+    /// #171 Phase 2: "dock to corner" moves the lightbox overlay frames onto the
+    /// PiP stack at the same depth and empties the overlay; "expand" round-trips
+    /// them back. The generic [`move_composition_frames`] backs every transition.
+    #[test]
+    fn dock_and_expand_round_trip_between_overlay_and_pip() {
+        let mut overlay = vec![frame("outer", 1), frame("inner", 2)];
+        let mut pip: Vec<CompositionDrillFrame> = Vec::new();
+
+        // Dock: overlay → pip.
+        move_composition_frames(&mut overlay, &mut pip);
+        assert!(overlay.is_empty(), "overlay is emptied on dock");
+        assert_eq!(
+            pip.iter().map(|f| f.alias.as_str()).collect::<Vec<_>>(),
+            vec!["outer", "inner"],
+            "frames keep their depth order in the inset",
+        );
+
+        // Expand: pip → overlay.
+        move_composition_frames(&mut pip, &mut overlay);
+        assert!(pip.is_empty(), "pip is emptied on expand");
+        assert_eq!(
+            overlay.iter().map(|f| f.alias.as_str()).collect::<Vec<_>>(),
+            vec!["outer", "inner"],
+            "frames return to the lightbox at the same depth",
+        );
     }
 
     /// Compile a tiny `src → comp → out` pipeline whose `comp` node uses a

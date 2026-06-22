@@ -2992,6 +2992,121 @@ input:-webkit-autofill:focus {
   background-size: 100px 100px;
 }
 
+/* ── Picture-in-picture composition body inset (#171 Phase 2) ──────────────
+   The non-modal sibling of the lightbox: a small panel pinned to the
+   bottom-right corner, with NO backdrop, so the parent canvas behind it stays
+   fully interactive. Sits below the modal overlay's z-index (200) — the two are
+   mutually exclusive, but if one ever stacks the modal wins. */
+/* Full-viewport, click-through container — `inset: 0` (like the lightbox
+   backdrop, which renders reliably) but transparent with pointer-events:none, so
+   the parent canvas stays interactive. The window is flex-pinned to the
+   bottom-right corner. */
+.klinx-composition-pip {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 16px;
+  pointer-events: none;
+}
+
+/* The actual inset window. Re-enables pointer events so it is interactive while
+   the surrounding container lets clicks fall through to the canvas. */
+.klinx-composition-pip-window {
+  width: 440px;
+  height: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--klinx-char-surface);
+  border: 1px solid var(--klinx-border-strong);
+  border-radius: 4px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.klinx-composition-pip-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--klinx-char-raised);
+  border-bottom: 1px solid var(--klinx-border-medium);
+  flex-shrink: 0;
+}
+
+/* The reused breadcrumb bar sits inline in the compact header — drop its own
+   chrome, matching the overlay header treatment. */
+.klinx-composition-pip-header .klinx-breadcrumb-bar {
+  border-bottom: none;
+  background: transparent;
+  height: auto;
+  padding: 0;
+}
+
+.klinx-composition-pip-header-spacer {
+  flex: 1;
+}
+
+.klinx-composition-pip-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 6px;
+  appearance: none;
+  background: var(--klinx-char);
+  border: 1px solid var(--klinx-border-medium);
+  border-radius: 2px;
+  color: var(--klinx-iron);
+  cursor: pointer;
+  font-family: var(--klinx-font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+}
+
+.klinx-composition-pip-btn:hover {
+  background: var(--klinx-char-surface);
+  border-color: var(--klinx-border-strong);
+  color: var(--klinx-bone);
+}
+
+.klinx-composition-pip-close {
+  background: none;
+  border: none;
+  color: var(--klinx-text-floor);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 6px;
+  line-height: 1;
+}
+
+.klinx-composition-pip-close:hover {
+  color: var(--klinx-bone);
+}
+
+/* Inner sub-canvas region — position:relative + overflow:hidden so the inner
+   PanViewport clips to the inset, reusing the same canvas grid backdrop as the
+   lightbox so the docked body still reads as a real canvas. */
+.klinx-composition-pip-canvas {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background-color: var(--klinx-char);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Cdefs%3E%3Cpattern id='minor' width='20' height='20' patternUnits='userSpaceOnUse'%3E%3Cpath d='M 20 0 L 0 0 0 20' fill='none' stroke='%2343B3AE' stroke-width='0.3' opacity='0.08'/%3E%3C/pattern%3E%3Cpattern id='major' width='100' height='100' patternUnits='userSpaceOnUse'%3E%3Crect width='100' height='100' fill='url(%23minor)'/%3E%3Cpath d='M 100 0 L 0 0 0 100' fill='none' stroke='%2343B3AE' stroke-width='0.8' opacity='0.08'/%3E%3C/pattern%3E%3C/defs%3E%3Crect width='100' height='100' fill='url(%23major)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 100px 100px;
+}
+
 .klinx-settings-content {
   overflow-y: auto;
   padding: 16px 20px;
