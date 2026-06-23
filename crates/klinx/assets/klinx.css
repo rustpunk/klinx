@@ -4553,6 +4553,15 @@ input:-webkit-autofill:focus {
   z-index: 4;
 }
 
+/* Boundary-crossing cables for an exploded composition (#171 Phase 3, PR B).
+   These bind the parent's boundary fields to the embedded body's ports, so they
+   MUST sit ABOVE the exploded frame (z-index 5, opaque background) and the node
+   cards (z-index 5) — otherwise the crossings vanish behind the frame they
+   cross into. */
+.klinx-canvas-svg--boundary {
+  z-index: 6;
+}
+
 /* ── 8. Node cards ─────────────────────────────────────────────────────────
    160 px wide, accent border-top, eroded asymmetric corners.
    ─────────────────────────────────────────────────────────────────────── */

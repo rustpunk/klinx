@@ -20,8 +20,19 @@
 //! Like [`super::body_sub_canvas::BodySubCanvas`] this draws the body's plain
 //! node-level DAG only (`dimmed: false`, field actions are no-ops). It re-provides
 //! fresh [`super::CanvasHover`] / [`super::PinnedField`] contexts so a hover inside
-//! the embedded body never lights the parent canvas. Boundary cables binding the
-//! parent's fields to the inner ports are a follow-up (#171 Phase 3, PR B).
+//! the embedded body never lights the parent canvas.
+//!
+//! The #154 boundary cables binding the parent's boundary fields to this body's
+//! input/output ports (#171 Phase 3, PR B) are NOT drawn here — they span the wall
+//! between the parent's cards and these inner ports, so they live in a single
+//! world-space layer in [`super::panel`] (resolved by `boundary_cable_anchors`),
+//! above this frame and the parent cards in the shared `PanViewport` transform.
+//!
+//! A nested `▶` inside this frame opens the lightbox overlay (the default
+//! [`super::CompositionDrillTarget`]); a dedicated `Explode` drill target is
+//! deliberately deferred until nested explode-in-place rendering lands (its
+//! footprint math compounds), since today it would be behaviourally identical to
+//! the overlay default.
 
 use dioxus::prelude::*;
 
