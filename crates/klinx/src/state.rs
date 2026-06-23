@@ -228,21 +228,30 @@ impl PipelineLayoutMode {
         [Self::Canvas, Self::Hybrid, Self::Editor, Self::Schematics];
 }
 
-/// Canvas data source mode — switches between raw pipeline config and
-/// channel-resolved compiled plan.
+/// Canvas data source mode — switches between the pipeline as authored and the
+/// engine-compiled plan.
 ///
 /// `Raw` shows the pipeline as authored (PipelineConfig from YAML).
-/// `Resolved` shows the pipeline after channel overlay application
-/// (CompiledPlan with provenance-tracked config values).
+/// `Resolved` shows the engine-compiled plan (CompiledPlan) — typed rows, field
+/// lineage, and composition boundary cables. The compiled plan is
+/// channel-INDEPENDENT (`use_compiled_plan` compiles against the workspace root
+/// with no channel input), so this view is available whenever the pipeline
+/// compiles, with or without an active channel.
+///
+/// Defaults to `Resolved` (#195): the canvas opens on the richer engine-true
+/// view, and the `Resolved` branch of [`current_pipeline_view`] degrades to the
+/// authored view when no compiled plan exists, so an incomplete pipeline still
+/// renders. The runtime default is set at the signal's init in `app.rs`; this
+/// derived `Default` is kept in sync for any `ChannelViewMode::default()` caller.
 ///
 /// Orthogonal to composition drill depth — a user can be drilled into
 /// a composition at depth 2 and toggle between Raw and Resolved.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ChannelViewMode {
     /// Show pipeline config from YAML (state.pipeline).
-    #[default]
     Raw,
-    /// Show resolved config from channel overlay (compiled_plan).
+    /// Show the engine-compiled plan (compiled_plan).
+    #[default]
     Resolved,
 }
 
@@ -530,6 +539,25 @@ pub fn use_app_state() -> AppState {
     *sig.read()
 }
 
+/// The pipeline-as-authored DAG view: the fully parsed config when present, else
+/// the best-effort partial parse, else an empty view.
+///
+/// Shared by [`current_pipeline_view`]'s `Raw` branch AND its `Resolved`-branch
+/// fallback for when no compiled plan exists yet (#195). Routing both paths
+/// through one chain is load-bearing now that `Resolved` is the default view:
+/// an incomplete pipeline that only parses partially (no full config, so no
+/// compiled plan) must still render its authored partial view here rather than
+/// blanking the canvas.
+fn authored_pipeline_view(state: &AppState) -> PipelineView {
+    match &*state.pipeline.read() {
+        Some(config) => derive_pipeline_view(config),
+        None => match &*state.partial_pipeline.read() {
+            Some(partial) => derive_partial_pipeline_view(partial),
+            None => PipelineView::default(),
+        },
+    }
+}
+
 /// Derive the DAG view currently shown by the canvas.
 ///
 /// This is intentionally layout-free: callers that render cards/connectors can
@@ -556,19 +584,14 @@ pub fn current_pipeline_view(state: AppState) -> PipelineView {
             let compiled_guard = state.compiled_plan.read();
             match compiled_guard.as_ref() {
                 Some(plan) => derive_resolved_pipeline_view(plan),
-                None => match &*state.pipeline.read() {
-                    Some(config) => derive_pipeline_view(config),
-                    None => PipelineView::default(),
-                },
+                // No compiled plan (incomplete/non-compiling pipeline, or the
+                // off-thread compile hasn't settled yet): degrade to the authored
+                // view through the SAME chain as `Raw`, so Resolved mode is never
+                // blank — see [`authored_pipeline_view`].
+                None => authored_pipeline_view(&state),
             }
         }
-        ChannelViewMode::Raw => match &*state.pipeline.read() {
-            Some(config) => derive_pipeline_view(config),
-            None => match &*state.partial_pipeline.read() {
-                Some(partial) => derive_partial_pipeline_view(partial),
-                None => PipelineView::default(),
-            },
-        },
+        ChannelViewMode::Raw => authored_pipeline_view(&state),
     }
 }
 

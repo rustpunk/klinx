@@ -77,7 +77,13 @@ pub fn AppShell() -> Element {
     // pauses; identifies the latest pending keystroke so stale settle tasks
     // no-op. See the error-settle effect below.
     let mut error_settle_gen = use_signal(|| 0u64);
-    let channel_view_mode = use_signal(|| ChannelViewMode::Raw);
+    // Default to the engine-resolved view (#195): when the pipeline compiles, the
+    // canvas opens on the richer Compiled view (typed rows, field lineage,
+    // composition boundary cables). With no compiled plan the Resolved branch of
+    // `current_pipeline_view` degrades to the authored view, so an incomplete
+    // pipeline still renders. A global preference (not per-tab) — it persists
+    // across tab switches.
+    let channel_view_mode = use_signal(|| ChannelViewMode::Resolved);
     // How a field-lineage reveal treats the off-path graph (#123). A UI
     // preference like `channel_view_mode` — it persists across tab switches
     // rather than resetting per tab.

@@ -1096,7 +1096,7 @@ fn channel_section(
         "view",
         match channel_mode {
             ChannelViewMode::Raw => "raw authored YAML",
-            ChannelViewMode::Resolved => "resolved channel overlay",
+            ChannelViewMode::Resolved => "engine-compiled plan",
         },
     )];
     facts.push(InspectorFact::new(
