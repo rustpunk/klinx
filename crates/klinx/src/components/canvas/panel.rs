@@ -761,6 +761,164 @@ fn inject_explode_footprints(stages: &mut [StageView], bodies: &HashMap<String, 
     }
 }
 
+/// Which side of the composition wall a [`BoundaryCable`] crosses (#171 Phase 3,
+/// PR B). Both flavours render in the same `--boundary` stroke; the tag exists so
+/// the resolver's intent is explicit and the unit test can assert per-direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BoundaryCableKind {
+    /// An outer producer column entering an inner input-port node.
+    Input,
+    /// An inner terminal node surfacing a column on the comp's synthesized output row.
+    Output,
+}
+
+/// One #154 boundary crossing for an exploded composition, resolved to drawable
+/// world-space geometry (#171 Phase 3, PR B).
+///
+/// `start`/`end` are world coordinates in the SAME transform the exploded frame and
+/// its body cards render in (the body endpoints are pre-offset by the frame's body
+/// region), so a single `<svg>` layer inside the main `PanViewport` draws them.
+/// `approximate` selects the hatched degrade treatment for a crossing that could
+/// not be pinned to a specific column.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct BoundaryCable {
+    pub start: (f32, f32),
+    pub end: (f32, f32),
+    pub approximate: bool,
+    pub kind: BoundaryCableKind,
+}
+
+/// Resolve the #154 boundary crossings of one exploded composition node into
+/// drawable cables binding the parent's boundary fields to the embedded body's
+/// ports (#171 Phase 3, PR B).
+///
+/// Pure and unit-testable: it reads only the laid-out `parent_stages`, the
+/// top-level `field_edges`, the bound `body`, the laid-out `body_cards` (the
+/// embedded mini-DAG in body-local coordinates, slot == card index), and the
+/// frame's body-region `offset` `(frame_x + EXPLODE_PAD, frame_y +
+/// EXPLODE_HEADER_BAND)`. It re-derives nothing the engine already mints — the
+/// port→slot maps come from [`derive_body_scope`] and the marker grammar from
+/// [`parse_composition_in_boundary_field`].
+///
+/// **Input cables** — one per `\u{2190}in:{port}:{col}` marker edge whose `to_node`
+/// is this composition: it starts at the outer producer's real output row
+/// ([`StageView::field_anchor_out`]) and ends at the offset inner port-seed card's
+/// node-level input anchor ([`StageView::port_in`]). The engine seeds each input
+/// port as a body Source node, so `input_port_to_slot[port]` is exactly that
+/// card — the visual entry point of the data into the body. The call-site
+/// `inputs:` binding is already baked into the edge's `from_node`, so this never
+/// re-reads it.
+///
+/// **Degrade cable** — a port that bound no user column contributes the single
+/// node-level boundary connector (empty endpoint fields, [`Precision::Approximate`]);
+/// `parse_…` returns `None` for its empty marker, so it is drawn once as a
+/// node-level cable (`port_out` → the comp frame's `port_in`) rather than per
+/// column.
+///
+/// **Output cables** — the composition's synthesized output rows
+/// (`synthesize_composition_output_rows`) are the union of its ports' surfaced
+/// columns, first-declaring-port-wins. Walking the body's output ports in that
+/// same declaration order with a first-seen `seen` set reproduces that dedup, so
+/// each synthesized row draws exactly one cable from its owning port's offset
+/// terminal card ([`StageView::port_out`]) to the comp frame's row anchor. A column
+/// absent from the comp's rows (engine-internal `$` columns are excluded during
+/// synthesis) resolves to no `field_index` and is skipped, so no separate
+/// engine-internal filter is needed here.
+pub(super) fn boundary_cable_anchors(
+    parent_stages: &[StageView],
+    comp_idx: usize,
+    field_edges: &[FieldEdge],
+    body: &clinker_plan::plan::composition_body::BoundBody,
+    body_cards: &[(StageView, FieldDisplayInfo)],
+    offset: (f32, f32),
+) -> Vec<BoundaryCable> {
+    use crate::pipeline_view::{derive_body_scope, parse_composition_in_boundary_field};
+
+    let mut cables = Vec::new();
+    let Some(comp) = parent_stages.get(comp_idx) else {
+        return cables;
+    };
+    let scope = derive_body_scope(body);
+    let (ox, oy) = offset;
+
+    // ── INPUT cables (and the node-level degrade connector) ──────────────────
+    for edge in field_edges {
+        if edge.to_node != comp_idx || edge.kind != FieldEdgeKind::Boundary {
+            continue;
+        }
+        let Some((port, _col)) = parse_composition_in_boundary_field(&edge.to_field) else {
+            // The degrade connector is the only boundary edge into the comp with a
+            // non-marker `to_field` — and it carries empty endpoint fields. Draw it
+            // once as a node-level crossing; anything else with this shape is not a
+            // crossing we can place, so it is skipped. When NO input port resolved a
+            // producer the engine anchors the degrade edge on the comp itself
+            // (`from = comp_idx`, pipeline_view.rs); there is no outer producer to
+            // draw from, so skip it rather than render a frame self-loop.
+            if edge.to_field.is_empty()
+                && edge.from_field.is_empty()
+                && edge.from_node != comp_idx
+                && let Some(producer) = parent_stages.get(edge.from_node)
+            {
+                cables.push(BoundaryCable {
+                    start: producer.port_out(),
+                    end: comp.port_in(),
+                    approximate: true,
+                    kind: BoundaryCableKind::Input,
+                });
+            }
+            continue;
+        };
+        let Some(producer) = parent_stages.get(edge.from_node) else {
+            continue;
+        };
+        let Some(fi) = producer.field_index(&edge.from_field) else {
+            continue;
+        };
+        let Some(&slot) = scope.input_port_to_slot.get(port) else {
+            continue;
+        };
+        let Some((inner, _)) = body_cards.get(slot) else {
+            continue;
+        };
+        let (ix, iy) = inner.port_in();
+        cables.push(BoundaryCable {
+            start: producer.field_anchor_out(fi),
+            end: (ix + ox, iy + oy),
+            approximate: edge.precision != Precision::Exact,
+            kind: BoundaryCableKind::Input,
+        });
+    }
+
+    // ── OUTPUT cables ────────────────────────────────────────────────────────
+    let mut seen: HashSet<String> = HashSet::new();
+    for (port, row) in &body.output_port_rows {
+        let Some(&slot) = scope.output_port_to_slot.get(port) else {
+            continue;
+        };
+        let Some((inner, _)) = body_cards.get(slot) else {
+            continue;
+        };
+        let (ix, iy) = inner.port_out();
+        for (field, _ty) in row.fields() {
+            let col = field.name.as_ref();
+            if !seen.insert(col.to_string()) {
+                continue;
+            }
+            let Some(ci) = comp.field_index(col) else {
+                continue;
+            };
+            cables.push(BoundaryCable {
+                start: (ix + ox, iy + oy),
+                end: comp.field_anchor_out(ci),
+                approximate: false,
+                kind: BoundaryCableKind::Output,
+            });
+        }
+    }
+
+    cables
+}
+
 fn rendered_card_height(stage: &StageView, display: &FieldDisplayInfo) -> f32 {
     // An exploded composition node (#171 Phase 3) renders as a framed container at
     // its embedded body's footprint height — no field rows, so no show-more footer.
@@ -1180,6 +1338,46 @@ pub fn CanvasPanel() -> Element {
     let field_displays: Vec<FieldDisplayInfo> =
         projected.iter().map(|p| p.display.clone()).collect();
     let stages: Vec<StageView> = projected.into_iter().map(|p| p.stage).collect();
+
+    // #171 Phase 3 (PR B): the #154 boundary crossings for every exploded
+    // composition — cables binding the parent's boundary field rows to the embedded
+    // body's input/output ports. Resolved against the SAME projected `stages` the
+    // cards render from (so an input cable leaves the producer's VISIBLE row and an
+    // output cable meets the hover-revealed consumer edge at the frame's right edge)
+    // and the already-projected body cards. Empty unless a composition is exploded;
+    // a node whose body did not resolve is absent from `explode_bodies` and skipped.
+    let boundary_cables: Vec<BoundaryCable> = {
+        let bodies = explode_bodies.read();
+        let plan_guard = state.compiled_plan.read();
+        match (bodies.is_empty(), plan_guard.as_ref()) {
+            (false, Some(plan)) => stages
+                .iter()
+                .enumerate()
+                .filter_map(|(comp_idx, comp)| {
+                    let body_canvas = bodies.get(&comp.id)?;
+                    let frame = crate::state::resolve_composition_frame(plan, &comp.id)?;
+                    let body = plan.body_of(frame.body_id)?;
+                    let offset = (
+                        comp.canvas_x + EXPLODE_PAD,
+                        comp.canvas_y + EXPLODE_HEADER_BAND,
+                    );
+                    // The already-projected body cards (`body_canvas.cards`) carry the
+                    // same node-level port anchors the `ExplodedBody` frame renders, so
+                    // the resolver borrows them directly — no per-render clone.
+                    Some(boundary_cable_anchors(
+                        &stages,
+                        comp_idx,
+                        &field_edges,
+                        body,
+                        &body_canvas.cards,
+                        offset,
+                    ))
+                })
+                .flatten()
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
 
     // #163: keep a freshly selected field's node fully on-screen. Selecting a
     // field opens the Inspector panel, which shrinks the canvas column; cards are
@@ -2143,6 +2341,40 @@ pub fn CanvasPanel() -> Element {
                     }
                 }
 
+                // #171 Phase 3 (PR B): boundary crossings for the exploded
+                // composition(s) — the #154 cables binding the parent's boundary
+                // field rows to the embedded body's ports, in the distinct
+                // `--boundary` stroke. A dedicated always-on world-space layer
+                // (gated on a composition being exploded) at z-index ABOVE the
+                // frames (`--boundary`), so each cable's crossing reads against the
+                // producer row and the inner port; both endpoints share the frame
+                // transform (the body ends are pre-offset in
+                // `boundary_cable_anchors`). `path: None` — the orthogonal route is
+                // derived; obstacle routing is deferrable.
+                if !boundary_cables.is_empty() {
+                    svg {
+                        class: "klinx-canvas-svg klinx-canvas-svg--boundary",
+                        width: "{svg_w}",
+                        height: "{svg_h}",
+                        for (ci, cable) in boundary_cables.into_iter().enumerate() {
+                            FieldConnector {
+                                key: "boundary-{ci}",
+                                start: cable.start,
+                                end: cable.end,
+                                kind_attr: "composition".to_string(),
+                                kind: FieldEdgeKind::Boundary,
+                                precision: if cable.approximate {
+                                    Precision::Approximate
+                                } else {
+                                    Precision::Exact
+                                },
+                                path: None,
+                                spotlight: false,
+                            }
+                        }
+                    }
+                }
+
                 // Active field-level cables — ONLY the hovered/pinned field's
                 // lineage closure, never the whole field-edge set. The overlay
                 // is above default cables but below cards, so field rows mask
@@ -2412,12 +2644,12 @@ mod tests {
         ConnectorEndpoints, ConnectorObstacle, obstacle_aware_channel_paths,
     };
     use super::{
-        BodyCanvas, CLICK_DRAG_SLOP_PX, EXPLODE_HEADER_BAND, EXPLODE_PAD, FIELD_ROW_CAP,
-        FieldDisplayState, FieldProjectionContext, FieldRankSignals, GlobalNodeDisplayMode,
-        GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP, ResolvedNodeDisplayMode,
-        build_field_rank_signals, field_matches_by_node, inject_explode_footprints,
-        is_drag_beyond_slop, preview_rank, project_stage_fields, rendered_card_height,
-        resolve_node_display_mode, text_matches_query,
+        BodyCanvas, BoundaryCableKind, CLICK_DRAG_SLOP_PX, EXPLODE_HEADER_BAND, EXPLODE_PAD,
+        FIELD_ROW_CAP, FieldDisplayState, FieldProjectionContext, FieldRankSignals,
+        GlobalNodeDisplayMode, GraphDisplayProfile, PREVIEW_FIELD_ROW_CAP, ResolvedNodeDisplayMode,
+        boundary_cable_anchors, build_body_canvas_for, build_field_rank_signals,
+        field_matches_by_node, inject_explode_footprints, is_drag_beyond_slop, preview_rank,
+        project_stage_fields, rendered_card_height, resolve_node_display_mode, text_matches_query,
     };
 
     #[test]
@@ -2467,6 +2699,313 @@ mod tests {
         assert_eq!(
             stages[1].explode_footprint, None,
             "a node with no resolved body keeps its default footprint",
+        );
+    }
+
+    /// Compile a `customer_clean`-shaped pipeline: source `people(first_name,
+    /// last_name)` → composition `clean` (input port `names` ← `people`, output
+    /// port `cleaned` ← body `normalize_names`) → output `cleaned_people`. The
+    /// single-node body mirrors the shipped `clean_names.comp.yaml`. Self-contained
+    /// (temp workspace, removed before returning) so the test never depends on the
+    /// on-disk example layout or its `use:` path resolution.
+    fn customer_clean_plan() -> clinker_plan::plan::CompiledPlan {
+        use clinker_plan::config::CompileContext;
+
+        let unique = format!(
+            "klinx-boundary-cables-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).expect("create temporary composition workspace");
+        std::fs::write(
+            root.join("clean_names.comp.yaml"),
+            r#"_compose:
+  name: clean_names
+  inputs:
+    names:
+      schema:
+        - { name: first_name, type: string }
+        - { name: last_name, type: string }
+  outputs:
+    cleaned: normalize_names
+  config_schema: {}
+
+nodes:
+  - type: transform
+    name: normalize_names
+    input: names
+    config:
+      cxl: |
+        emit full_name = first_name.trim() + " " + last_name.trim()
+"#,
+        )
+        .expect("write composition fixture");
+
+        let pipeline = r#"
+pipeline:
+  name: customer_clean
+nodes:
+  - type: source
+    name: people
+    config:
+      name: people
+      type: csv
+      path: ./people.csv
+      schema:
+        - { name: first_name, type: string }
+        - { name: last_name, type: string }
+  - type: composition
+    name: clean
+    input: people
+    use: ./clean_names.comp.yaml
+    inputs:
+      names: people
+  - type: output
+    name: cleaned_people
+    input: clean
+    config:
+      name: cleaned_people
+      type: csv
+      path: ./cleaned_people.csv
+"#;
+        let config = parse_config(pipeline).expect("pipeline fixture parses");
+        let plan = config
+            .compile(&CompileContext::new(root.clone()))
+            .expect("pipeline fixture compiles");
+        let _ = std::fs::remove_dir_all(root);
+        plan
+    }
+
+    /// The body id of the composition node named `name` in a compiled plan.
+    fn composition_body_id(
+        plan: &clinker_plan::plan::CompiledPlan,
+        name: &str,
+    ) -> clinker_plan::plan::composition_body::CompositionBodyId {
+        plan.dag()
+            .graph
+            .node_weights()
+            .find_map(|node| match node {
+                clinker_plan::plan::execution::PlanNode::Composition { name: n, body, .. }
+                    if n == name =>
+                {
+                    Some(*body)
+                }
+                _ => None,
+            })
+            .expect("compiled composition body id")
+    }
+
+    /// #171 Phase 3 (PR B): `boundary_cable_anchors` resolves the #154 input
+    /// crossings — one cable per `(names, first_name)` / `(names, last_name)`
+    /// column — from the outer producer's real output row to the body's input-port
+    /// node, and the output crossings from the body terminal to the composition's
+    /// synthesized output rows.
+    #[test]
+    fn boundary_cable_anchors_binds_producer_columns_and_output_rows() {
+        use crate::pipeline_view::{derive_body_scope, derive_resolved_pipeline_view};
+
+        let plan = customer_clean_plan();
+        let view = apply_canvas_layout(
+            derive_resolved_pipeline_view(&plan),
+            CanvasLayoutEngine::PortAwareSugiyama,
+        )
+        .view;
+        let stages = view.stages;
+        let field_edges = view.field_edges;
+
+        let comp_idx = stages
+            .iter()
+            .position(|s| s.id == "clean")
+            .expect("clean composition node present");
+        let people_idx = stages
+            .iter()
+            .position(|s| s.id == "people")
+            .expect("people source node present");
+
+        let body_id = composition_body_id(&plan, "clean");
+        let body = plan.body_of(body_id).expect("clean body resolves");
+        let body_cards = build_body_canvas_for(&plan, body_id, 1.0).cards;
+
+        let comp = &stages[comp_idx];
+        let offset = (
+            comp.canvas_x + EXPLODE_PAD,
+            comp.canvas_y + EXPLODE_HEADER_BAND,
+        );
+
+        let cables =
+            boundary_cable_anchors(&stages, comp_idx, &field_edges, body, &body_cards, offset);
+
+        // ── Input side: one cable per declared port column the producer surfaces ──
+        let scope = derive_body_scope(body);
+        let names_slot = *scope
+            .input_port_to_slot
+            .get("names")
+            .expect("input port `names` maps to a body slot");
+        let (ix, iy) = body_cards[names_slot].0.port_in();
+        let expected_inner_in = (ix + offset.0, iy + offset.1);
+
+        let people = &stages[people_idx];
+        let mut input_cables: Vec<_> = cables
+            .iter()
+            .filter(|c| c.kind == BoundaryCableKind::Input)
+            .collect();
+        assert_eq!(
+            input_cables.len(),
+            2,
+            "one input cable per (names, first_name)/(names, last_name) crossing: {cables:?}",
+        );
+        for cable in &input_cables {
+            assert!(
+                !cable.approximate,
+                "a real column crossing is Exact, not degraded: {cable:?}",
+            );
+            assert_eq!(
+                cable.end, expected_inner_in,
+                "every input cable lands on the body's `names` port node input anchor",
+            );
+        }
+        // Both columns of the producer are anchored, deterministically ordered by
+        // the producer's row order.
+        input_cables.sort_by(|a, b| a.start.1.total_cmp(&b.start.1));
+        let expected_starts: Vec<(f32, f32)> = ["first_name", "last_name"]
+            .iter()
+            .map(|col| {
+                let fi = people
+                    .field_index(col)
+                    .unwrap_or_else(|| panic!("producer surfaces {col}"));
+                people.field_anchor_out(fi)
+            })
+            .collect();
+        let mut actual_starts: Vec<(f32, f32)> = input_cables.iter().map(|c| c.start).collect();
+        actual_starts.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut sorted_expected = expected_starts.clone();
+        sorted_expected.sort_by(|a, b| a.1.total_cmp(&b.1));
+        assert_eq!(
+            actual_starts, sorted_expected,
+            "input cables start at the producer's first_name/last_name output rows",
+        );
+
+        // ── Output side: one cable per synthesized output row, all from the body's
+        // single terminal node, landing on the comp's synthesized rows ──
+        let cleaned_slot = *scope
+            .output_port_to_slot
+            .get("cleaned")
+            .expect("output port `cleaned` maps to a body slot");
+        let (ox, oy) = body_cards[cleaned_slot].0.port_out();
+        let expected_inner_out = (ox + offset.0, oy + offset.1);
+
+        let output_cables: Vec<_> = cables
+            .iter()
+            .filter(|c| c.kind == BoundaryCableKind::Output)
+            .collect();
+        assert!(
+            !comp.fields.is_empty(),
+            "the composition has synthesized output rows to anchor onto",
+        );
+        assert_eq!(
+            output_cables.len(),
+            comp.fields.len(),
+            "one output cable per synthesized output row: {cables:?}",
+        );
+        for cable in &output_cables {
+            assert_eq!(
+                cable.start, expected_inner_out,
+                "every output cable leaves the body's terminal node output anchor",
+            );
+        }
+        let mut output_ends: Vec<(f32, f32)> = output_cables.iter().map(|c| c.end).collect();
+        output_ends.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut expected_ends: Vec<(f32, f32)> = (0..comp.fields.len())
+            .map(|i| comp.field_anchor_out(i))
+            .collect();
+        expected_ends.sort_by(|a, b| a.1.total_cmp(&b.1));
+        assert_eq!(
+            output_ends, expected_ends,
+            "output cables land on the comp's synthesized output rows",
+        );
+    }
+
+    /// #171 Phase 3 (PR B): a degraded crossing (a port that bound no user column —
+    /// the engine's single node-level boundary connector with empty endpoint
+    /// fields) draws ONE node-level Approximate cable, not a per-column cable.
+    #[test]
+    fn boundary_cable_anchors_degrade_edge_yields_one_node_level_cable() {
+        use crate::pipeline_view::derive_resolved_pipeline_view;
+
+        let plan = customer_clean_plan();
+        let view = apply_canvas_layout(
+            derive_resolved_pipeline_view(&plan),
+            CanvasLayoutEngine::PortAwareSugiyama,
+        )
+        .view;
+        let stages = view.stages;
+
+        let comp_idx = stages.iter().position(|s| s.id == "clean").unwrap();
+        let people_idx = stages.iter().position(|s| s.id == "people").unwrap();
+
+        let body_id = composition_body_id(&plan, "clean");
+        let body = plan.body_of(body_id).unwrap();
+        let body_cards = build_body_canvas_for(&plan, body_id, 1.0).cards;
+
+        // Inject the engine's degrade boundary edge: a node-level crossing with
+        // empty endpoint fields, anchored on the producer, Approximate.
+        let field_edges = vec![FieldEdge::boundary(
+            people_idx,
+            String::new(),
+            comp_idx,
+            String::new(),
+            true,
+        )];
+
+        let comp = &stages[comp_idx];
+        let offset = (
+            comp.canvas_x + EXPLODE_PAD,
+            comp.canvas_y + EXPLODE_HEADER_BAND,
+        );
+        let cables =
+            boundary_cable_anchors(&stages, comp_idx, &field_edges, body, &body_cards, offset);
+
+        let degrade: Vec<_> = cables
+            .iter()
+            .filter(|c| c.kind == BoundaryCableKind::Input)
+            .collect();
+        assert_eq!(
+            degrade.len(),
+            1,
+            "the degrade edge yields exactly one node-level input cable: {cables:?}",
+        );
+        let cable = degrade[0];
+        assert!(cable.approximate, "a degraded crossing is Approximate");
+        assert_eq!(
+            cable.start,
+            stages[people_idx].port_out(),
+            "the degrade cable leaves the producer's node-level output port",
+        );
+        assert_eq!(
+            cable.end,
+            comp.port_in(),
+            "the degrade cable lands on the composition frame's node-level input port",
+        );
+
+        // When NO input port resolved a producer, the engine anchors the degrade
+        // edge on the comp itself (`from == comp_idx`). There is no outer producer,
+        // so it must NOT render a frame self-loop.
+        let self_anchored = vec![FieldEdge::boundary(
+            comp_idx,
+            String::new(),
+            comp_idx,
+            String::new(),
+            true,
+        )];
+        let from_self =
+            boundary_cable_anchors(&stages, comp_idx, &self_anchored, body, &body_cards, offset);
+        assert!(
+            from_self.iter().all(|c| c.kind != BoundaryCableKind::Input),
+            "a producer-less degrade edge draws no input/self-loop cable: {from_self:?}",
         );
     }
 

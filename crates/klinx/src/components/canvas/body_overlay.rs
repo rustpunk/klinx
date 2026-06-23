@@ -125,6 +125,11 @@ pub fn BodyOverlay() -> Element {
     let stack = state.composition_overlay_stack.read().clone();
     let breadcrumb_frames: Vec<String> = stack.iter().map(|f| f.alias.clone()).collect();
     let depth = stack.len();
+    // The ROOT frame's alias is the top-level composition node the lightbox was
+    // opened from — the only node the main canvas can explode in place (#171 Phase
+    // 3, PR B). Explode cannot preserve nested depth (nested explode is a
+    // documented follow-up), so the mode switch collapses to that root node.
+    let root_alias: Option<String> = stack.first().map(|f| f.alias.clone());
     drop(stack);
     let Some(canvas) = canvas() else {
         // No overlay open — render nothing. The memo (a hook) already ran above, so
@@ -384,6 +389,23 @@ pub fn BodyOverlay() -> Element {
                             overlay.write().clear();
                         },
                         "\u{2750}"
+                    }
+
+                    // Explode the root composition in place on the main canvas (#171
+                    // Phase 3, PR B): insert its top-level node name into the explode
+                    // set and clear the lightbox — mode parity overlay ⇄ pip ⇄ explode.
+                    if let Some(alias) = root_alias.clone() {
+                        button {
+                            class: "klinx-body-overlay-btn",
+                            title: "Explode this body in place on the canvas",
+                            onclick: move |_| {
+                                let mut overlay = state.composition_overlay_stack;
+                                let mut explode = state.composition_explode_set;
+                                explode.write().insert(alias.clone());
+                                overlay.write().clear();
+                            },
+                            "\u{229E}"
+                        }
                     }
 
                     // Escape hatch to the existing full-swap drill: move the
