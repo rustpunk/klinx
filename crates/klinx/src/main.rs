@@ -16,14 +16,16 @@
 //! A breadcrumb bar at the top tracks the navigation stack and allows
 //! jumping back to any ancestor level.
 //!
-//! ## Channel loading and Raw/Resolved toggle
+//! ## Raw/Resolved toggle
 //!
-//! Load a `.channel.yaml` file to see how channel overlays affect the
-//! pipeline's configuration. The `ChannelViewMode` toggle (`Raw` vs
-//! `Resolved`) controls whether the canvas and inspector show raw config from
-//! the pipeline definition or resolved config with channel overlays applied.
-//! This toggle is independent of drill-in level — inspect resolved values at
-//! any nesting depth.
+//! The `ChannelViewMode` toggle (`Raw` vs `Resolved`) controls whether the
+//! canvas and inspector show the pipeline as authored (raw config from the
+//! YAML) or the engine-compiled plan — typed rows, field lineage, and
+//! composition boundary cables. The compiled plan is channel-INDEPENDENT, so
+//! the toggle is enabled whenever the pipeline compiles (a compiled plan
+//! exists), with or without an active channel; it defaults to `Resolved`
+//! (#195). This toggle is independent of drill-in level — inspect resolved
+//! values at any nesting depth.
 //!
 //! ## Provenance panel
 //!

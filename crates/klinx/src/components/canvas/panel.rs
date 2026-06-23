@@ -1945,12 +1945,14 @@ pub fn CanvasPanel() -> Element {
         })
         .collect();
 
-    // Channel view mode toggle state (`tab_mgr` captured once at the top).
-    let has_channel = tab_mgr
-        .channel_state
-        .read()
-        .as_ref()
-        .is_some_and(|cs| cs.active_channel.is_some());
+    // View-mode toggle state. The Resolved view is backed by the engine-compiled
+    // plan (`derive_resolved_pipeline_view`), which is channel-INDEPENDENT —
+    // `use_compiled_plan` compiles against the workspace root with no channel
+    // input. So the toggle is gated on plan presence, not channel selection
+    // (#195): the resolved view (typed rows, field lineage, composition boundary
+    // cables) is reachable whenever the pipeline compiles, with or without a
+    // channel. Raw stays the always-available fallback when nothing compiled.
+    let has_compiled_plan = state.compiled_plan.read().is_some();
     let is_resolved = view_mode == ChannelViewMode::Resolved;
 
     rsx! {
@@ -1978,14 +1980,14 @@ pub fn CanvasPanel() -> Element {
                 }
             }
 
-            // ── Channel view mode toggle bar ─────────────────────────────
+            // ── View-mode toggle bar (Raw / Resolved) ───────────────────
             div {
                 class: "klinx-canvas-toolbar",
 
                 button {
                     class: if is_resolved { "klinx-view-toggle klinx-view-toggle--active" } else { "klinx-view-toggle" },
-                    disabled: !has_channel && !is_resolved,
-                    title: if !has_channel && !is_resolved { "Select a channel to enable resolved view" } else if is_resolved { "Switch to Raw view" } else { "Switch to Resolved view" },
+                    disabled: !has_compiled_plan && !is_resolved,
+                    title: if !has_compiled_plan && !is_resolved { "Resolve the pipeline to enable the resolved view" } else if is_resolved { "Switch to Raw view" } else { "Switch to Resolved view" },
                     onclick: move |_| {
                         let mut mode = state.channel_view_mode;
                         let current = *mode.read();
