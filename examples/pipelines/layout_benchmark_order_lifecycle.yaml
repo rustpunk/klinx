@@ -216,7 +216,7 @@ nodes:
     config:
       strategy: preserve
 
-  - type: output
+  - type: sink
     name: clean_orders
     input: framed_orders
     config:
@@ -224,7 +224,7 @@ nodes:
       type: csv
       path: ./output/layout_clean_orders.csv
 
-  - type: output
+  - type: sink
     name: review_orders
     input: cull_manual_review.manual_review
     config:
@@ -232,7 +232,7 @@ nodes:
       type: csv
       path: ./output/layout_review_orders.csv
 
-  - type: output
+  - type: sink
     name: category_report
     input: category_totals
     config:

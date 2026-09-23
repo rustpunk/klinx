@@ -38,13 +38,14 @@ petgraph = "0.8"
 # Upstream deleted the `clinker-core` umbrella crate and split it three ways:
 # config/plan/yaml/span moved to `clinker-plan`, partial/executor to
 # `clinker-exec`, and the leaf `span::FileId` vocabulary to `clinker-core-types`.
-cxl = { git = "https://github.com/rustpunk/clinker", rev = "997ea7d" }
-clinker-plan = { git = "https://github.com/rustpunk/clinker", rev = "997ea7d" }
-clinker-exec = { git = "https://github.com/rustpunk/clinker", rev = "997ea7d" }
-clinker-core-types = { git = "https://github.com/rustpunk/clinker", rev = "997ea7d" }
-clinker-record = { git = "https://github.com/rustpunk/clinker", rev = "997ea7d" }
-clinker-schema = { git = "https://github.com/rustpunk/clinker", rev = "997ea7d" }
-clinker-channel = { git = "https://github.com/rustpunk/clinker", rev = "997ea7d" }
+cxl = { git = "https://github.com/rustpunk/clinker", rev = "f7a1509" }
+clinker-plan = { git = "https://github.com/rustpunk/clinker", rev = "f7a1509" }
+clinker-exec = { git = "https://github.com/rustpunk/clinker", rev = "f7a1509" }
+clinker-core-types = { git = "https://github.com/rustpunk/clinker", rev = "f7a1509" }
+clinker-record = { git = "https://github.com/rustpunk/clinker", rev = "f7a1509" }
+clinker-schema = { git = "https://github.com/rustpunk/clinker", rev = "f7a1509" }
+clinker-channel = { git = "https://github.com/rustpunk/clinker", rev = "f7a1509" }
+clinker-lineage = { git = "https://github.com/rustpunk/clinker", rev = "f7a1509" }
 
 # Local workspace member: the git VCS layer (formerly clinker-git).
 klinx-git = { path = "crates/klinx-git" }

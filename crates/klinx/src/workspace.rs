@@ -422,36 +422,28 @@ fn append_gitignore(dir: &Path) {
 
 // ── Channel discovery ──────────────────────────────────────────────────
 
-use crate::state::{ChannelBindingSummary, ChannelState};
+use crate::state::{ChannelState, ChannelSummary};
 
-/// Discover channels by scanning the workspace for `.channel.yaml` files.
+/// Discover channels from the workspace's channel root.
 ///
-/// Uses `clinker_channel::scan_workspace_channels()` to find and parse
-/// all channel bindings. Returns None if no channels are found.
+/// The root and shard scheme come from `clinker.toml`'s `[channel]` table, the
+/// same layout `clinker run --channel` resolves against, and the tenant-folder
+/// walk is `clinker_channel::scan_channels`. Returns None when no channels are
+/// found. A missing or invalid `clinker.toml`, or a channel scan error, is
+/// non-fatal for discovery: the engine reports it when the channel is used.
 pub fn discover_channels(ws: &Workspace) -> Option<ChannelState> {
-    let bindings = match clinker_channel::scan_workspace_channels(&ws.root) {
-        Ok(b) if b.is_empty() => return None,
-        Ok(b) => b,
-        Err(_diagnostics) => {
-            // Channel parse errors are non-fatal for discovery.
-            // The user will see diagnostics when they try to apply a channel.
-            return None;
-        }
-    };
+    let toml = clinker_plan::config::ClinkerToml::load_from_workspace(&ws.root).ok()?;
+    let discovered = clinker_channel::scan_channels(&toml.channel, &ws.root).ok()?;
+    if discovered.is_empty() {
+        return None;
+    }
 
-    let channels = bindings
-        .iter()
-        .map(|b| ChannelBindingSummary {
-            name: b.name.clone(),
-            source_path: b.source_path.clone(),
-            target: match &b.target {
-                clinker_channel::ChannelTarget::Pipeline(p) => {
-                    format!("pipeline: {}", p.display())
-                }
-                clinker_channel::ChannelTarget::Composition(p) => {
-                    format!("composition: {}", p.display())
-                }
-            },
+    let channels = discovered
+        .into_iter()
+        .map(|c| ChannelSummary {
+            files: channel_files(&c.dir),
+            id: c.id,
+            dir: c.dir,
         })
         .collect();
 
@@ -460,6 +452,26 @@ pub fn discover_channels(ws: &Workspace) -> Option<ChannelState> {
         active_channel: None,
         recent_channels: Vec::new(),
     })
+}
+
+/// The channel's manifest and per-target overlay files directly inside its
+/// tenant folder, sorted by path.
+fn channel_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n == clinker_channel::CHANNEL_MANIFEST_FILE || n.ends_with(".channel.yaml")
+            })
+        })
+        .collect();
+    files.sort();
+    files
 }
 
 // ── Last workspace tracking (OS app data dir) ───────────────────────────

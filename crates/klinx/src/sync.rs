@@ -455,7 +455,7 @@ nodes:
     body: pruned
     config:
       strategy: preserve
-  - type: output
+  - type: sink
     name: out
     input: framed
     config:
@@ -531,7 +531,7 @@ nodes:
       path: ./in.csv
       schema:
         - { name: id, type: string }
-  - type: output
+  - type: sink
     name: out
     input: src
     config:

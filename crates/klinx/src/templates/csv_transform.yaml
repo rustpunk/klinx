@@ -42,7 +42,7 @@ nodes:
       cxl: |
         emit full_name = first_name + " " + last_name
 
-  - type: output
+  - type: sink
     name: result
     input: compute_fields
     config:

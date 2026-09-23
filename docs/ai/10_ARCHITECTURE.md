@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Verified.** Klinx is a Rust 2024 workspace containing a native Dioxus 0.7 desktop IDE for authoring Clinker YAML pipeline configurations. It runs as a `wry` webview desktop app and consumes Clinker engine crates through git-pinned workspace dependencies at rev `997ea7d`.
+**Verified.** Klinx is a Rust 2024 workspace containing a native Dioxus 0.7 desktop IDE for authoring Clinker YAML pipeline configurations. It runs as a `wry` webview desktop app and consumes Clinker engine crates through git-pinned workspace dependencies at rev `f7a1509`.
 
 ## Major Subsystems
 
@@ -18,7 +18,7 @@
 3. Workspace restore loads `kiln.toml`, `.kiln-state.json`, last-workspace state, or CLI workspace state through `workspace.rs`.
 4. YAML edits update `yaml_text` with an `EditSource`. `hooks/pipeline_sync.rs` debounces parsing and syncs parsed models back into active tab state.
 5. `sync.rs` routes YAML through pipeline or composition parsing, resolves imports when a workspace root is available, and can produce partial views for invalid YAML.
-6. `pipeline_view.rs` and `pipeline_view/field_lineage.rs` derive canvas-ready models, layout, connections, branch ports, and field lineage. Raw top-level pipeline views use the klinx-side schema/lineage approximation; Resolved top-level views use `CompiledPlan::typed_output_row` as the field row/type source and gate lineage edges to resolved rows. Compiled composition drill-in uses `derive_body_view` over `BoundBody`; body field rows come from `BoundBody::body_rows` and missing rows degrade to node-level body connectors. `pipeline_view/layout_model.rs` provides the pure Rust port-aware layered layout path. The visible canvas requests `CanvasLayoutEngine::PortAwareSugiyama` through the layout-selection wrapper and falls back to the current barycenter view when anchors cannot be validated.
+6. `pipeline_view.rs` and `pipeline_view/field_lineage.rs` derive canvas-ready models, layout, connections, branch ports, and field lineage. Raw top-level pipeline views use the klinx-side schema/lineage approximation; Resolved top-level views use `CompiledPlan::output_row` as the field row/type source (a Composition node instead gets the union of its body's output-port rows) and gate lineage edges to resolved rows. Compiled composition drill-in uses `derive_body_view` over `BoundBody`; body field rows come from `BoundBody::body_rows` and missing rows degrade to node-level body connectors. `pipeline_view/layout_model.rs` provides the pure Rust port-aware layered layout path. The visible canvas requests `CanvasLayoutEngine::PortAwareSugiyama` through the layout-selection wrapper and falls back to the current barycenter view when anchors cannot be validated.
 7. Components consume `AppState` and `TabManagerState` contexts to render canvas, YAML editor, inspector, schemas, search, git, and overlays. The selected-item inspector uses `components/inspector/model.rs` to derive node/field details from the current pipeline view and parsed config before RSX renders them.
 8. `klinx-git` shells out to `git` and `gh` for version-control operations used by version-mode UI and git status hooks.
 
@@ -29,7 +29,7 @@
 - **UI/model boundary**: `pipeline_view` creates UI-safe view models; components should not reimplement graph derivation.
 - **Layout boundary**: `layout_model` represents ordered node, field-row, and branch ports with ranked layers and connector paths. The visible canvas requests `CanvasLayoutEngine::PortAwareSugiyama`; missing stage, branch, or field anchors fall back to the current barycenter view with `CanvasLayoutFallback` metadata. Prior research in `docs/research/2026-06-13-field-lineage-ui.md` and `docs/research/2026-06-14-route-node-visualization.md` points toward this Rust Sugiyama-style layered pass with port-aware crossing minimization and orthogonal routing.
 - **Git boundary**: `klinx-git` owns repository operations; UI should avoid ad hoc shelling out.
-- **Desktop-only boundary**: no wasm/web target or Playwright browser target is documented.
+- **Desktop-only boundary**: no wasm/web target or Playwright browser target exists today. The planned browser architecture (Rust core and Axum server, React UI, workspaces as git repositories on a git host; the desktop app is retired at parity) is recorded in [decisions/0001-browser-ui-architecture.md](decisions/0001-browser-ui-architecture.md).
 
 ## Public API Surfaces Or Entry Points
 

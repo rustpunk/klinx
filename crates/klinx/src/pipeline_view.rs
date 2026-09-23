@@ -154,7 +154,7 @@ pub fn stage_kind_for_node(node: &PipelineNode) -> StageKind {
         PipelineNode::Route { .. } => StageKind::Route,
         PipelineNode::Merge { .. } => StageKind::Merge,
         PipelineNode::Combine { .. } => StageKind::Combine,
-        PipelineNode::Output { .. } => StageKind::Output,
+        PipelineNode::Sink { .. } => StageKind::Output,
         PipelineNode::Composition { .. } => StageKind::Composition,
         // The three per-group operators each get their own first-class kind so
         // the canvas labels, accents, and ports them distinctly (#80). No `_`
@@ -223,6 +223,42 @@ fn output_branches(node: &PipelineNode) -> Vec<RouteBranch> {
         }],
         _ => Vec::new(),
     }
+}
+
+/// The bound body of the composition node `comp_name`, top-level or nested.
+///
+/// The body id lives on the lowered `PlanNode::Composition`. The top-level DAG is
+/// searched first, then every bound body's own graph, so a composition nested
+/// inside another composition's body resolves too: the lineage trace descends
+/// through nested compositions by name. A composition whose `use:` failed to bind
+/// carries the sentinel id, which `body_of` rejects, so a `None` here means "no
+/// such composition" or "did not bind".
+pub fn composition_body<'p>(
+    plan: &'p clinker_plan::plan::CompiledPlan,
+    comp_name: &str,
+) -> Option<(
+    clinker_plan::plan::CompositionBodyId,
+    &'p clinker_plan::plan::BoundBody,
+)> {
+    let composition_id = |node: &clinker_plan::plan::execution::PlanNode| match node {
+        clinker_plan::plan::execution::PlanNode::Composition { name, body, .. }
+            if name == comp_name =>
+        {
+            Some(*body)
+        }
+        _ => None,
+    };
+    let body_id = plan
+        .dag()
+        .graph
+        .node_weights()
+        .find_map(composition_id)
+        .or_else(|| {
+            plan.composition_bodies()
+                .values()
+                .find_map(|body| body.graph.node_weights().find_map(composition_id))
+        })?;
+    plan.body_of(body_id).map(|body| (body_id, body))
 }
 
 pub fn aggregate_group_key_port_id(key: &str) -> String {
@@ -959,7 +995,7 @@ fn derive_view_from_nodes_inner(
             | PipelineNode::Transform { header, .. }
             | PipelineNode::Aggregate { header, .. }
             | PipelineNode::Route { header, .. }
-            | PipelineNode::Output { header, .. }
+            | PipelineNode::Sink { header, .. }
             | PipelineNode::Composition { header, .. } => name_to_idx
                 .get(node_input_name(&header.input.value))
                 .copied()
@@ -1023,7 +1059,7 @@ fn derive_view_from_nodes_inner(
             | PipelineNode::Transform { header, .. }
             | PipelineNode::Aggregate { header, .. }
             | PipelineNode::Route { header, .. }
-            | PipelineNode::Output { header, .. }
+            | PipelineNode::Sink { header, .. }
             | PipelineNode::Composition { header, .. } => {
                 push_input_edge(
                     &header.input.value,
@@ -1202,7 +1238,7 @@ pub fn derive_composition_view(comp: &CompositionFile) -> PipelineView {
             | PipelineNode::Transform { header, .. }
             | PipelineNode::Aggregate { header, .. }
             | PipelineNode::Route { header, .. }
-            | PipelineNode::Output { header, .. }
+            | PipelineNode::Sink { header, .. }
             | PipelineNode::Composition { header, .. } => {
                 if let Some(e) = resolve_edge(&header.input.value, &body_idx) {
                     preds.push(e);
@@ -1361,7 +1397,7 @@ fn node_preserves_input_schema(node: &PipelineNode) -> bool {
 /// Shared by both lineage entry points: a composition input port and a pipeline
 /// Source node both declare their shape as `[{name, type}]` ([`SchemaDecl`]), and
 /// both seed the lineage graph with [`FieldKind::Declared`] origin rows. Each
-/// row carries its declared datatype ([`ColumnDecl::ty`]) as a compact label
+/// row carries its declared datatype ([`Column::ty`](clinker_plan::config::Column)) as a compact label
 /// (#73); these origin types then propagate to downstream passthrough rows.
 ///
 /// `correlation_key` is the slot's optional [`CorrelationKey`](clinker_plan::config::CorrelationKey)
@@ -1373,7 +1409,7 @@ fn node_preserves_input_schema(node: &PipelineNode) -> bool {
 /// columns — the engine's internal `$ck.<field>` shadow columns are never part
 /// of `schema.columns`, so they cannot be marked here.
 fn declared_rows(
-    columns: &[clinker_plan::config::pipeline_node::ColumnDecl],
+    columns: &[clinker_plan::config::Column],
     correlation_key: Option<&clinker_plan::config::CorrelationKey>,
 ) -> Vec<FieldRow> {
     let ck_fields: std::collections::HashSet<&str> = correlation_key
@@ -1686,7 +1722,29 @@ fn emit_predicate_influence_edges(
     let Some(support) = field_lineage::predicate_support(predicate) else {
         return;
     };
-    for member in &support {
+    emit_support_influence_edges(
+        acc,
+        idx,
+        &support,
+        kind,
+        surviving_rows,
+        producers_of,
+        input_aliases,
+    );
+}
+
+/// Emit INDIRECT influence edges from a predicate's already-resolved read-set
+/// (its support columns) onto every surviving output row of node `idx`.
+fn emit_support_influence_edges<'s>(
+    acc: &mut EdgeAccumulator,
+    idx: usize,
+    support: impl IntoIterator<Item = &'s String>,
+    kind: FieldEdgeKind,
+    surviving_rows: &[FieldRow],
+    producers_of: &std::collections::HashMap<String, Vec<usize>>,
+    input_aliases: &std::collections::HashMap<String, usize>,
+) {
+    for member in support {
         for (p, from_field) in resolve_support_anchors(member, producers_of, input_aliases) {
             for row in surviving_rows {
                 // INDIRECT influence edges are always Approximate (#148): the
@@ -2520,7 +2578,7 @@ fn composition_field_lineage(
         let rows = decl
             .schema
             .as_ref()
-            .map(|s| declared_rows(&s.columns, None));
+            .map(|columns| declared_rows(columns, None));
         slots.push(LineageSlot::Origin(rows.unwrap_or_default()));
     }
     // Body nodes analyzed as transforms. No CK marking happens here (#88):
@@ -2661,8 +2719,11 @@ fn pipeline_field_lineage(
                 // Mark the source columns named in `correlation_key` as CK
                 // drivers (#88). The flag then propagates onto downstream
                 // carried passthrough rows in `compute_field_lineage`.
+                // A multi-record source seeds the discriminator-led superset of
+                // its record types; a generated or file schema has no authored
+                // columns here.
                 LineageSlot::Origin(declared_rows(
-                    &body.schema.columns,
+                    &body.schema.bound_columns().unwrap_or_default(),
                     body.correlation_key.as_ref(),
                 ))
             }
@@ -2751,12 +2812,11 @@ fn resolved_pipeline_field_lineage(
             .map(|program| field_lineage::emit_copy_targets(program, &input_cols))
             .unwrap_or_default();
 
-        // Composition boundary handling (#154): a Composition node has no CXL of
-        // its own, so the engine puts no entry in `artifacts.typed` and
-        // `typed_output_row` returns None — its output columns are otherwise lost
-        // in this view and the value chain would skip straight from the upstream
-        // producer to the downstream consumer, never passing through the
-        // composition (which would block #155's descent). So we:
+        // Composition boundary handling (#154): the engine's `output_row` for a
+        // Composition is only its FIRST bound output port's row, so reading it
+        // would drop the columns every other port surfaces, and the value chain
+        // must pass through the composition (for #155's descent) rather than skip
+        // from the upstream producer to the downstream consumer. So we:
         //   1. SYNTHESIZE the composition's output rows from the body's declared
         //      output-port columns, set into `out_fields[idx]` here (before the
         //      typed-row `continue`) so the DOWNSTREAM node — processed later in
@@ -2774,12 +2834,7 @@ fn resolved_pipeline_field_lineage(
             // synthesize + emit-input were pure waste). A missing assignment or a
             // `body_of` miss degrades gracefully: the composition still renders, just
             // with no synthesized rows and no boundary edges.
-            if let Some(body) = plan
-                .artifacts()
-                .composition_body_assignments
-                .get(node.name())
-                .and_then(|&body_id| plan.body_of(body_id))
-            {
+            if let Some((_, body)) = composition_body(plan, node.name()) {
                 out_fields[idx] = synthesize_composition_output_rows(body);
                 emit_composition_input_boundary_edges(
                     &mut acc,
@@ -2790,13 +2845,13 @@ fn resolved_pipeline_field_lineage(
                     &out_fields,
                 );
             }
-            // A Composition has no typed_output_row of its own; its rows are the
-            // synthesized ones above and it runs no transform/emit analysis. Skip
-            // the rest of the per-node body (it is keyed on `typed_output_row`).
+            // A Composition's rows are the synthesized all-port union above and it
+            // runs no transform/emit analysis. Skip the rest of the per-node body
+            // (it is keyed on the engine's per-node `output_row`).
             continue;
         }
 
-        let Some(row) = plan.typed_output_row(node.name()) else {
+        let Some(row) = plan.output_row(node.name()) else {
             continue;
         };
         out_fields[idx] =
@@ -2899,8 +2954,8 @@ fn resolved_pipeline_field_lineage(
 /// Synthesize a Composition node's output [`FieldRow`]s from its bound body's
 /// declared output ports (#154).
 ///
-/// The engine gives a Composition no `typed_output_row` (it has no CXL of its own),
-/// so in the resolved top-level view its output columns would otherwise be lost and
+/// The engine's `output_row` for a Composition is only its first bound output
+/// port's row, so reading it would lose the columns the other ports surface, and
 /// the value chain would bypass the composition entirely. We rebuild them from the
 /// body's `output_port_rows`: the user-facing columns each port surfaces back to the
 /// parent scope (engine-internal `$`-columns excluded via [`is_engine_internal_column`]),
@@ -3304,14 +3359,14 @@ fn build_stage_view(node: &PipelineNode, x: f32, y: f32) -> StageView {
                 explode_footprint: None,
             }
         }
-        PipelineNode::Output {
+        PipelineNode::Sink {
             header,
             config: body,
         } => StageView {
             id: header.name.clone(),
             label: header.name.clone(),
             kind,
-            subtitle: body.output.path.clone(),
+            subtitle: body.sink.path.clone(),
             canvas_x: x,
             canvas_y: y,
             cxl_source: None,
@@ -3778,7 +3833,7 @@ fn build_body_view(
                 (name.clone(), StageKind::Route, format!("{mode:?}"))
             }
             PlanNode::Merge { name, .. } => (name.clone(), StageKind::Merge, String::new()),
-            PlanNode::Output { name, .. } => (name.clone(), StageKind::Output, String::new()),
+            PlanNode::Sink { name, .. } => (name.clone(), StageKind::Output, String::new()),
             PlanNode::Sort { name, .. } => (name.clone(), StageKind::Transform, "sort".into()),
             PlanNode::Aggregation { name, strategy, .. } => {
                 (name.clone(), StageKind::Aggregate, format!("{strategy:?}"))
@@ -4166,7 +4221,7 @@ fn body_node_stage_program<'a>(
 ///   aggregate column (`emit total = sum(x)`) derives to the input column it folds,
 ///   and its `group_by` columns draw `GroupBy` influence + role edges (#180 GAP 1/2).
 /// - A body **Route**/**Cull** emits its `Conditional`/`Filter` INDIRECT influence
-///   edges via [`body_node_influence_predicates`] (#180 GAP 2). The body resolves
+///   edges via [`body_node_influence_support`] (#180 GAP 2). The body resolves
 ///   predicate columns WITHOUT port-alias disambiguation (it passes an empty alias
 ///   map), consistent with the body's empty-alias model for derive edges — a
 ///   precision divergence from the top-level path, acceptable and pre-existing for the
@@ -4313,11 +4368,11 @@ fn body_field_edges(
         // columns WITHOUT port-alias disambiguation (`no_aliases`) — consistent with
         // the body's empty-alias model for derive edges; see `body_field_edges` doc.
         if let Some((_, plan_node)) = resolved {
-            for (predicate, kind) in body_node_influence_predicates(plan_node, &body.route_bodies) {
-                emit_predicate_influence_edges(
+            for (support, kind) in body_node_influence_support(plan_node) {
+                emit_support_influence_edges(
                     &mut acc,
                     to,
-                    &predicate,
+                    &support,
                     kind,
                     &stage.fields,
                     &producers_of,
@@ -4345,55 +4400,30 @@ fn body_node_group_keys(
     }
 }
 
-/// The control-flow predicates a BODY node imposes, each paired with the INDIRECT
-/// edge kind it produces (#180 GAP 2) — the body-scope analogue of
-/// [`node_influence_predicates`], reading the already-resolved engine `PlanNode`
-/// (plus the body's `route_bodies` table) instead of the top-level config.
+/// The control-flow predicate read-sets a BODY node imposes, each paired with
+/// the INDIRECT edge kind it produces (#180 GAP 2) — the body-scope analogue of
+/// [`node_influence_predicates`]. Read from Clinker's
+/// [`predicate_support`](clinker_plan::plan::predicate_support), which derives
+/// each predicate's columns from the node's retained typechecked programs, so
+/// the body never re-parses predicate source.
 ///
-/// - **Route** — body Route conditions live in
-///   [`BoundBody::route_bodies`]`[name].conditions` (the top-level Route's
-///   conditions would mis-route a body Route, so the body keeps its own). Each
-///   branch condition is a `Conditional` predicate; the default branch has none.
-/// - **Cull** — [`PlanNode::Cull`](clinker_plan::plan::execution::PlanNode::Cull)'s
-///   `config.rules[].drop_group_when` is a `Filter` predicate per removal rule.
-/// - **Combine** `JoinKey` is OMITTED — a body Combine's typed `where` predicate is
-///   not on the plan node (it lives in `CompileArtifacts`, not reachable from a
-///   `BoundBody`), so the body cannot emit the join-key influence (clinker#621).
-///
-/// Returns owned predicate strings (the `RouteBody` conditions are borrowed from a
-/// map the caller does not keep alive across the influence emission).
-fn body_node_influence_predicates(
+/// - **Route** — one `Conditional` read-set per branch condition; the default
+///   branch has none.
+/// - **Cull** — the OR-combined `drop_group_when` read-set is one `Filter`.
+/// - **Combine** `JoinKey` is not emitted for bodies yet (parity with the
+///   previous body path; #210 tracks it).
+fn body_node_influence_support(
     node: &clinker_plan::plan::execution::PlanNode,
-    route_bodies: &std::collections::HashMap<
-        String,
-        clinker_plan::config::pipeline_node::RouteBody,
-    >,
-) -> Vec<(String, FieldEdgeKind)> {
-    use clinker_plan::plan::execution::PlanNode;
+) -> Vec<(std::collections::BTreeSet<String>, FieldEdgeKind)> {
+    use clinker_plan::plan::PredicateSupport;
 
-    // A body Route's conditions are keyed by node name in `route_bodies` (the plan
-    // node itself carries only branch wiring, not the compiled conditions).
-    if let PlanNode::Route { name, .. } = node
-        && let Some(route) = route_bodies.get(name)
-    {
-        return route
-            .conditions
-            .values()
-            .map(|predicate| (predicate.as_ref().to_string(), FieldEdgeKind::Conditional))
-            .collect();
-    }
-    match node {
-        PlanNode::Cull { config, .. } => config
-            .rules
-            .iter()
-            .map(|rule| {
-                (
-                    rule.drop_group_when.as_ref().to_string(),
-                    FieldEdgeKind::Filter,
-                )
-            })
+    match clinker_plan::plan::predicate_support(node) {
+        Some(PredicateSupport::RouteBranches(branches)) => branches
+            .into_iter()
+            .map(|support| (support, FieldEdgeKind::Conditional))
             .collect(),
-        _ => Vec::new(),
+        Some(PredicateSupport::CullDrop(support)) => vec![(support, FieldEdgeKind::Filter)],
+        Some(PredicateSupport::CombineWhere(_)) | None => Vec::new(),
     }
 }
 
@@ -4477,7 +4507,7 @@ nodes:
     body: prune
     config:
       strategy: preserve
-  - type: output
+  - type: sink
     name: out
     input: frame
     config:
@@ -4541,14 +4571,14 @@ nodes:
       rules:
         - name: drop_small
           drop_group_when: "count(*) < 2"
-  - type: output
+  - type: sink
     name: kept
     input: prune
     config:
       name: kept
       type: csv
       path: ./kept.csv
-  - type: output
+  - type: sink
     name: removed
     input: prune.dropped
     config:
@@ -4808,7 +4838,7 @@ nodes:
     use: ./body_lineage.comp.yaml
     inputs:
       src: src
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -4905,7 +4935,7 @@ nodes:
     use: ./routing.comp.yaml
     inputs:
       src: src
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -4979,7 +5009,7 @@ nodes:
     use: ./body.comp.yaml
     inputs:
       src: src
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -5292,7 +5322,7 @@ nodes:
     use: ./accept_any.comp.yaml
     inputs:
       anyin: src
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -5372,7 +5402,7 @@ nodes:
     inputs:
       anyin: srcA
       anyin2: srcB
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -5468,7 +5498,7 @@ nodes:
       left: srcL
       right: srcR
     use: ./two_port.comp.yaml
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -6448,7 +6478,7 @@ nodes:
     cxl: 'emit b = 2
 
       '
-- type: output
+- type: sink
   name: results
   input: finalize
   config:
@@ -7250,7 +7280,7 @@ nodes:
     config:
       cxl: |
         emit rollup_customer = customer_id
-  - type: output
+  - type: sink
     name: daily_rollup
     input: annotate
     config:
@@ -7738,7 +7768,7 @@ nodes:
 
     /// #147 raw/resolved parity: the INDIRECT influence edges are emitted by BOTH
     /// lineage builders. For a normal typed pipeline (every node has a
-    /// `typed_output_row`, so the resolved path does not `continue`), a Cull's
+    /// engine `output_row`, so the resolved path does not `continue`), a Cull's
     /// `drop_group_when` must drive `Filter` edges in resolved mode just as it does
     /// in raw mode — locking the two paths together so an INDIRECT regression
     /// cannot hide in only one. (The resolved `continue` for a node WITHOUT a typed
@@ -7767,14 +7797,14 @@ nodes:
       rules:
         - name: drop_small
           drop_group_when: "sum(amount) < 100"
-  - type: output
+  - type: sink
     name: kept
     input: prune
     config:
       name: kept
       type: csv
       path: ./kept.csv
-  - type: output
+  - type: sink
     name: removed
     input: prune.dropped
     config:
@@ -7856,7 +7886,7 @@ nodes:
       cxl: |
         emit available = on_hand
       propagate_ck: driver
-  - type: output
+  - type: sink
     name: out
     input: joined
     config:
@@ -7925,7 +7955,7 @@ nodes:
     config:
       cxl: |
         emit c = a + 1
-  - type: output
+  - type: sink
     name: out
     input: t
     config:
@@ -7988,7 +8018,7 @@ nodes:
     /// #149 validation harness: the raw type inferencer never contradicts the
     /// engine. For a fixture exercising every covered emit shape, each
     /// raw-inferred emitted type is *consistent* with the engine's compiled
-    /// `typed_output_row` — identical, the `numeric` supertype of an engine
+    /// `output_row` — identical, the `numeric` supertype of an engine
     /// int/float, or the liberal Unknown (`None`). This bounds the inferencer's
     /// error rate to zero on the covered shapes while letting it over-approximate
     /// (numeric) or abstain (None).
@@ -8022,7 +8052,7 @@ nodes:
         emit up = name.upper()
         emit chained = w * 2
         emit renamed = b
-  - type: output
+  - type: sink
     name: out
     input: t
     config:
@@ -8103,7 +8133,7 @@ nodes:
         emit each x in items {
           emit y = x.v
         }
-  - type: output
+  - type: sink
     name: out
     input: t
     config:
@@ -9953,14 +9983,14 @@ nodes:
   - type: merge
     name: joined
     inputs: [src_a, src_b]
-  - type: output
+  - type: sink
     name: out_a
     input: joined
     config:
       name: out_a
       type: csv
       path: ./out_a.csv
-  - type: output
+  - type: sink
     name: out_b
     input: joined
     config:
@@ -10018,7 +10048,7 @@ nodes:
     config:
       cxl: |
         emit y = x
-  - type: output
+  - type: sink
     name: out
     input: step
     config:

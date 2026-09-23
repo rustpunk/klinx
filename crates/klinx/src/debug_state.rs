@@ -116,11 +116,12 @@ impl From<Value> for CellValue {
             Value::Bool(b) => Self::Bool(b),
             Value::Integer(n) => Self::Int(n),
             Value::Float(f) => Self::Float(f),
+            Value::Decimal(d) => Self::Str(d.to_string()),
             Value::String(s) => Self::Str((*s).into()),
             Value::Date(d) => Self::Str(d.to_string()),
             Value::DateTime(dt) => Self::Str(dt.to_string()),
             Value::Array(arr) => Self::Array(arr.into_iter().map(CellValue::from).collect()),
-            Value::Map(m) => Self::Str(serde_json::to_string(m.as_ref()).unwrap_or_default()),
+            Value::Map(m) => Self::Str(serde_json::to_string(&Value::Map(m)).unwrap_or_default()),
         }
     }
 }
@@ -262,6 +263,7 @@ pub fn use_debug_state() -> DebugState {
 mod tests {
     use super::*;
     use clinker_record::Value;
+    use clinker_record::owned_storage::OwnedValues;
 
     // ── CellValue Display ──────────────────────────────────────
 
@@ -396,7 +398,10 @@ mod tests {
 
     #[test]
     fn test_cell_value_from_record_value_array() {
-        let arr = Value::Array(vec![Value::Integer(1), Value::Integer(2)]);
+        let arr = Value::Array(OwnedValues::from_vec(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+        ]));
         let cv = CellValue::from(arr);
         assert_eq!(
             cv,
@@ -406,8 +411,11 @@ mod tests {
 
     #[test]
     fn test_cell_value_from_record_value_array_nested() {
-        let inner = Value::Array(vec![Value::Bool(true), Value::Null]);
-        let outer = Value::Array(vec![inner, Value::String("x".into())]);
+        let inner = Value::Array(OwnedValues::from_vec(vec![Value::Bool(true), Value::Null]));
+        let outer = Value::Array(OwnedValues::from_vec(vec![
+            inner,
+            Value::String("x".into()),
+        ]));
         let cv = CellValue::from(outer);
         assert_eq!(
             cv,

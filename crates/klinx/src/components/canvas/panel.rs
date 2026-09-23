@@ -2766,7 +2766,7 @@ nodes:
     use: ./clean_names.comp.yaml
     inputs:
       names: people
-  - type: output
+  - type: sink
     name: cleaned_people
     input: clean
     config:

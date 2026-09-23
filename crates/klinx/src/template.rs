@@ -256,16 +256,14 @@ mod tests {
         /// A `*.comp.yaml` composition (`_compose:` + body `nodes:`), parsed via
         /// `CompositionFile::parse`.
         Composition,
-        /// A `*.channel.yaml` per-tenant binding (`channel:` + `config`/`vars`),
-        /// parsed via `ChannelBinding::from_yaml_bytes`.
+        /// A `*.channel.yaml` per-target overlay (`channel.target` + `config`/`vars`),
+        /// parsed via `OverlayFile::from_yaml_bytes`.
         Channel,
         /// A `*.schema.yaml` source-schema overlay (`_schema:` + `fields:`),
         /// parsed via `clinker_schema::parse_schema`.
         Schema,
-        /// A `channel.yaml` channel *manifest* (`_channel:` with `id`/`active`).
-        /// This is a Klinx authoring convention with no engine parser — the
-        /// engine's channel crate scans only `*.channel.yaml` bindings — so it
-        /// is discovered for the coverage count but never parse-gated.
+        /// A `channel.cfg.yaml` channel manifest (identity, targets, labels,
+        /// channel-wide values), parsed via `ChannelManifest::from_yaml_bytes`.
         Manifest,
     }
 
@@ -276,7 +274,7 @@ mod tests {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if name == "channel.yaml" {
+        if name == clinker_channel::CHANNEL_MANIFEST_FILE {
             ExampleKind::Manifest
         } else if name.ends_with(".comp.yaml") {
             ExampleKind::Composition
@@ -372,9 +370,9 @@ mod tests {
                     let bytes =
                         fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
                     if let Err(e) =
-                        clinker_channel::ChannelBinding::from_yaml_bytes(&bytes, path.clone())
+                        clinker_channel::OverlayFile::from_yaml_bytes(&bytes, path.clone())
                     {
-                        failures.push(format!("{label}: channel parse: {e}"));
+                        failures.push(format!("{label}: channel overlay parse: {e}"));
                     }
                 }
                 ExampleKind::Schema => {
@@ -384,8 +382,16 @@ mod tests {
                         failures.push(format!("{label}: schema parse: {e}"));
                     }
                 }
-                // Manifests have no engine parser; count for coverage only.
-                ExampleKind::Manifest => *counts.entry("manifest").or_default() += 1,
+                ExampleKind::Manifest => {
+                    *counts.entry("manifest").or_default() += 1;
+                    let bytes =
+                        fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                    if let Err(e) =
+                        clinker_channel::ChannelManifest::from_yaml_bytes(&bytes, path.clone())
+                    {
+                        failures.push(format!("{label}: channel manifest parse: {e}"));
+                    }
+                }
             }
         }
 

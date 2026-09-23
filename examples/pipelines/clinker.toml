@@ -1,1 +1,16 @@
 [workspace]
+
+# Per-tenant channel folders live under channels/<tenant>/: a channel.cfg.yaml
+# manifest plus one <target>.channel.yaml overlay per pipeline it customizes.
+[channel]
+root = "channels"
+
+# Channels resolve their targets through stable catalog identities.
+[catalog.pipelines]
+"customer_etl" = "customer_etl.yaml"
+"order_fulfillment" = "order_fulfillment.yaml"
+
+[catalog.channels]
+"acme-corp" = "channels/acme-corp"
+"warehouse-west" = "channels/warehouse-west"
+"express-logistics" = "channels/express-logistics"

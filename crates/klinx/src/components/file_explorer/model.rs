@@ -14,7 +14,6 @@
 //! A future klinx-H overlay-aware provider (#23) augments [`build_sectioned`]
 //! without touching the rendering layer.
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::fmt;
@@ -154,7 +153,7 @@ pub fn build_sectioned(
             SectionKind::Compositions,
             file_nodes(resolve_compositions(ws)),
         ),
-        section_node(SectionKind::Channels, channel_groups(ws, chans)),
+        section_node(SectionKind::Channels, channel_groups(chans)),
         section_node(SectionKind::Schemas, file_nodes(resolve_schemas(idx))),
     ];
     ExplorerTree { roots }
@@ -194,41 +193,22 @@ fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// Group discovered channel bindings by their parent directory (the tenant
-/// folder), producing depth-2 `Group → File` nodes.
-fn channel_groups(ws: &Workspace, chans: Option<&ChannelState>) -> Vec<TreeNode> {
+/// One depth-2 `Group → File` node per discovered channel: the tenant folder
+/// with its manifest and per-target overlays beneath it.
+fn channel_groups(chans: Option<&ChannelState>) -> Vec<TreeNode> {
     let Some(chans) = chans else {
         return Vec::new();
     };
-    // One pass: bucket each binding under its parent (tenant) directory. The
-    // BTreeMap keeps tenants in stable sorted order; `file_nodes` sorts within.
-    let mut by_dir: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
-    for b in &chans.channels {
-        let parent = b
-            .source_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| ws.root.clone());
-        by_dir
-            .entry(parent)
-            .or_default()
-            .push(b.source_path.clone());
-    }
-
-    by_dir
+    let mut channels: Vec<_> = chans.channels.iter().collect();
+    channels.sort_by(|a, b| a.id.cmp(&b.id));
+    channels
         .into_iter()
-        .map(|(dir, files)| {
-            let label = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| dir.display().to_string());
-            TreeNode {
-                id: NodeId::Group(dir.to_string_lossy().into_owned()),
-                kind: NodeKind::Group,
-                label,
-                path: Some(dir),
-                children: file_nodes(files),
-            }
+        .map(|c| TreeNode {
+            id: NodeId::Group(c.dir.to_string_lossy().into_owned()),
+            kind: NodeKind::Group,
+            label: c.id.clone(),
+            path: Some(c.dir.clone()),
+            children: file_nodes(c.files.clone()),
         })
         .collect()
 }
@@ -513,7 +493,7 @@ fn collect_files_recursive(dir: &Path, out: &mut BTreeSet<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::ChannelBindingSummary;
+    use crate::state::ChannelSummary;
     use crate::workspace;
 
     /// The example workspace shipped at `examples/pipelines/` (PR #40 fixture).
@@ -632,24 +612,24 @@ mod tests {
         let (idx, _) = ws.build_schema_index();
         let cs = ChannelState {
             channels: vec![
-                ChannelBindingSummary {
-                    name: "acme-etl".into(),
-                    source_path: ws.root.join("channels/acme-corp/customer_etl.channel.yaml"),
-                    target: "pipeline: customer_etl.yaml".into(),
+                ChannelSummary {
+                    id: "warehouse-west".into(),
+                    dir: ws.root.join("channels/warehouse-west"),
+                    files: vec![
+                        ws.root.join("channels/warehouse-west/channel.cfg.yaml"),
+                        ws.root
+                            .join("channels/warehouse-west/order_fulfillment.channel.yaml"),
+                    ],
                 },
-                ChannelBindingSummary {
-                    name: "acme-ful".into(),
-                    source_path: ws
-                        .root
-                        .join("channels/acme-corp/order_fulfillment.channel.yaml"),
-                    target: "pipeline: order_fulfillment.yaml".into(),
-                },
-                ChannelBindingSummary {
-                    name: "west-ful".into(),
-                    source_path: ws
-                        .root
-                        .join("channels/warehouse-west/order_fulfillment.channel.yaml"),
-                    target: "pipeline: order_fulfillment.yaml".into(),
+                ChannelSummary {
+                    id: "acme-corp".into(),
+                    dir: ws.root.join("channels/acme-corp"),
+                    files: vec![
+                        ws.root.join("channels/acme-corp/channel.cfg.yaml"),
+                        ws.root.join("channels/acme-corp/customer_etl.channel.yaml"),
+                        ws.root
+                            .join("channels/acme-corp/order_fulfillment.channel.yaml"),
+                    ],
                 },
             ],
             active_channel: None,
@@ -658,8 +638,8 @@ mod tests {
         let tree = build_sectioned(&ws, &idx, Some(&cs));
         let channels = &tree.roots[2];
         assert_eq!(labels(&channels.children), ["acme-corp", "warehouse-west"]);
-        assert_eq!(channels.children[0].children.len(), 2);
-        assert_eq!(channels.children[1].children.len(), 1);
+        assert_eq!(channels.children[0].children.len(), 3);
+        assert_eq!(channels.children[1].children.len(), 2);
     }
 
     #[test]

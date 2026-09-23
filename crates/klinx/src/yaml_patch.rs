@@ -371,7 +371,7 @@ nodes:
     config:
       cxl: "emit id = id"
 
-  - type: output
+  - type: sink
     name: out
     input: clean
     config:
@@ -465,7 +465,7 @@ _notes:
         // The whole source-node block survives verbatim (schema list, etc.).
         assert!(patched.contains("        - { name: amount, type: int }\n"));
         // The untouched output node block survives verbatim.
-        assert!(patched.contains("  - type: output\n    name: out\n    input: clean\n"));
+        assert!(patched.contains("  - type: sink\n    name: out\n    input: clean\n"));
         // Leading comment, trailing sections survive.
         assert!(patched.contains("# a leading comment\n"));
         assert!(patched.contains("error_handling:\n  strategy: continue\n"));

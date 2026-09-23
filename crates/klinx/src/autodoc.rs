@@ -5,9 +5,8 @@
 /// gets applicable sections (schema, lineage, contract, config, provenance,
 /// channel overrides) populated from config metadata.
 use clinker_plan::config::{
-    ErrorStrategy, InputFormat, OutputFormat, PipelineConfig, SchemaSource,
+    Column, ErrorStrategy, InputFormat, OutputFormat, PipelineConfig, SourceSchema,
 };
-use clinker_record::schema_def::FieldDef;
 
 // ── StageDoc model ──────────────────────────────────────────────────────────
 
@@ -78,8 +77,6 @@ pub enum SchemaOrigin {
     File(String),
     /// Inline schema definition.
     Inline,
-    /// Inferred from schema_overrides only.
-    OverridesOnly,
     /// No schema specified.
     None,
 }
@@ -185,7 +182,6 @@ pub struct ConfigEntry {
 pub enum ConfigCategory {
     Format,
     Sort,
-    ArrayPath,
     ErrorHandling,
     Mapping,
     Window,
@@ -197,7 +193,6 @@ impl ConfigCategory {
         match self {
             Self::Format => "FORMAT",
             Self::Sort => "SORT ORDER",
-            Self::ArrayPath => "ARRAY PATHS",
             Self::ErrorHandling => "ERROR HANDLING",
             Self::Mapping => "FIELD MAPPINGS",
             Self::Window => "WINDOW",
@@ -235,8 +230,8 @@ pub struct ChannelOverrideSection {
 
 /// Generate documentation for the stage with the given name.
 pub fn generate_stage_doc(config: &PipelineConfig, stage_name: &str) -> Option<StageDoc> {
-    if let Some(input) = config.source_configs().find(|i| i.name == stage_name) {
-        return Some(generate_input_doc(config, input));
+    if let Some(body) = config.source_bodies().find(|b| b.source.name == stage_name) {
+        return Some(generate_input_doc(config, &body.source, &body.schema));
     }
 
     for node in &config.nodes {
@@ -250,7 +245,7 @@ pub fn generate_stage_doc(config: &PipelineConfig, stage_name: &str) -> Option<S
         }
     }
 
-    if let Some(output) = config.output_configs().find(|o| o.name == stage_name) {
+    if let Some(output) = config.sink_configs().find(|o| o.name == stage_name) {
         return Some(generate_output_doc(config, output));
     }
 
@@ -260,11 +255,12 @@ pub fn generate_stage_doc(config: &PipelineConfig, stage_name: &str) -> Option<S
 fn generate_input_doc(
     config: &PipelineConfig,
     input: &clinker_plan::config::SourceConfig,
+    schema: &SourceSchema,
 ) -> StageDoc {
     let format_name = input.format.format_name();
 
     // Build schema section
-    let schema = build_input_schema(input);
+    let schema = build_input_schema(schema);
     let field_count = schema.as_ref().map(|s| s.fields.len()).unwrap_or(0);
 
     let target = input.display_target();
@@ -367,19 +363,6 @@ fn generate_input_doc(
             }
         }
         _ => {}
-    }
-
-    // Array paths
-    if let Some(ref array_paths) = input.array_paths {
-        for ap in array_paths {
-            let mode = format!("{:?}", ap.mode).to_lowercase();
-            let sep = ap.separator.as_deref().unwrap_or("-");
-            entries.push(ConfigEntry {
-                category: ConfigCategory::ArrayPath,
-                key: ap.path.clone(),
-                value: format!("{} (sep: {})", mode, sep),
-            });
-        }
     }
 
     // Sort order
@@ -547,10 +530,14 @@ fn generate_transform_doc(
 
 fn generate_output_doc(
     _config: &PipelineConfig,
-    output: &clinker_plan::config::OutputConfig,
+    output: &clinker_plan::config::SinkConfig,
 ) -> StageDoc {
     let format_name = output.format.format_name();
-    let mapping_count = output.mapping.as_ref().map(|m| m.len()).unwrap_or(0);
+    let mapping_count = output
+        .mapping
+        .as_ref()
+        .map(|m| m.entries().len())
+        .unwrap_or(0);
     let exclude_count = output.exclude.as_ref().map(|e| e.len()).unwrap_or(0);
 
     let mut summary_parts = vec![format!("Writes {} to `{}`.", format_name, output.path)];
@@ -650,11 +637,11 @@ fn generate_output_doc(
 
     // Mapping entries
     if let Some(ref mapping) = output.mapping {
-        for (output_name, source_name) in mapping {
+        for entry in mapping.entries() {
             entries.push(ConfigEntry {
                 category: ConfigCategory::Mapping,
-                key: output_name.clone(),
-                value: format!("← {}", source_name),
+                key: entry.output.clone(),
+                value: format!("← {}", entry.source),
             });
         }
     }
@@ -688,61 +675,39 @@ fn generate_output_doc(
 
 // ── Helper: build input schema ──────────────────────────────────────────────
 
-fn build_input_schema(input: &clinker_plan::config::SourceConfig) -> Option<SchemaSection> {
-    let mut fields = Vec::new();
-    let source;
-
-    match (&input.schema, &input.schema_overrides) {
-        (Some(SchemaSource::Inline(def)), _) => {
-            source = SchemaOrigin::Inline;
-            if let Some(ref field_defs) = def.fields {
-                for fd in field_defs {
-                    fields.push(field_def_to_doc(fd));
-                }
-            }
-            // Merge overrides on top
-            if let Some(ref overrides) = input.schema_overrides {
-                merge_overrides(&mut fields, overrides);
-            }
-        }
-        (Some(SchemaSource::FilePath(path)), _) => {
-            source = SchemaOrigin::File(path.clone());
-            // Can't read from disk — just note the path. If overrides exist, show those.
-            if let Some(ref overrides) = input.schema_overrides {
-                for fd in overrides {
-                    fields.push(field_def_to_doc(fd));
-                }
-            }
-        }
-        (None, Some(overrides)) => {
-            source = SchemaOrigin::OverridesOnly;
-            for fd in overrides {
-                fields.push(field_def_to_doc(fd));
-            }
-        }
-        (None, None) => {
-            return None;
-        }
-    }
-
+fn build_input_schema(schema: &SourceSchema) -> Option<SchemaSection> {
+    let source = match schema {
+        SourceSchema::File(path) => SchemaOrigin::File(path.clone()),
+        SourceSchema::Columns(_) | SourceSchema::MultiRecord { .. } => SchemaOrigin::Inline,
+        // Positional columns are synthesized by the engine from the format.
+        SourceSchema::Generated(_) => return None,
+    };
+    // An external schema file is resolved at compile time, not from the
+    // authored config, so its columns are not listed here.
+    let fields = schema
+        .bound_columns()
+        .unwrap_or_default()
+        .iter()
+        .map(column_to_doc)
+        .collect();
     Some(SchemaSection { source, fields })
 }
 
-fn build_output_schema(output: &clinker_plan::config::OutputConfig) -> Option<SchemaSection> {
+fn build_output_schema(output: &clinker_plan::config::SinkConfig) -> Option<SchemaSection> {
     let mut fields = Vec::new();
 
     // Document mapping renames as pseudo-schema
     if let Some(ref mapping) = output.mapping {
-        for (output_name, source_name) in mapping {
+        for entry in mapping.entries().iter().filter(|e| !e.is_passthrough()) {
             fields.push(FieldDoc {
-                name: output_name.clone(),
+                name: entry.output.clone(),
                 field_type: None,
                 required: false,
                 format: None,
                 coerce: false,
-                default_value: Some(format!("mapped from {}", source_name)),
+                default_value: Some(format!("mapped from {}", entry.source)),
                 allowed_values: None,
-                alias: Some(source_name.clone()),
+                alias: Some(entry.source.clone()),
             });
         }
     }
@@ -773,37 +738,16 @@ fn build_output_schema(output: &clinker_plan::config::OutputConfig) -> Option<Sc
     }
 }
 
-fn field_def_to_doc(fd: &FieldDef) -> FieldDoc {
+fn column_to_doc(col: &Column) -> FieldDoc {
     FieldDoc {
-        name: fd.name.clone(),
-        field_type: fd
-            .field_type
-            .as_ref()
-            .map(|t| format!("{:?}", t).to_lowercase()),
-        required: fd.required.unwrap_or(false),
-        format: fd.format.clone(),
-        coerce: fd.coerce.unwrap_or(false),
-        default_value: fd.default.as_ref().map(|v| v.to_string()),
-        allowed_values: fd.allowed_values.clone(),
-        alias: fd.alias.clone(),
-    }
-}
-
-fn merge_overrides(fields: &mut Vec<FieldDoc>, overrides: &[FieldDef]) {
-    for ovr in overrides {
-        if let Some(existing) = fields.iter_mut().find(|f| f.name == ovr.name) {
-            if let Some(ref t) = ovr.field_type {
-                existing.field_type = Some(format!("{:?}", t).to_lowercase());
-            }
-            if let Some(r) = ovr.required {
-                existing.required = r;
-            }
-            if ovr.format.is_some() {
-                existing.format = ovr.format.clone();
-            }
-        } else {
-            fields.push(field_def_to_doc(ovr));
-        }
+        name: col.name.clone(),
+        field_type: Some(col.ty.to_string().to_lowercase()),
+        required: col.required.unwrap_or(false),
+        format: col.format.clone(),
+        coerce: col.coerce.unwrap_or(false),
+        default_value: col.default.as_ref().map(|v| v.to_string()),
+        allowed_values: col.allowed_values.clone(),
+        alias: col.source_name.clone(),
     }
 }
 
@@ -814,7 +758,6 @@ fn push_error_handling_entries(entries: &mut Vec<ConfigEntry>, config: &Pipeline
     let strategy_str = match eh.strategy {
         ErrorStrategy::FailFast => "fail-fast",
         ErrorStrategy::Continue => "continue",
-        ErrorStrategy::BestEffort => "best-effort",
     };
     entries.push(ConfigEntry {
         category: ConfigCategory::ErrorHandling,

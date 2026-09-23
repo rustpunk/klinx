@@ -627,6 +627,7 @@ pub fn compact_type(ty: &Type) -> String {
         Type::Bool => "bool".to_string(),
         Type::Int => "int".to_string(),
         Type::Float => "float".to_string(),
+        Type::Decimal => "decimal".to_string(),
         Type::String => "string".to_string(),
         Type::Date => "date".to_string(),
         Type::DateTime => "datetime".to_string(),
