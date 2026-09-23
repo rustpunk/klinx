@@ -1,4 +1,4 @@
-# 0001: Browser UI architecture — Rust core and server, React UI, Tauri desktop
+# 0001: Browser UI architecture — Rust core and server, React UI
 
 - **Status:** Accepted (direction). The UI framework choice is confirmed by the phase 2 gate below before any UI rewrite starts.
 - **Date:** 2026-09-22
@@ -6,7 +6,7 @@
 
 ## Context
 
-Klinx is a Dioxus 0.7 desktop app (wry/WebKitGTK). The goal is a browser UI with workspace access over a fileshare, suitable for enterprise deployment, with Rust as the primary language.
+Klinx is a Dioxus 0.7 desktop app (wry/WebKitGTK). The goal is a browser UI whose workspaces are git repositories on a git host, suitable for enterprise deployment, with Rust as the primary language.
 
 Constraints:
 
@@ -27,9 +27,9 @@ Relevant findings, from the research report unless noted:
 1. **Rust owns all domain logic.**
    - `klinx-core` (pure Rust): the `pipeline_view` view model (canvas derivation, field lineage, layout), YAML patching, and sync. It compiles natively for the server and desktop, and to WASM for the browser, so lineage and layout logic are never re-implemented in TypeScript.
    - `klinx-api`: request/response types and a `WorkspaceBackend` interface covering workspace files, git, search, compile, and file events.
-2. **`klinx-server` (Axum)** holds every privileged operation. Workspace file IO is confined to the workspace root with capability handles. Git runs via the CLI behind `GitOps` in a sandboxed child process. The server also handles search, Clinker compile, file events over SSE or websocket, OIDC sessions (SAML only through federation, e.g. Keycloak), role-based access, and an audit log. Only the server touches the fileshare.
+2. **`klinx-server` (Axum)** holds every privileged operation: per-user git working copies on server-local disk (confined to the workspace root with capability handles), git through the CLI behind `GitOps` in a sandboxed child process, search, Clinker compile, file events over SSE or websocket, OIDC sessions (SAML only through federation, e.g. Keycloak), role-based access, and an audit log. The browser never touches storage or git directly.
 3. **UI: React + TypeScript**, rendering view models from `klinx-core` (WASM) and calling `klinx-api`. TypeScript is limited to presentation.
-4. **Desktop: Tauri 2** runs the same React UI through a local, in-process `WorkspaceBackend`. It is also the supported path for users whose files are on their own machine, since browsers cannot open local folders portably.
+4. **Desktop: Tauri 2** runs the same React UI through a local, in-process `WorkspaceBackend`. *Superseded by the 2026-09-22 amendment "No desktop app".*
 5. **YAML text stays authoritative.** Saves are conditional on the file's content hash, with a conflict UI. Live co-editing is out of scope.
 
 ### Phase 2 gate (confirms step 3)
@@ -57,39 +57,28 @@ React proceeds unless the spike shows a blocking regression. The result is recor
 1. **Seam extraction** (#212) (no behavior change): `klinx-core`, `klinx-api`, a `WorkspaceBackend` with a local implementation, direct `git` calls routed through `GitOps`, and desktop-only APIs behind a `desktop` feature.
 2. **`klinx-server`** (#213): confined file access, git, search, compile, events, OIDC, roles, audit. Ends with the gate spike.
 3. **React UI** against `klinx-core` WASM and `klinx-api`, with Playwright + axe in CI.
-4. **Tauri desktop** on the React UI; retire the Dioxus app.
+4. **Retire the Dioxus desktop app** once the web UI reaches parity (no Tauri port; see Amendments).
 5. **Hardening**: conflict UI, OpenTelemetry, container/Helm packaging and an offline bundle, SBOM, WCAG audit.
 
 ## Open questions
 
 Tracked in [80_OPEN_QUESTIONS.md](../80_OPEN_QUESTIONS.md):
 
-- Fileshare model — **answered 2026-09-22** (see Amendments): a server-mounted share, and workspaces are git working copies on server-local disk whose remote may be a git server, a bare repo on the share, or S3. Share access identity — **answered 2026-09-22** (see Amendments): service account first, with per-user identity phased in.
-- Identity provider and protocol (OIDC available, or SAML-only?).
-- Deployment target, and whether air-gapped installs are required.
-- Whose credentials push to git remotes: per-user tokens or a service identity?
+- Identity provider and protocol for signing in to klinx (OIDC available, or SAML-only?), and whether the git host may serve as the sign-in provider.
+- Deployment target (Kubernetes, VMs), and whether air-gapped installs are required.
+- Whether installs without a git host need S3 as a git remote (see Amendments).
+- Whether background jobs run with no user present, and under which identity.
 
 ## Amendments
 
-### 2026-09-22: Storage model
+### 2026-09-22: Workspaces are git repositories on a git host
 
-- Workspaces live on a fileshare **mounted on the server** (Model A). The browser never accesses storage directly, so the Tauri desktop app is no longer needed as the path for local-file users. It stays in scope as a desktop build of the same UI.
-- **Workspaces are git working copies on the server's local disk.** Their remote is any git URL: a git server (GitHub, GitLab, Forgejo), a bare repository on the mounted share, or an S3 bucket through [git-remote-s3](https://github.com/awslabs/git-remote-s3) (Apache-2.0). That helper takes a per-branch lock with S3 conditional writes and rejects a stale push with "fetch and retry", matching normal git push semantics. Nobody works directly in the share or the bucket: a git working tree on an S3 filesystem mount is not viable, because git needs atomic renames and lock files (**Strong inference**). Klinx therefore talks only git for workspace storage and needs no object-store layer of its own. Caveats of S3 remotes: a Python helper in the server image, conditional-write support in S3-compatible stores, and no pull-request flow.
+- **A workspace is a git repository hosted on a git host** (GitHub, Bitbucket, GitLab, Forgejo, or similar). Fileshares are not a workspace storage model. Version control stops being optional, unlike today's desktop app, which disables its git features for non-git folders. A workspace may be a subdirectory of a larger repository (as `examples/pipelines` is). **Open question:** whether the hosted model requires a repository root.
+- **The server keeps per-user working copies** on its local disk: clone on first open, then pull, commit, and push to the host. Saves write the working copy; commits and pushes are explicit user actions. Nobody edits the host's repository directly.
+- **Access uses each user's own git host credentials.** A user links their git host account (OAuth on GitHub, Bitbucket, and GitLab), and klinx clones, commits, and pushes as that user, so the host's repository permissions, branch protection, review, and audit apply to each user without klinx duplicating them. Tokens are stored encrypted server-side, scoped to repository access, and refreshed or revoked with the host. Credentials sit behind an interface keyed by (user, workspace), so a service identity can serve read-only or background work where a deployment needs it. Signing in to klinx itself stays OIDC; the git host may double as the sign-in provider where it offers OIDC.
+- **Pull requests** go through the host. Klinx detects GitHub, GitLab, and Bitbucket remotes today but only creates pull requests on GitHub (via the `gh` CLI), so Bitbucket and GitLab pull-request support is follow-up work.
+- **S3 as a git remote** via [git-remote-s3](https://github.com/awslabs/git-remote-s3) (Apache-2.0) remains possible for installs without a git host: it locks per branch with S3 conditional writes and rejects stale pushes like a normal git server. It has no pull-request flow and puts a Python helper in the server image. **Open question:** whether any deployment needs it.
 
-### 2026-09-22: Share access identity
+### 2026-09-22: No desktop app
 
-The server accesses storage as a **service account**, with authorization enforced in klinx and an append-only audit log. Storage and remote credentials sit behind an interface keyed by (user, workspace), so stronger identity models slot in later without redesign:
-
-1. Service account; OIDC group claims map to workspace roles; audit log of every mutating operation.
-2. Narrower blast radius: per-workspace mounts or service accounts selected from IdP groups.
-3. Per-user credentials where the remote supports them: per-user tokens for git servers, short-lived per-user credentials for S3 via OIDC federation.
-4. Optional per-user Kerberos delegation backend for VM or single-host installs, built only on demand.
-
-Why not per-user Kerberos first:
-
-- OIDC login yields no Kerberos ticket, so it needs protocol transition (S4U2Self/S4U2Proxy), which AD security tooling flags as unsecure.
-- Comparable products (Nextcloud, Posit Workbench) document that their per-user share modes do not work with SAML/OIDC. Git hosts (Gitea, Forgejo, GitLab) use one service identity plus app authorization.
-- The delegating key can impersonate every delegation-enabled user, so a server compromise exposes about as much as a service account does.
-- Kernel CIFS mounts need elevated container privileges and per-user uids and ticket caches, and tickets expire mid-operation.
-
-Per-user delegation becomes worth building if a deployment requires the file server's own audit log to name users, if users also reach the share directly (share ACLs must be the only authority), or for single-host installs where AD admins approve delegation.
+- **The desktop app is out of scope.** Workspaces live on git hosts reached through the server, so a native app has no storage role. Single-user or offline use runs `klinx-server` on localhost and opens it in a browser (the same code as a hosted install), optionally installed as a PWA for an app-like window. Dropping it avoids per-OS builds, signing, and updates, and a second in-process backend. Tauri can still wrap the same React UI later if a concrete native need appears. The Dioxus desktop app keeps shipping until the web UI reaches parity.

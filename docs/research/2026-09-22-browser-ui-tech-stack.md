@@ -1,6 +1,6 @@
 # Browser UI tech stack for Klinx (enterprise, Rust-first)
 
-Date: 2026-09-22. Status: research input. The decision is recorded in [docs/ai/decisions/0001-browser-ui-architecture.md](../ai/decisions/0001-browser-ui-architecture.md), which supersedes the recommendation below after two later constraints: no paid dependencies, and long-term stability weighted over reuse.
+Date: 2026-09-22. Status: research input. The decision is recorded in [docs/ai/decisions/0001-browser-ui-architecture.md](../ai/decisions/0001-browser-ui-architecture.md), which supersedes the recommendation below after two later constraints: no paid dependencies, and long-term stability weighted over reuse. Its fileshare sections are also superseded: workspaces are git repositories on a git host.
 
 ## Recommendation
 
