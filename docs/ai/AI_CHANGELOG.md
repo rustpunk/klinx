@@ -4,6 +4,10 @@
 
 This file is lightweight architecture/change memory for future agents. It should record durable facts, major changes, and resolved uncertainty. Do not invent past decisions.
 
+## 2026-09-23: Web Version Starts as a New Project (decisions/0001 amendment)
+
+- The browser version is built in a new repository instead of being extracted from the desktop app; this repository becomes `klinx-desktop` and the new one takes the `klinx` name. `pipeline_view`, `yaml_patch`, and `sync` move into the new project's core crate with their tests rather than being rewritten. The desktop app is frozen (critical fixes only) and its canvas, lineage, and editor backlog retargets to the new project. The Clinker pin bump (#211) lands here first. The seam-extraction scaffolding planned in #212 and the remaining `AppShell` hook work in #14 are superseded. See the amendment in [decisions/0001-browser-ui-architecture.md](decisions/0001-browser-ui-architecture.md).
+
 ## 2026-09-22: Browser UI Architecture Decided (decisions/0001)
 
 - Direction recorded in [decisions/0001-browser-ui-architecture.md](decisions/0001-browser-ui-architecture.md): Rust keeps all domain logic (`klinx-core` view model, compiled natively and to WASM; `klinx-api`; an Axum `klinx-server` that alone touches storage and runs git/compile), the UI moves to React + TypeScript, and the desktop app is retired once the web UI reaches parity (no Tauri port; local use runs `klinx-server` on localhost). A workspace is a git repository on a git host (GitHub, Bitbucket, GitLab, Forgejo); the server keeps per-user working copies on local disk and acts with each user's own git host credentials (OAuth). Fileshares and S3 hold pipeline and test data, not workspaces. Teams own workspace repositories; individuals branch, test, and open pull requests that run the host's CI; deploy means merging into configured branches, with optional, configurable promotion chains, and external CI/CD deploys from there. Chosen for long-term stability, free/OSS licensing (no paid dependencies), and contributor reliability. The UI framework choice is confirmed by a spike at the end of phase 2; phases 1-2 are framework-neutral.
