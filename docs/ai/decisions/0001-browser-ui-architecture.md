@@ -67,6 +67,7 @@ Tracked in [80_OPEN_QUESTIONS.md](../80_OPEN_QUESTIONS.md):
 - Identity provider and protocol for signing in to klinx (OIDC available, or SAML-only?), and whether the git host may serve as the sign-in provider.
 - Deployment target (Kubernetes, VMs), and whether air-gapped installs are required.
 - Whether installs without a git host need S3 as a git remote (see Amendments).
+- Name and location of the per-repository promotion configuration.
 - Whether background jobs run with no user present, and under which identity.
 
 ## Amendments
@@ -78,6 +79,20 @@ Tracked in [80_OPEN_QUESTIONS.md](../80_OPEN_QUESTIONS.md):
 - **Access uses each user's own git host credentials.** A user links their git host account (OAuth on GitHub, Bitbucket, and GitLab), and klinx clones, commits, and pushes as that user, so the host's repository permissions, branch protection, review, and audit apply to each user without klinx duplicating them. Tokens are stored encrypted server-side, scoped to repository access, and refreshed or revoked with the host. Credentials sit behind an interface keyed by (user, workspace), so a service identity can serve read-only or background work where a deployment needs it. Signing in to klinx itself stays OIDC; the git host may double as the sign-in provider where it offers OIDC.
 - **Pull requests** go through the host. Klinx detects GitHub, GitLab, and Bitbucket remotes today but only creates pull requests on GitHub (via the `gh` CLI), so Bitbucket and GitLab pull-request support is follow-up work.
 - **S3 as a git remote** via [git-remote-s3](https://github.com/awslabs/git-remote-s3) (Apache-2.0) remains possible for installs without a git host: it locks per branch with S3 conditional writes and rejects stale pushes like a normal git server. It has no pull-request flow and puts a Python helper in the server image. **Open question:** whether any deployment needs it.
+
+### 2026-09-23: Team workflow, promotion, and deployment
+
+- **A team owns its workspace repository**: pipelines, channels, compositions, and schemas. Ownership, required reviewers (e.g. `CODEOWNERS`), and branch protection are configured on the git host, which stays the authority; klinx surfaces them and does not re-implement them.
+- **Individuals change files on their own branch.** Klinx creates a branch from the target branch, keeps the user's working copy, and lets them edit only the files they need, test against data locations (below), commit, push, and open a pull request. Several people work in the same repository at once without sharing a working copy.
+- **Pull requests run the host's CI.** Klinx shows each pull request's review state and check results (e.g. Clinker validation of changed pipelines in the team's CI) and links to the host; it does not run CI itself.
+- **Deploy means merging into a configured branch.** External CI/CD tools deploy from those branches; klinx has no deployment step of its own.
+- **Promotion across branches is configurable and optionally required.** A team declares its branch chain per repository (for example `dev` → `staging` → `prod`, or just `main`) in a committed configuration file, so the policy is itself reviewed and versioned. Each promotion is a pull request from one branch to the next. A team can require promotion in order (no change reaches `prod` except from `staging`) or allow direct targeting. Klinx guides and checks promotions in its UI; the host's branch protection is what enforces them. **Open question:** the configuration file's name and location (a klinx-specific file, or a section in `clinker.toml`).
+
+### 2026-09-23: Data locations
+
+- **Pipeline data is separate from the workspace.** Test data and the files Clinker sources read and sinks write may live on a fileshare mounted on the server, in S3, or in a hosted repository. The workspace itself is always a git repository.
+- **The server reaches data locations with a service account**, with authorization enforced in klinx and an append-only audit log, behind a credential interface keyed by (user, data location). Later phases can narrow blast radius (per-location mounts or accounts chosen from IdP groups), use per-user short-lived S3 credentials via OIDC federation, and add optional per-user Kerberos delegation for single-host installs. Per-user Kerberos first was rejected: OIDC sign-in yields no Kerberos ticket, so it needs protocol transition that AD security tooling flags as unsecure; comparable products document that their per-user share modes do not work with SAML/OIDC; the delegating key can impersonate every delegation-enabled user; and kernel CIFS mounts need elevated container privileges while tickets expire mid-operation. Per-user delegation becomes worth building if a deployment requires the file server's own audit log to name users, or if share ACLs must remain the only authority.
+- Clinker's own S3 source/sink support is tracked in the Clinker repository.
 
 ### 2026-09-22: No desktop app
 
