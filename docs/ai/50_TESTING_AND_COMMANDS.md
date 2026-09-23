@@ -76,12 +76,12 @@
 
 ## Commands Agents Should Run Before Claiming Success
 
-The close gate is owned by the Definition Of Done in root `AGENTS.md`; this list is the per-change-type guide for iterating.
+The close gate is owned by the Definition Of Done in root `AGENTS.md`. While iterating:
 
-- Documentation-only changes: `git diff --stat`, `git diff -- AGENTS.md docs/ai crates/klinx/AGENTS.md crates/klinx/src/components/AGENTS.md crates/klinx-git/AGENTS.md`, and markdown/path sanity searches.
-- Rust source changes: focused module tests plus `cargo fmt --all --check`; for broader changes also run both clippy passes and `cargo test --workspace`.
-- UI/layout changes: cargo checks plus manual desktop run or headless screenshot when available.
-- Dependency changes: ask first, then run `cargo deny check` and the full CI command set.
+- Documentation-only changes: `git diff --check`, `git diff --stat`, and markdown/path sanity searches.
+- Rust source changes: focused module tests (`cargo test -p klinx <filter>`) and `cargo fmt --all --check`; the full gate runs before the change is claimed done.
+- UI/layout changes: render with `scripts/shot.sh` and inspect the screenshot as you go.
+- Dependency changes: ask first.
 
 ## Expensive, Flaky, Or Environment-Dependent Commands
 

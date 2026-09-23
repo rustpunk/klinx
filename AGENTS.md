@@ -13,10 +13,10 @@ Read what the task needs, when it needs it:
 | When you… | Read |
 |---|---|
 | are new to the repository | [docs/ai/00_READ_THIS_FIRST.md](docs/ai/00_READ_THIS_FIRST.md) |
-| work on workspace, sessions, tabs, keyboard, templates, or search | [10_ARCHITECTURE](docs/ai/10_ARCHITECTURE.md), [20_PROJECT_MAP](docs/ai/20_PROJECT_MAP.md), `crates/klinx/AGENTS.md` |
-| work on pipeline parsing, the canvas model, field lineage, YAML patching, CXL diagnostics, or autodoc | [30_DESIGN_RULES](docs/ai/30_DESIGN_RULES.md), [40_COMMON_PATTERNS](docs/ai/40_COMMON_PATTERNS.md), `crates/klinx/AGENTS.md` |
-| touch UI components, CSS, canvas, editor, inspector, or panels | `crates/klinx/src/components/AGENTS.md`, [60_PERFORMANCE_NOTES](docs/ai/60_PERFORMANCE_NOTES.md) |
-| work on git or version mode | `crates/klinx-git/AGENTS.md` |
+| work on workspace, sessions, tabs, keyboard, templates, or search | [10_ARCHITECTURE](docs/ai/10_ARCHITECTURE.md), [20_PROJECT_MAP](docs/ai/20_PROJECT_MAP.md), [30_DESIGN_RULES](docs/ai/30_DESIGN_RULES.md), `crates/klinx/AGENTS.md` |
+| work on pipeline parsing, the canvas model, field lineage, YAML patching, CXL diagnostics, or autodoc | [10_ARCHITECTURE](docs/ai/10_ARCHITECTURE.md), [30_DESIGN_RULES](docs/ai/30_DESIGN_RULES.md), [40_COMMON_PATTERNS](docs/ai/40_COMMON_PATTERNS.md), `crates/klinx/AGENTS.md` |
+| touch UI components, CSS, canvas, editor, inspector, or panels | `crates/klinx/src/components/AGENTS.md`, [60_PERFORMANCE_NOTES](docs/ai/60_PERFORMANCE_NOTES.md), [50_TESTING_AND_COMMANDS](docs/ai/50_TESTING_AND_COMMANDS.md) |
+| work on git or version mode | `crates/klinx-git/AGENTS.md`, the git sections of [20_PROJECT_MAP](docs/ai/20_PROJECT_MAP.md) |
 | design or review a change, or close out a unit of work | [35_SHORTCUT_SIGNATURES](docs/ai/35_SHORTCUT_SIGNATURES.md) |
 | pick a command, or change CI, toolchain, or dependency policy | [50_TESTING_AND_COMMANDS](docs/ai/50_TESTING_AND_COMMANDS.md) |
 | meet an unfamiliar term | [70_GLOSSARY](docs/ai/70_GLOSSARY.md) |
@@ -56,7 +56,7 @@ Read what the task needs, when it needs it:
 
 ## Safety Rules For AI Agents
 
-- Do not add dependencies, edit lockfiles, push, or commit unless explicitly asked.
+- Do not add dependencies, edit lockfiles, push, or commit unless explicitly asked; a maintainer-approved plan counts as the request to commit on a feature branch (see Issues And Workflow Frameworks).
 - Do not modify application/source code during documentation-only tasks.
 - Ask before bumping Dioxus, Clinker pins, dependency policy, or git backend strategy.
 - Mark weak claims as Hypothesis or Open question in `docs/ai`.
