@@ -60,4 +60,14 @@ ignore = [
     # unavoidable transitive proc-macro of the Dioxus desktop AVIF image
     # decoder (dioxus-desktop -> image -> ravif -> rav1e -> paste).
     "RUSTSEC-2024-0436",
+    # quick-xml quadratic duplicate-attribute check and unbounded NsReader
+    # namespace allocation (fixed in 0.41.0). Two copies are affected:
+    # - 0.37.5 comes from clinker-format at the pinned Clinker rev; the Clinker
+    #   pin bump (#211) moves it to 0.41.0 and removes this exception.
+    # - 0.39.4 comes from wayland-scanner, a build-time proc-macro of the
+    #   Dioxus desktop Linux stack that only parses Wayland protocol XML shipped
+    #   inside its own crates. It goes away when the desktop app is retired or
+    #   wayland-scanner adopts quick-xml 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]

@@ -5,7 +5,7 @@
 | Tool | Status | Evidence |
 | --- | --- | --- |
 | Rust 1.91 with `clippy` and `rustfmt` | Inferred | `rust-toolchain.toml`, CI |
-| Dioxus CLI `dx` 0.7.4 | Inferred | CI installs `dioxus-cli@0.7.4`; README run command |
+| Dioxus CLI `dx` 0.7.4 | Inferred | CI installs `dioxus-cli@0.7.4` only in the manual `desktop` job; README run command |
 | Linux desktop deps: WebKitGTK 4.1, GTK3, libxdo | Inferred | `.github/workflows/ci.yml` |
 | `git` CLI | Inferred | `klinx-git` implementation shells out |
 | `gh` CLI for PR creation | Inferred | `provider.rs` PR helper |
@@ -36,7 +36,7 @@
 
 | Command | Status | Notes |
 | --- | --- | --- |
-| `cargo fmt --all --check` | Verified on 2026-06-15 | Passed after documentation-only changes. CI runs on Linux only to avoid Windows CRLF false positives. |
+| `cargo fmt --all --check` | Verified on 2026-06-15 | Passed after documentation-only changes. CI runs it in the Linux `check` job. |
 
 ## Linting Commands
 
@@ -71,7 +71,7 @@
 
 | Command | Status | Notes |
 | --- | --- | --- |
-| `dx build --package klinx --platform desktop` | Inferred | CI builds desktop bundle on Linux/macOS/Windows. |
+| `dx build --package klinx --platform desktop` | Verified | CI builds the desktop bundle, and runs clippy/test on macOS and Windows, only in the manual `desktop` job (`workflow_dispatch`); pull requests and pushes run Linux `check` and `deny` only while the browser UI is built. |
 | `cargo deny check` | Inferred | CI has a separate deny job. |
 
 ## Commands Agents Should Run Before Claiming Success
