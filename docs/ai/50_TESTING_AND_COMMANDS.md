@@ -5,12 +5,12 @@
 | Tool | Status | Evidence |
 | --- | --- | --- |
 | Rust 1.91 with `clippy` and `rustfmt` | Inferred | `rust-toolchain.toml`, CI |
-| Dioxus CLI `dx` 0.7.4 | Inferred | CI installs `dioxus-cli@0.7.4`; README run command |
+| Dioxus CLI `dx` 0.7.4 | Inferred | CI installs `dioxus-cli@0.7.4` only in the manual `desktop` job; README run command |
 | Linux desktop deps: WebKitGTK 4.1, GTK3, libxdo | Inferred | `.github/workflows/ci.yml` |
 | `git` CLI | Inferred | `klinx-git` implementation shells out |
 | `gh` CLI for PR creation | Inferred | `provider.rs` PR helper |
 | `cargo-deny` | Inferred | `deny.toml`, CI |
-| Xvfb and ImageMagick for screenshot script | Inferred | `CLAUDE.md`, `scripts/shot.sh` |
+| Xvfb and ImageMagick for screenshot script | Inferred | `AGENTS.md`, `scripts/shot.sh` |
 
 ## Metadata Commands
 
@@ -36,7 +36,7 @@
 
 | Command | Status | Notes |
 | --- | --- | --- |
-| `cargo fmt --all --check` | Verified on 2026-06-15 | Passed after documentation-only changes. CI runs on Linux only to avoid Windows CRLF false positives. |
+| `cargo fmt --all --check` | Verified on 2026-06-15 | Passed after documentation-only changes. CI runs it in the Linux `check` job. |
 
 ## Linting Commands
 
@@ -71,15 +71,17 @@
 
 | Command | Status | Notes |
 | --- | --- | --- |
-| `dx build --package klinx --platform desktop` | Inferred | CI builds desktop bundle on Linux/macOS/Windows. |
+| `dx build --package klinx --platform desktop` | Verified | CI builds the desktop bundle, and runs clippy/test on macOS and Windows, only in the manual `desktop` job (`workflow_dispatch`); pull requests and pushes run Linux `check` and `deny` only while the browser UI is built. |
 | `cargo deny check` | Inferred | CI has a separate deny job. |
 
 ## Commands Agents Should Run Before Claiming Success
 
-- Documentation-only changes: `git diff --stat`, `git diff -- AGENTS.md docs/ai crates/klinx/AGENTS.md crates/klinx/src/components/AGENTS.md crates/klinx-git/AGENTS.md`, and markdown/path sanity searches.
-- Rust source changes: focused module tests plus `cargo fmt --all --check`; for broader changes also run both clippy passes and `cargo test --workspace`.
-- UI/layout changes: cargo checks plus manual desktop run or headless screenshot when available.
-- Dependency changes: ask first, then run `cargo deny check` and the full CI command set.
+The close gate is owned by the Definition Of Done in root `AGENTS.md`. While iterating:
+
+- Documentation-only changes: `git diff --check`, `git diff --stat`, and markdown/path sanity searches.
+- Rust source changes: focused module tests (`cargo test -p klinx <filter>`) and `cargo fmt --all --check`; the full gate runs before the change is claimed done.
+- UI/layout changes: render with `scripts/shot.sh` and inspect the screenshot as you go.
+- Dependency changes: ask first.
 
 ## Expensive, Flaky, Or Environment-Dependent Commands
 
