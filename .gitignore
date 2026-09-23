@@ -20,3 +20,10 @@ test-results/
 # It is intentionally NOT ignored here.
 
 notes/
+
+# Local agent tooling, planning state, and worktrees
+/.claude/*
+/.codex/
+/.agents/
+/.planning/
+/.gsd*

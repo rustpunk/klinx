@@ -10,7 +10,7 @@
 | `git` CLI | Inferred | `klinx-git` implementation shells out |
 | `gh` CLI for PR creation | Inferred | `provider.rs` PR helper |
 | `cargo-deny` | Inferred | `deny.toml`, CI |
-| Xvfb and ImageMagick for screenshot script | Inferred | `CLAUDE.md`, `scripts/shot.sh` |
+| Xvfb and ImageMagick for screenshot script | Inferred | `AGENTS.md`, `scripts/shot.sh` |
 
 ## Metadata Commands
 
@@ -76,10 +76,12 @@
 
 ## Commands Agents Should Run Before Claiming Success
 
-- Documentation-only changes: `git diff --stat`, `git diff -- AGENTS.md docs/ai crates/klinx/AGENTS.md crates/klinx/src/components/AGENTS.md crates/klinx-git/AGENTS.md`, and markdown/path sanity searches.
-- Rust source changes: focused module tests plus `cargo fmt --all --check`; for broader changes also run both clippy passes and `cargo test --workspace`.
-- UI/layout changes: cargo checks plus manual desktop run or headless screenshot when available.
-- Dependency changes: ask first, then run `cargo deny check` and the full CI command set.
+The close gate is owned by the Definition Of Done in root `AGENTS.md`. While iterating:
+
+- Documentation-only changes: `git diff --check`, `git diff --stat`, and markdown/path sanity searches.
+- Rust source changes: focused module tests (`cargo test -p klinx <filter>`) and `cargo fmt --all --check`; the full gate runs before the change is claimed done.
+- UI/layout changes: render with `scripts/shot.sh` and inspect the screenshot as you go.
+- Dependency changes: ask first.
 
 ## Expensive, Flaky, Or Environment-Dependent Commands
 

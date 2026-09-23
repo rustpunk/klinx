@@ -4,7 +4,23 @@
 
 Klinx is a Rust 2024 workspace for a Dioxus 0.7 desktop IDE that authors Clinker YAML pipeline configurations. It contains the `klinx` desktop app crate and the `klinx-git` git abstraction crate.
 
-Read first: [docs/ai/00_READ_THIS_FIRST.md](docs/ai/00_READ_THIS_FIRST.md). Detailed architecture, commands, rules, and open questions live under [docs/ai/](docs/ai/).
+Detailed architecture, commands, rules, and open questions live under [docs/ai/](docs/ai/). Treat `Cargo.toml`, source, and tests as authoritative when prose disagrees.
+
+## Where To Look
+
+Read what the task needs, when it needs it:
+
+| When you… | Read |
+|---|---|
+| are new to the repository | [docs/ai/00_READ_THIS_FIRST.md](docs/ai/00_READ_THIS_FIRST.md) |
+| work on workspace, sessions, tabs, keyboard, templates, or search | [10_ARCHITECTURE](docs/ai/10_ARCHITECTURE.md), [20_PROJECT_MAP](docs/ai/20_PROJECT_MAP.md), [30_DESIGN_RULES](docs/ai/30_DESIGN_RULES.md), `crates/klinx/AGENTS.md` |
+| work on pipeline parsing, the canvas model, field lineage, YAML patching, CXL diagnostics, or autodoc | [10_ARCHITECTURE](docs/ai/10_ARCHITECTURE.md), [30_DESIGN_RULES](docs/ai/30_DESIGN_RULES.md), [40_COMMON_PATTERNS](docs/ai/40_COMMON_PATTERNS.md), `crates/klinx/AGENTS.md` |
+| touch UI components, CSS, canvas, editor, inspector, or panels | `crates/klinx/src/components/AGENTS.md`, [60_PERFORMANCE_NOTES](docs/ai/60_PERFORMANCE_NOTES.md), [50_TESTING_AND_COMMANDS](docs/ai/50_TESTING_AND_COMMANDS.md) |
+| work on git or version mode | `crates/klinx-git/AGENTS.md`, the git sections of [20_PROJECT_MAP](docs/ai/20_PROJECT_MAP.md) |
+| design or review a change, or close out a unit of work | [35_SHORTCUT_SIGNATURES](docs/ai/35_SHORTCUT_SIGNATURES.md) |
+| pick a command, or change CI, toolchain, or dependency policy | [50_TESTING_AND_COMMANDS](docs/ai/50_TESTING_AND_COMMANDS.md) |
+| meet an unfamiliar term | [70_GLOSSARY](docs/ai/70_GLOSSARY.md) |
+| hit something unclear | search [80_OPEN_QUESTIONS](docs/ai/80_OPEN_QUESTIONS.md), then record it there |
 
 ## Repository Layout
 
@@ -38,21 +54,21 @@ Read first: [docs/ai/00_READ_THIS_FIRST.md](docs/ai/00_READ_THIS_FIRST.md). Deta
   then re-shot/crop. There is no Playwright/web target — this is the visual-verification path.
   Requires `xvfb-run`, ImageMagick, and mesa software GL. See `scripts/shot.sh`.
 
-## GitHub Agent Workflow Helpers
-
-- Prefer `scripts/gh-agent-snapshot.sh` before raw `gh` API calls for queue curation, readiness, decision, review, and closeout work.
-- Compact reads: `scripts/gh-agent-snapshot.sh queue --milestone <name-or-number>`, `issues --issues <n,n,n>`, `issues --file <file>`, `project --status "Agent Ready"`, or `closeout --pr <n>`; these include visible ProjectV2 fields.
-- Use `issue --issue <n>` only for a single focused target; do not loop it across a decision gate or queue.
-- Bulk updates: write one JSON file with `updates[]`, inspect the dry-run with `scripts/gh-agent-snapshot.sh update --file <file>`, then use `--apply` only when mutation is intended. The helper preflights Project fields/options before applying anything.
-- Keep GitHub updates consistent across labels and Project fields; do not use ad hoc one-off `gh` calls when the batch helper can make the same structured update.
-
 ## Safety Rules For AI Agents
 
-- Do not add dependencies, edit lockfiles, push, or commit unless explicitly asked.
+- Do not add dependencies, edit lockfiles, push, or commit unless explicitly asked; a maintainer-approved plan counts as the request to commit on a feature branch (see Issues And Workflow Frameworks).
 - Do not modify application/source code during documentation-only tasks.
 - Ask before bumping Dioxus, Clinker pins, dependency policy, or git backend strategy.
 - Mark weak claims as Hypothesis or Open question in `docs/ai`.
 - Preserve user changes in the worktree.
+
+## Issues And Workflow Frameworks
+
+- Implement only issues labelled `agent-ready`. Issues labelled `agent-plan-first` or `not-agent-ready` need a maintainer-approved plan first.
+- When a planning or execution framework drives the work, this file overrides the framework's defaults; the framework owns only its planning-state layout and task sequencing. Planning state is local and stays out of git.
+- A maintainer-approved plan authorizes commits on a non-`main` feature branch for the issues it names. Pushing, opening PRs, and merging still need an explicit request.
+- The approval gates above (dependencies, pins, dependency policy, git backend strategy) stop for the maintainer, including in a framework's automatic modes.
+- PR titles and descriptions become the squashed commit on `main`, so they use domain wording and reference the issue, not planning coordinates.
 
 ## Coding Conventions
 
@@ -67,4 +83,11 @@ Update `docs/ai` when architecture, commands, invariants, performance behavior, 
 
 ## Definition Of Done
 
-Run the smallest meaningful checks for the touched area, document commands that were not run, keep docs and local agent guidance consistent, and leave no unsupported confident claims.
+This section is the single owner of the close gate; other docs point here.
+
+- While iterating, run the smallest meaningful check for the touched area (a focused `cargo test -p <crate> <filter>`).
+- Before claiming a Rust change is done, the closing commit passes locally: `cargo fmt --all --check`, both clippy passes, `cargo test --workspace`, and `cargo deny check`. Add `dx build --package klinx --platform desktop` when bundle, asset, or Dioxus config changes.
+- UI-affecting changes render through `scripts/shot.sh` and the screenshot is inspected before the change counts as verified.
+- The closing state carries none of the signatures in [35_SHORTCUT_SIGNATURES](docs/ai/35_SHORTCUT_SIGNATURES.md).
+- Documentation-only changes: `git diff --check` and path sanity.
+- Document commands that were not run, keep docs and local agent guidance consistent, and leave no unsupported confident claims.

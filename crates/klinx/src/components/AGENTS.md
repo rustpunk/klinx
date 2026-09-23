@@ -53,7 +53,7 @@ Components should consume app contexts and existing model helpers. Do not parse 
 - `cargo test -p klinx inspector`
 - `cargo test -p klinx humanize_branch`
 - `dx serve --package klinx --platform desktop`
-- `cargo build --package klinx` then `scripts/shot.sh shot.png ./examples/pipelines` when headless visual review is available.
+- `cargo build --package klinx` then `scripts/shot.sh shot.png ./examples/pipelines`; inspecting the screenshot is part of the root `AGENTS.md` Definition Of Done for UI changes.
 
 ## Documentation Updates
 
