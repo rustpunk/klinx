@@ -4,6 +4,11 @@
 
 This file is lightweight architecture/change memory for future agents. It should record durable facts, major changes, and resolved uncertainty. Do not invent past decisions.
 
+## 2026-09-22: Browser UI Architecture Decided (decisions/0001)
+
+- Direction recorded in [decisions/0001-browser-ui-architecture.md](decisions/0001-browser-ui-architecture.md): Rust keeps all domain logic (`klinx-core` view model, compiled natively and to WASM; `klinx-api`; an Axum `klinx-server` that alone touches the fileshare and runs git/compile), the UI moves to React + TypeScript, and the desktop app moves to Tauri 2 on the same UI. Workspaces are git working copies on server-local disk; the remote may be a git server, a bare repo on the mounted share, or S3 via git-remote-s3. Chosen for long-term stability, free/OSS licensing (no paid dependencies), and contributor reliability. The UI framework choice is confirmed by a spike at the end of phase 2; phases 1-2 are framework-neutral.
+- Evidence and alternatives: [docs/research/2026-09-22-browser-ui-tech-stack.md](../research/2026-09-22-browser-ui-tech-stack.md). That report's primary recommendation (a Dioxus web client) predates the no-paid-dependencies and stability-over-reuse constraints; the decision record supersedes it.
+
 ## 2026-06-23: Canvas Raw/Resolved Toggle Decoupled from Channels — Gated on the Compiled Plan (#195)
 
 - **The view toggle is now gated on plan presence, not channel selection.** The `klinx-view-toggle` button in the canvas toolbar (`components/canvas/panel.rs`) was `disabled: !has_channel && !is_resolved` — it required an active channel to reach the Resolved view. But the Resolved view is backed by `derive_resolved_pipeline_view(compiled_plan)`, and `use_compiled_plan` compiles against the workspace root with NO channel input, so the compiled plan (and thus the resolved view: typed rows, field lineage, #171 composition boundary cables) is channel-INDEPENDENT. The gate is now `disabled: !has_compiled_plan && !is_resolved` (`has_compiled_plan = state.compiled_plan.read().is_some()`), and the disabled tooltip is "Resolve the pipeline to enable the resolved view" (#189's hard-compile diagnostics already explain a failed compile). The vestigial `has_channel`/`channel_state` read in the toggle was removed. **Consequence: the resolved view — and the #171 boundary cables — are now reachable on channel-less pipelines like `examples/pipelines/customer_clean.yaml`.** Verified live (headless): RESOLVED toggle enabled by default with no channel, and exploding `clean` draws the teal boundary cables.
@@ -207,7 +212,7 @@ When architecture changes, append a dated entry with:
 - `pipeline_view::derive_body_view` now attaches field rows to compiled composition-body drill-in nodes from `BoundBody::body_rows`, keyed by compiled body node name.
 - Body field edges are conservative same-name passthrough carries between rendered body predecessors when both endpoint rows are available; missing row data leaves the body node at node-level connectors only.
 - `StageView.id` continues to use the compiled `PlanNode` body node name, while `NodeIndex` remains internal to the compiled body graph.
-- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-95-target cargo test -p klinx pipeline_view`.
+- Verification: `cargo test -p klinx pipeline_view`.
 
 ## 2026-06-16: Port-Aware Layout Model Scaffold
 
@@ -216,7 +221,7 @@ When architecture changes, append a dated entry with:
 - The visible canvas still uses the existing `layout_positions` barycenter geometry; `layout_model` is a migration boundary, not a renderer switch.
 - Prior-art summary: existing research notes point toward a Rust Sugiyama-style layered pass with port-aware crossing minimization and orthogonal routing, avoiding a JS/elkjs dependency.
 - Open question added for when and how to migrate the visible canvas to this model.
-- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-100-target cargo test -p klinx layout_model`.
+- Verification: `cargo test -p klinx layout_model`.
 
 ## 2026-06-16: Resolved Top-Level Pipeline Field Rows
 
@@ -224,7 +229,7 @@ When architecture changes, append a dated entry with:
 - Resolved mode now uses `CompiledPlan::typed_output_row` as the field row/type source, filters engine-internal `$ck.*` rows, and only draws lineage edges whose endpoints exist in the resolved row set.
 - Raw mode still uses `derive_pipeline_view` and the existing klinx-side field-lineage approximation.
 - `components/canvas/panel.rs` now dispatches to the resolved derivation path when `ChannelViewMode::Resolved` has a compiled plan.
-- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-99-target cargo test -p klinx resolved_pipeline_fields_use_compiled_output_row_types`.
+- Verification: `cargo test -p klinx resolved_pipeline_fields_use_compiled_output_row_types`.
 
 ## 2026-06-16: Wide-Schema Canvas Field Projection
 
