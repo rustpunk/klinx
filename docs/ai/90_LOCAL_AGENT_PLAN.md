@@ -23,7 +23,7 @@
 - `.github/`: CI is small and already documented in root and `50_TESTING_AND_COMMANDS.md`.
 - `scripts/`: currently only screenshot helper; root docs are enough.
 - `notes/`: untracked handoff/planning notes, not durable onboarding docs.
-- `.claude/` and `.squad/`: untracked tool/worktree state; do not treat as source of durable truth.
+- `.claude/`, `.codex/`, `.planning/`: local tool, planning, and worktree state (ignored); do not treat as source of durable truth.
 
 ## Suggested Creation Batches
 

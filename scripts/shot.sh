@@ -5,8 +5,8 @@
 # software rendering, then grabs the root window with ImageMagick `import`, so a
 # UI change can be eyeballed without a physical display (CI / agent sessions).
 # The capture is at the X-server level, so it is renderer-agnostic. This is
-# render-and-eyeball, NOT golden-image diffing. See CLAUDE.md "Headless UI
-# verification" for the hover/click (xdotool) and crop recipes.
+# render-and-eyeball, NOT golden-image diffing. See AGENTS.md "Build, Test,
+# Format, Lint" for the hover/click (xdotool) and crop recipes.
 #
 # Usage:
 #   scripts/shot.sh [OUT_PNG] [WORKSPACE]

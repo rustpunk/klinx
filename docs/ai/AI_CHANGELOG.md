@@ -148,7 +148,7 @@ When architecture changes, append a dated entry with:
 ## 2026-06-16: GitHub Agent Snapshot And Batch Update Helper
 
 - Added `scripts/gh-agent-snapshot.sh` as the repo-local entry point for compact GitHub agent workflow reads and structured bulk updates.
-- The repo wrapper delegates to `~/.agents/skills/_shared/scripts/gh-agent-snapshot.sh` and defaults to repo `rustpunk/klinx`, Project owner `rustpunk`, and Project number `3`.
+- The repo wrapper delegates to a shared snapshot script outside the repository and defaults to repo `rustpunk/klinx`, Project owner `rustpunk`, and Project number `3`.
 - GitHub workflow agents should prefer helper commands for queue, issue, Project status, closeout, and batch label/Project-field updates before falling back to repeated raw `gh` calls.
 - Snapshot reads return visible ProjectV2 fields as both `projectItems[].fields` and typed `projectItems[].fieldValues[]` so agents should not perform follow-up GraphQL calls just to inspect Project metadata.
 - Multi-issue workflows should use the bulk `issues --issues <n,n,n>` or `issues --file <file>` command instead of looping single-issue snapshots.
@@ -207,7 +207,7 @@ When architecture changes, append a dated entry with:
 - `pipeline_view::derive_body_view` now attaches field rows to compiled composition-body drill-in nodes from `BoundBody::body_rows`, keyed by compiled body node name.
 - Body field edges are conservative same-name passthrough carries between rendered body predecessors when both endpoint rows are available; missing row data leaves the body node at node-level connectors only.
 - `StageView.id` continues to use the compiled `PlanNode` body node name, while `NodeIndex` remains internal to the compiled body graph.
-- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-95-target cargo test -p klinx pipeline_view`.
+- Verification: `cargo test -p klinx pipeline_view`.
 
 ## 2026-06-16: Port-Aware Layout Model Scaffold
 
@@ -216,7 +216,7 @@ When architecture changes, append a dated entry with:
 - The visible canvas still uses the existing `layout_positions` barycenter geometry; `layout_model` is a migration boundary, not a renderer switch.
 - Prior-art summary: existing research notes point toward a Rust Sugiyama-style layered pass with port-aware crossing minimization and orthogonal routing, avoiding a JS/elkjs dependency.
 - Open question added for when and how to migrate the visible canvas to this model.
-- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-100-target cargo test -p klinx layout_model`.
+- Verification: `cargo test -p klinx layout_model`.
 
 ## 2026-06-16: Resolved Top-Level Pipeline Field Rows
 
@@ -224,7 +224,7 @@ When architecture changes, append a dated entry with:
 - Resolved mode now uses `CompiledPlan::typed_output_row` as the field row/type source, filters engine-internal `$ck.*` rows, and only draws lineage edges whose endpoints exist in the resolved row set.
 - Raw mode still uses `derive_pipeline_view` and the existing klinx-side field-lineage approximation.
 - `components/canvas/panel.rs` now dispatches to the resolved derivation path when `ChannelViewMode::Resolved` has a compiled plan.
-- Verification: `CARGO_TARGET_DIR=/home/glitch/.cargo/tmp/klinx-issue-99-target cargo test -p klinx resolved_pipeline_fields_use_compiled_output_row_types`.
+- Verification: `cargo test -p klinx resolved_pipeline_fields_use_compiled_output_row_types`.
 
 ## 2026-06-16: Wide-Schema Canvas Field Projection
 

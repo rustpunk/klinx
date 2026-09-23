@@ -10,7 +10,7 @@
 | `git` CLI | Inferred | `klinx-git` implementation shells out |
 | `gh` CLI for PR creation | Inferred | `provider.rs` PR helper |
 | `cargo-deny` | Inferred | `deny.toml`, CI |
-| Xvfb and ImageMagick for screenshot script | Inferred | `CLAUDE.md`, `scripts/shot.sh` |
+| Xvfb and ImageMagick for screenshot script | Inferred | `AGENTS.md`, `scripts/shot.sh` |
 
 ## Metadata Commands
 
@@ -75,6 +75,8 @@
 | `cargo deny check` | Inferred | CI has a separate deny job. |
 
 ## Commands Agents Should Run Before Claiming Success
+
+The close gate is owned by the Definition Of Done in root `AGENTS.md`; this list is the per-change-type guide for iterating.
 
 - Documentation-only changes: `git diff --stat`, `git diff -- AGENTS.md docs/ai crates/klinx/AGENTS.md crates/klinx/src/components/AGENTS.md crates/klinx-git/AGENTS.md`, and markdown/path sanity searches.
 - Rust source changes: focused module tests plus `cargo fmt --all --check`; for broader changes also run both clippy passes and `cargo test --workspace`.
