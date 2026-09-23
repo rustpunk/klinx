@@ -9,7 +9,7 @@
 - **Desktop app crate (`crates/klinx`)**: Dioxus shell, app state, tabs, workspace/session persistence, pipeline parsing, canvas model, UI components, search, templates, debug/run data models.
 - **Git abstraction crate (`crates/klinx-git`)**: CLI-backed `GitOps` trait implementation plus provider helpers for remote parsing and GitHub PR creation.
 - **Examples (`examples/pipelines`)**: ready-to-open Clinker workspace with pipelines, compositions, channel overlays, CSV data, and retraction demo.
-- **Tooling and CI**: cargo fmt, two clippy passes, cargo test, cargo deny, and Dioxus desktop bundle build across Linux/macOS/Windows.
+- **Tooling and CI**: cargo fmt, two clippy passes, cargo test, and cargo deny on Linux for every PR/push; macOS/Windows coverage and the Dioxus desktop bundle build run only on manual CI runs while the browser UI is built.
 
 ## Data And Control Flow
 
@@ -29,7 +29,7 @@
 - **UI/model boundary**: `pipeline_view` creates UI-safe view models; components should not reimplement graph derivation.
 - **Layout boundary**: `layout_model` represents ordered node, field-row, and branch ports with ranked layers and connector paths. The visible canvas requests `CanvasLayoutEngine::PortAwareSugiyama`; missing stage, branch, or field anchors fall back to the current barycenter view with `CanvasLayoutFallback` metadata. Prior research in `docs/research/2026-06-13-field-lineage-ui.md` and `docs/research/2026-06-14-route-node-visualization.md` points toward this Rust Sugiyama-style layered pass with port-aware crossing minimization and orthogonal routing.
 - **Git boundary**: `klinx-git` owns repository operations; UI should avoid ad hoc shelling out.
-- **Desktop-only boundary**: no wasm/web target or Playwright browser target is documented.
+- **Desktop-only boundary**: no wasm/web target or Playwright browser target exists today. The planned browser architecture (Rust core and Axum server, React UI, workspaces as git repositories on a git host; the desktop app is retired at parity) is recorded in [decisions/0001-browser-ui-architecture.md](decisions/0001-browser-ui-architecture.md).
 
 ## Public API Surfaces Or Entry Points
 
