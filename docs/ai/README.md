@@ -10,5 +10,6 @@ Use these docs before editing code:
 2. Read [10_ARCHITECTURE.md](10_ARCHITECTURE.md) and [20_PROJECT_MAP.md](20_PROJECT_MAP.md) for the relevant subsystem.
 3. Check [30_DESIGN_RULES.md](30_DESIGN_RULES.md), [40_COMMON_PATTERNS.md](40_COMMON_PATTERNS.md), and [50_TESTING_AND_COMMANDS.md](50_TESTING_AND_COMMANDS.md) before implementing.
 4. Update [AI_CHANGELOG.md](AI_CHANGELOG.md) when an architecture fact changes.
+5. Check [decisions/](decisions/) for accepted architecture decisions before large structural changes.
 
 Root [../../AGENTS.md](../../AGENTS.md) is intentionally concise for automatic agent loading. The detailed reasoning and evidence live here.
