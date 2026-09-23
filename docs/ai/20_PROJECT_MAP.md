@@ -8,7 +8,7 @@
 | `crates/klinx` | Dioxus desktop IDE binary | `src/main.rs`, `src/app.rs`, `src/state.rs`, `src/workspace.rs`, `Dioxus.toml`, `assets/klinx.css` | Dioxus desktop, Clinker crates, `klinx-git`, `tokio`, `notify`, `serde`, `petgraph`, `rfd` | many in-file unit tests; `tests/fixtures/large_pipeline.yaml` | High |
 | `crates/klinx-git` | Git/VCS abstraction library | `src/lib.rs`, `src/ops.rs`, `src/gix_backend.rs`, `src/provider.rs`, `src/types.rs` | `tokio` declared; runtime `git` and `gh` CLI tools | unit tests in backend/provider modules | High |
 | `examples/pipelines` | Sample Clinker workspace | `kiln.toml`, `*.yaml`, `compositions`, `channels`, `data`, `retract-demo` | parsed by app/engine | parse-checked from `template.rs` tests | High |
-| `.github/workflows/ci.yml` | CI build/test matrix | Rust toolchain setup, Dioxus CLI install, fmt/clippy/test/build | Linux WebKitGTK/GTK/xdo packages | runs on Linux/macOS/Windows | High |
+| `.github/workflows/ci.yml` | CI gate | Linux `check` job (fmt, both clippy passes, test) and `deny` on every PR/push; manual `desktop` job (Linux/macOS/Windows clippy, test, Dioxus CLI install, desktop bundle) | Linux WebKitGTK/GTK/xdo packages | desktop coverage only on manual runs while the browser UI is built | High |
 | `docs/perf.md` | Manual performance measurement guide | large fixture, `perf-trace` workflow | `perf-trace` feature | fixture path in `crates/klinx/tests/fixtures` | High |
 | `docs/research` | Research/planning notes | field lineage and route visualization notes | source facts may need revalidation | planning evidence, not always current | Medium |
 

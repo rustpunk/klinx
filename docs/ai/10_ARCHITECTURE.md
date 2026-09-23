@@ -9,7 +9,7 @@
 - **Desktop app crate (`crates/klinx`)**: Dioxus shell, app state, tabs, workspace/session persistence, pipeline parsing, canvas model, UI components, search, templates, debug/run data models.
 - **Git abstraction crate (`crates/klinx-git`)**: CLI-backed `GitOps` trait implementation plus provider helpers for remote parsing and GitHub PR creation.
 - **Examples (`examples/pipelines`)**: ready-to-open Clinker workspace with pipelines, compositions, channel overlays, CSV data, and retraction demo.
-- **Tooling and CI**: cargo fmt, two clippy passes, cargo test, cargo deny, and Dioxus desktop bundle build across Linux/macOS/Windows.
+- **Tooling and CI**: cargo fmt, two clippy passes, cargo test, and cargo deny on Linux for every PR/push; macOS/Windows coverage and the Dioxus desktop bundle build run only on manual CI runs while the browser UI is built.
 
 ## Data And Control Flow
 
