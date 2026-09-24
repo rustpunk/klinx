@@ -94,6 +94,6 @@ The close gate is owned by the Definition Of Done in root `AGENTS.md`. While ite
 ## Troubleshooting Notes
 
 - If Dioxus desktop fails on Linux, check WebKitGTK/GTK/libxdo packages first.
-- If Clinker types fail to resolve, verify root `Cargo.toml` pins the split crates at `f7a1509` and source imports use `clinker_plan`, `clinker_exec`, `clinker_core_types`, `clinker_record`, `clinker_schema`, `clinker_channel`, and `cxl`.
+- If Clinker types fail to resolve, verify root `Cargo.toml` pins the split crates at `35d3227` and source imports use `clinker_plan`, `clinker_exec`, `clinker_core_types`, `clinker_record`, `clinker_schema`, `clinker_channel`, and `cxl`.
 - If UI text highlighting drifts, check YAML sidebar CSS line height and `LINE_HEIGHT`.
 - If git UI status does not update after file changes, inspect `hooks/git_state.rs` and `fs_watcher.rs`; background watcher refresh is tracked in `docs/ai/80_OPEN_QUESTIONS.md`.

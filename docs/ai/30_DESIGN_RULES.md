@@ -3,7 +3,7 @@
 ## Core Philosophy
 
 - **Verified:** Keep Klinx as a desktop-first Dioxus app for Clinker YAML authoring. Evidence: `README.md`, `crates/klinx/src/main.rs`, `Dioxus.toml`.
-- **Verified:** Treat current manifests as dependency source of truth. Evidence: root `Cargo.toml` pins Clinker crates to `f7a1509`; older README prose names stale crates/rev.
+- **Verified:** Treat current manifests as dependency source of truth. Evidence: root `Cargo.toml` pins Clinker crates to `35d3227`; older README prose names stale crates/rev.
 - **Strong inference:** Prefer preserving user-authored YAML text and comments over regenerating documents from parsed models. Evidence: `yaml_patch.rs` tests and AppShell/tab comments.
 
 ## Dependency Direction

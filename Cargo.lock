@@ -791,7 +791,7 @@ dependencies = [
 [[package]]
 name = "clinker-channel"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "blake3",
  "chrono",
@@ -815,7 +815,7 @@ dependencies = [
 [[package]]
 name = "clinker-core-types"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "miette",
  "petgraph",
@@ -825,7 +825,7 @@ dependencies = [
 [[package]]
 name = "clinker-exec"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -868,7 +868,7 @@ dependencies = [
 [[package]]
 name = "clinker-format"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "chrono",
  "clinker-record",
@@ -885,7 +885,7 @@ dependencies = [
 [[package]]
 name = "clinker-lineage"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "clinker-core-types",
  "clinker-plan",
@@ -899,7 +899,7 @@ dependencies = [
 [[package]]
 name = "clinker-plan"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "blake3",
  "chrono",
@@ -931,7 +931,7 @@ dependencies = [
 [[package]]
 name = "clinker-record"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "ahash",
  "chrono",
@@ -946,7 +946,7 @@ dependencies = [
 [[package]]
 name = "clinker-schema"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "ahash",
  "clinker-plan",
@@ -1347,7 +1347,7 @@ dependencies = [
 [[package]]
 name = "cxl"
 version = "0.1.0"
-source = "git+https://github.com/rustpunk/clinker?rev=f7a1509#f7a15098e251fbfb2cc47958733a3c8b3939f4d3"
+source = "git+https://github.com/rustpunk/clinker?rev=35d3227#35d3227f4cad5fd65ae074bc7ddcbae5628e9760"
 dependencies = [
  "ahash",
  "chrono",

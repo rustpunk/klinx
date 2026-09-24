@@ -4,13 +4,13 @@
 
 This file is lightweight architecture/change memory for future agents. It should record durable facts, major changes, and resolved uncertainty. Do not invent past decisions.
 
-## 2026-09-23: Clinker Pin Bump to `f7a1509` + `clinker-lineage` (#211)
+## 2026-09-23: Clinker Pin Bump to `35d3227` + `clinker-lineage` (#211)
 
-- **All Clinker/CXL crates, plus the new `clinker-lineage`, are pinned to one revision, `f7a1509`** (was `997ea7d`). Upstream breaking changes absorbed: Output→Sink (`type: sink`; examples, templates, and fixtures migrated), `mapping:` as an ordered sequence, `best_effort` removed, one unified source `schema:` column type, the legacy channel-file path removed in favor of channel/group overlays (examples migrated to `channel.cfg.yaml`), `artifacts()` moved onto plan nodes, and new `PipelineError` diagnostic variants.
+- **All Clinker/CXL crates, plus the new `clinker-lineage`, are pinned to one revision, `35d3227`** (was `997ea7d`). Upstream breaking changes absorbed: Output→Sink (`type: sink`; examples, templates, and fixtures migrated), `mapping:` as an ordered sequence, `best_effort` removed, one unified source `schema:` column type, the legacy channel-file path removed in favor of channel/group overlays (examples migrated to `channel.cfg.yaml`), `artifacts()` moved onto plan nodes, and new `PipelineError` diagnostic variants.
 - **Resolved top-level rows come from `CompiledPlan::output_row(name)`** (clinker#1211), which replaced `typed_output_row`. It returns a row for every top-level node kind, not only CXL-bearing ones. A Composition node still takes the union of its body's output-port rows, because the engine's row for a Composition is only its first bound output port.
 - **`pipeline_view::composition_body` resolves nested compositions.** It searches the top-level DAG, then every bound body's graph, restoring the global by-name lookup the removed `composition_body_assignments` map provided. Lineage traces descend through nested compositions again.
 - **A mis-pathed composition `use:` (E103) is now a hard compile error upstream** (no plan), not a dropped node. Klinx still attributes E103 to the node through the #189 hard-failure path.
-- **Known engine gap:** `clinker_format::SourceSchema` derives `Serialize` (externally tagged, e.g. `Columns: [...]`) but hand-writes `Deserialize` (bare sequence/map/string). YAML from the full-serializer fallback in `yaml_patch` therefore does not re-parse for sources with an inline schema. Node-preserving patching, the normal save path, is unaffected.
+- **Full-serializer fallback round-trips again.** `clinker_format::SourceSchema` used to derive `Serialize` (externally tagged, e.g. `Columns: [...]`) while hand-writing `Deserialize` (bare sequence/map/string), so YAML from the `yaml_patch` full-serializer fallback did not re-parse for sources with an inline schema. clinker#1214 (in this pin) serializes the authored shapes; it also moved the semantic plan fingerprint to version 3.
 
 ## 2026-09-22: Browser UI Architecture Decided (decisions/0001)
 

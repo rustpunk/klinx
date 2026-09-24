@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Verified.** Klinx is a Rust 2024 workspace containing a native Dioxus 0.7 desktop IDE for authoring Clinker YAML pipeline configurations. It runs as a `wry` webview desktop app and consumes Clinker engine crates through git-pinned workspace dependencies at rev `f7a1509`.
+**Verified.** Klinx is a Rust 2024 workspace containing a native Dioxus 0.7 desktop IDE for authoring Clinker YAML pipeline configurations. It runs as a `wry` webview desktop app and consumes Clinker engine crates through git-pinned workspace dependencies at rev `35d3227`.
 
 ## Major Subsystems
 
