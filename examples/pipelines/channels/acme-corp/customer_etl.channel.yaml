@@ -5,8 +5,7 @@
 # knob is read in customer_etl's `final_flag` transform, so this override
 # genuinely shifts which customers are tagged "gold".
 channel:
-  name: acme-corp
-  target: ../../customer_etl.yaml
+  target: customer_etl
 
 vars:
   static:

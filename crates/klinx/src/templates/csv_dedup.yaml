@@ -28,7 +28,7 @@ nodes:
       cxl: |
         distinct by id
 
-  - type: output
+  - type: sink
     name: result
     input: deduplicate
     config:

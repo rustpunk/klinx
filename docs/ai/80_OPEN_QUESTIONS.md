@@ -2,7 +2,7 @@
 
 | Question | Why it matters | Files/modules involved | Suggested resolution | Priority |
 | --- | --- | --- | --- | --- |
-| Should README be updated to match current Clinker split crates and rev `997ea7d`? | Existing onboarding prose conflicts with manifests and can mislead dependency work. | `README.md`, `Cargo.toml`, `CLAUDE.md` | Decide whether to update README in a separate docs task. | High |
+| Should README be updated to match current Clinker split crates and rev `35d3227`? | Existing onboarding prose conflicts with manifests and can mislead dependency work. | `README.md`, `Cargo.toml`, `CLAUDE.md` | Decide whether to update README in a separate docs task. | High |
 | How should git status auto-refresh be completed? | Watcher comments suggest changes are detected but Dioxus signal updates may not be wired. | `hooks/git_state.rs`, `fs_watcher.rs`, `components/version_mode/**` | Trace current event flow and define a safe Dioxus update path. | Medium |
 | Is `tokio` still needed in `klinx-git` if implementation uses `std::process::Command`? | Unused dependency surface can confuse future backend work. | `crates/klinx-git/Cargo.toml`, `gix_backend.rs` | Check compiler warnings and future async backend plans before changing. | Low |
 | Which UI pages are intentionally placeholders versus incomplete workflows? | Agents could overstate feature completeness or wire behavior incorrectly. | `components/placeholder_page.rs`, channels/docs/runs/search/extract composition areas | Audit UI entry points and create feature-specific issues. | Medium |

@@ -65,7 +65,7 @@ The rules live in root `AGENTS.md` (Safety Rules, Issues And Workflow Frameworks
 ## Known Limitations
 
 - No automated UI integration target was found for the desktop webview; UI validation remains cargo checks plus manual or headless screenshot review.
-- Existing prose in `README.md` conflicts with current manifests about older Clinker crate names/rev; current manifests pin the split Clinker crates to `997ea7d`.
+- Existing prose in `README.md` conflicts with current manifests about older Clinker crate names/rev; current manifests pin the split Clinker crates to `35d3227`.
 - Some UI pages and actions are partially implemented or placeholder-like. Inspect source before claiming a workflow is complete.
 
 ## First Prompt For A New Session

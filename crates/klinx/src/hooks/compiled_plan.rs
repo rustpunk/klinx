@@ -402,10 +402,9 @@ fn diagnostic_attributes_to_composition(message: &str, node: &str) -> bool {
 /// immune to diagnostic message-format drift. The engine messages then only
 /// *enrich* each failed node with a reason (see [`build_composition_diagnostics`]).
 fn failed_composition_nodes(config: &PipelineConfig, plan: &CompiledPlan) -> Vec<String> {
-    let bound = &plan.artifacts().composition_body_assignments;
     composition_node_names(config)
+        .filter(|name| crate::pipeline_view::composition_body(plan, name).is_none())
         .map(str::to_string)
-        .filter(|name| !bound.contains_key(name))
         .collect()
 }
 
@@ -605,9 +604,10 @@ mod tests {
     }
 
     /// The #187 headline scenario: a `composition` node whose `use:` path does not
-    /// resolve compiles non-fatally (the plan is still populated) but the node is
-    /// dropped from the DAG — and `compile_active` now surfaces that as an E103
-    /// diagnostic keyed to the node, instead of the old silent no-op.
+    /// resolve must never fail silently. The engine now rejects it as a hard compile
+    /// error (it used to drop the node and compile the rest), so there is no plan,
+    /// and `compile_active` still surfaces the E103 diagnostic keyed to the node
+    /// through the hard-failure path (#189).
     #[test]
     fn mispathed_use_surfaces_an_e103_diagnostic_for_the_node() {
         use clinker_plan::config::parse_config;
@@ -617,9 +617,8 @@ mod tests {
             .canonicalize()
             .expect("examples workspace exists");
 
-        // A composition node pointing at a non-existent `.comp.yaml`. The output
-        // reads from the source (not the broken composition) so dropping `clean`
-        // still leaves a valid, compilable DAG.
+        // A composition node pointing at a non-existent `.comp.yaml`. The sink
+        // reads from the source, so the unresolved `use:` is the only error.
         let yaml = r#"
 pipeline:
   name: broken_use
@@ -639,7 +638,7 @@ nodes:
     use: ./compositions/does_not_exist.comp.yaml
     inputs:
       names: people
-  - type: output
+  - type: sink
     name: out
     input: people
     config:
@@ -650,17 +649,13 @@ nodes:
 
         let config = parse_config(yaml).expect("pipeline parses");
         let outcome = compile_active(&config, &ws_root, PathBuf::new());
-        let plan = outcome
-            .plan
-            .expect("a mis-pathed `use:` is non-fatal: the plan still compiles");
+        assert!(
+            outcome.plan.is_none(),
+            "a mis-pathed `use:` is a hard compile error: no plan",
+        );
         let diagnostics = outcome.diagnostics;
 
-        // The body is dropped → the drill would resolve to nothing …
-        assert!(
-            crate::state::resolve_composition_frame(&plan, "clean").is_none(),
-            "the mis-pathed composition node has no bound body",
-        );
-        // … but the failure is no longer silent.
+        // The failure is attributed to the node, not silent.
         let clean: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.node.as_deref() == Some("clean"))
@@ -799,7 +794,7 @@ nodes:
     use: ./compositions/x.comp.yaml
     inputs:
       names: people
-  - type: output
+  - type: sink
     name: out
     input: people
     config:
@@ -913,7 +908,7 @@ nodes:
     use: ./compositions/empty.comp.yaml
     inputs:
       names: people
-  - type: output
+  - type: sink
     name: out
     input: people
     config:

@@ -365,8 +365,9 @@ pub fn structural_search(
         }
 
         // Check inputs
-        for input in config.source_configs() {
-            if stage_matches_tags(tags, "input", &input.name, &content_for_input(input)) {
+        for body in config.source_bodies() {
+            let input = &body.source;
+            if stage_matches_tags(tags, "input", &input.name, &content_for_input(body)) {
                 let detail = format!(
                     "type: {}, path: {}",
                     input.format.format_name(),
@@ -405,7 +406,7 @@ pub fn structural_search(
         }
 
         // Check outputs
-        for output in config.output_configs() {
+        for output in config.sink_configs() {
             if stage_matches_tags(
                 tags,
                 "output",
@@ -456,17 +457,15 @@ fn stage_matches_tags(tags: &[StructuralTag], stage_type: &str, name: &str, cont
 }
 
 /// Build searchable content string for an input stage.
-fn content_for_input(input: &clinker_plan::config::SourceConfig) -> String {
-    let mut content = format!(
-        "{} {} {}",
+fn content_for_input(body: &clinker_plan::config::pipeline_node::SourceBody) -> String {
+    let input = &body.source;
+    format!(
+        "{} {} {} schema:{:?}",
         input.name,
         input.format.format_name(),
-        input.display_target()
-    );
-    if let Some(ref schema) = input.schema {
-        content.push_str(&format!(" schema:{schema:?}"));
-    }
-    content
+        input.display_target(),
+        body.schema
+    )
 }
 
 #[cfg(test)]

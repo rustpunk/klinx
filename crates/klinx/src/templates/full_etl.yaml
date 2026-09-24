@@ -51,7 +51,7 @@ nodes:
       cxl: |
         sort by last_name asc
 
-  - type: output
+  - type: sink
     name: result
     input: sort_output
     config:

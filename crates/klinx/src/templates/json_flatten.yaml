@@ -30,7 +30,7 @@ nodes:
         emit name = name
         emit email = email
 
-  - type: output
+  - type: sink
     name: result
     input: extract_fields
     config:

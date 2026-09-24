@@ -45,7 +45,7 @@ nodes:
         lookup_join lookup on key = id
           pull region_name
 
-  - type: output
+  - type: sink
     name: result
     input: enrich
     config:

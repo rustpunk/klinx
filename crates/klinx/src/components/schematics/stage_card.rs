@@ -130,7 +130,6 @@ pub fn StageCard(
                         match &schema.source {
                             crate::autodoc::SchemaOrigin::File(path) => format!("SCHEMA ({})", path),
                             crate::autodoc::SchemaOrigin::Inline => "SCHEMA".to_string(),
-                            crate::autodoc::SchemaOrigin::OverridesOnly => "SCHEMA OVERRIDES".to_string(),
                             crate::autodoc::SchemaOrigin::None => "FIELDS".to_string(),
                         }
                     }

@@ -335,14 +335,8 @@ pub fn resolve_composition_frame(
     plan: &CompiledPlan,
     node_name: &str,
 ) -> Option<CompositionDrillFrame> {
-    let &body_id = plan
-        .artifacts()
-        .composition_body_assignments
-        .get(node_name)?;
-    let use_path = plan
-        .body_of(body_id)
-        .map(|b| b.signature_path.clone())
-        .unwrap_or_default();
+    let (body_id, body) = crate::pipeline_view::composition_body(plan, node_name)?;
+    let use_path = body.signature_path.clone();
     Some(CompositionDrillFrame {
         body_id,
         alias: node_name.to_string(),
@@ -627,29 +621,31 @@ use clinker_schema::{SchemaIndex, SchemaWarning};
 
 // ── Channel state ──────────────────────────────────────────────────────
 
-/// Discovered channel workspace state based on the ChannelBinding model.
+/// Discovered channel workspace state.
 ///
-/// Populated when a workspace has `.channel.yaml` files in its channels
-/// directory. None when no workspace is loaded or no channels are found.
+/// Populated when the workspace's channel root (`[channel].root` in
+/// `clinker.toml`) holds at least one tenant folder. None when no workspace is
+/// loaded or no channels are found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelState {
-    /// Discovered channel binding summaries.
-    pub channels: Vec<ChannelBindingSummary>,
-    /// Currently selected channel name (None = run base pipeline).
+    /// Discovered channels, one per tenant folder.
+    pub channels: Vec<ChannelSummary>,
+    /// Currently selected channel id (None = run base pipeline).
     pub active_channel: Option<String>,
-    /// Recently selected channel names (most recent first, max 10).
+    /// Recently selected channel ids (most recent first, max 10).
     pub recent_channels: Vec<String>,
 }
 
-/// Summary of a discovered `.channel.yaml` binding file.
+/// Summary of one discovered channel (a tenant folder under the channel root).
 #[derive(Clone, Debug, PartialEq)]
-pub struct ChannelBindingSummary {
-    /// Channel name (from the binding's `name` field).
-    pub name: String,
-    /// Path to the `.channel.yaml` file on disk.
-    pub source_path: PathBuf,
-    /// Display string for the channel's target (pipeline or composition path).
-    pub target: String,
+pub struct ChannelSummary {
+    /// Channel id — the tenant folder name.
+    pub id: String,
+    /// Absolute path to the tenant folder.
+    pub dir: PathBuf,
+    /// The folder's `channel.cfg.yaml` manifest and `*.channel.yaml`
+    /// per-target overlays, sorted by path.
+    pub files: Vec<PathBuf>,
 }
 
 #[cfg(test)]
@@ -921,7 +917,7 @@ nodes:
     use: ./body.comp.yaml
     inputs:
       src: src
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -943,10 +939,7 @@ nodes:
     #[test]
     fn resolve_composition_frame_returns_frame_for_known_node() {
         let plan = compiled_plan_with_composition();
-        let expected_body = *plan
-            .artifacts()
-            .composition_body_assignments
-            .get("comp")
+        let (expected_body, _) = crate::pipeline_view::composition_body(&plan, "comp")
             .expect("the compiled plan assigns a body to `comp`");
 
         let resolved =

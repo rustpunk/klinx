@@ -1,0 +1,5 @@
+# Manifest for the `express-logistics` tenant. Per-target overlays in this folder carry
+# the actual overrides.
+channel:
+  name: express-logistics
+  targets: [order_fulfillment]

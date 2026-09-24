@@ -6,8 +6,7 @@
 # wider band of orders is flagged high-value for this tenant. The surcharge
 # knob is left at the pipeline default.
 channel:
-  name: warehouse-west
-  target: ../../order_fulfillment.yaml
+  target: order_fulfillment
 
 vars:
   static:

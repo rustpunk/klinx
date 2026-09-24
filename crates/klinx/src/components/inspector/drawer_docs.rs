@@ -117,7 +117,6 @@ pub fn DrawerDocs(stage_id: String) -> Element {
                         match &schema.source {
                             crate::autodoc::SchemaOrigin::File(path) => format!("SCHEMA (from {})", path),
                             crate::autodoc::SchemaOrigin::Inline => "SCHEMA (inline)".to_string(),
-                            crate::autodoc::SchemaOrigin::OverridesOnly => "SCHEMA (overrides)".to_string(),
                             crate::autodoc::SchemaOrigin::None => "SCHEMA".to_string(),
                         }
                     }

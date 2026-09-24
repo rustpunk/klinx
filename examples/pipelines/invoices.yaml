@@ -55,7 +55,7 @@ nodes:
         emit total_amount = sum(amount)
         emit invoice_count = count(invoice_id)
 
-  - type: output
+  - type: sink
     name: rollup
     input: totals
     config:

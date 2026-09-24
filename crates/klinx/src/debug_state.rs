@@ -116,13 +116,30 @@ impl From<Value> for CellValue {
             Value::Bool(b) => Self::Bool(b),
             Value::Integer(n) => Self::Int(n),
             Value::Float(f) => Self::Float(f),
+            Value::Decimal(d) => Self::Str(d.to_string()),
             Value::String(s) => Self::Str((*s).into()),
             Value::Date(d) => Self::Str(d.to_string()),
             Value::DateTime(dt) => Self::Str(dt.to_string()),
             Value::Array(arr) => Self::Array(arr.into_iter().map(CellValue::from).collect()),
-            Value::Map(m) => Self::Str(serde_json::to_string(m.as_ref()).unwrap_or_default()),
+            Value::Map(m) => Self::Str(map_cell_text(&m)),
         }
     }
+}
+
+/// A map cell as a JSON object keyed by entry name.
+///
+/// Serializing `Value::Map` itself would wrap the entries in the engine's
+/// variant tag (`{"Map":[["a",..]]}`), which is noise in a grid cell; the
+/// entries alone read as `{"a":..}`.
+fn map_cell_text(map: &clinker_record::owned_storage::OwnedMap) -> String {
+    let object: serde_json::Map<String, serde_json::Value> = map
+        .iter()
+        .map(|(key, value)| {
+            let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+            (key.to_string(), value)
+        })
+        .collect();
+    serde_json::Value::Object(object).to_string()
 }
 
 /// Per-stage performance metrics.
@@ -262,6 +279,7 @@ pub fn use_debug_state() -> DebugState {
 mod tests {
     use super::*;
     use clinker_record::Value;
+    use clinker_record::owned_storage::OwnedValues;
 
     // ── CellValue Display ──────────────────────────────────────
 
@@ -396,7 +414,10 @@ mod tests {
 
     #[test]
     fn test_cell_value_from_record_value_array() {
-        let arr = Value::Array(vec![Value::Integer(1), Value::Integer(2)]);
+        let arr = Value::Array(OwnedValues::from_vec(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+        ]));
         let cv = CellValue::from(arr);
         assert_eq!(
             cv,
@@ -406,8 +427,11 @@ mod tests {
 
     #[test]
     fn test_cell_value_from_record_value_array_nested() {
-        let inner = Value::Array(vec![Value::Bool(true), Value::Null]);
-        let outer = Value::Array(vec![inner, Value::String("x".into())]);
+        let inner = Value::Array(OwnedValues::from_vec(vec![Value::Bool(true), Value::Null]));
+        let outer = Value::Array(OwnedValues::from_vec(vec![
+            inner,
+            Value::String("x".into()),
+        ]));
         let cv = CellValue::from(outer);
         assert_eq!(
             cv,
@@ -415,6 +439,21 @@ mod tests {
                 CellValue::Array(vec![CellValue::Bool(true), CellValue::Null]),
                 CellValue::Str("x".into()),
             ])
+        );
+    }
+
+    #[test]
+    fn test_cell_value_from_record_value_map_shows_entries_without_variant_tag() {
+        use clinker_record::owned_storage::{OwnedKey, OwnedMap};
+
+        let mut entries = indexmap::IndexMap::new();
+        entries.insert(OwnedKey::from("a"), Value::Integer(1));
+        entries.insert(OwnedKey::from("b"), Value::Bool(true));
+        let cv = CellValue::from(Value::Map(OwnedMap::from_map(entries)));
+        assert_eq!(
+            cv,
+            CellValue::Str(r#"{"a":{"Integer":1},"b":{"Bool":true}}"#.into()),
+            "entries keyed by name, in declaration order, with no outer `Map` tag",
         );
     }
 

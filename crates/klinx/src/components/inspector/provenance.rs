@@ -11,7 +11,7 @@ use crate::state::use_app_state;
 ///
 /// Reads from `compiled_plan.provenance()` keyed by `(node_name, param_name)`.
 /// Won layer shown with [x], shadowed layers shown with [ ].
-/// In Raw mode, only CompositionDefault layers are shown.
+/// In Raw mode, only the pipeline's own (`PipelineDefault`) layer is shown.
 #[component]
 pub fn ProvenancePanel(node_name: String, param_name: String) -> Element {
     let state = use_app_state();
@@ -27,12 +27,12 @@ pub fn ProvenancePanel(node_name: String, param_name: String) -> Element {
         return rsx! {};
     };
 
-    // In Raw mode, only show CompositionDefault layers
+    // Raw mode shows the authored value only: no group or channel layers.
     let layers: Vec<&ProvenanceLayer> = match view_mode {
         crate::state::ChannelViewMode::Raw => resolved
             .provenance
             .iter()
-            .filter(|l| l.kind == LayerKind::CompositionDefault)
+            .filter(|l| l.kind == LayerKind::PipelineDefault)
             .collect(),
         crate::state::ChannelViewMode::Resolved => resolved.provenance.iter().collect(),
     };
@@ -61,7 +61,7 @@ pub fn ProvenancePanel(node_name: String, param_name: String) -> Element {
                 class: "klinx-provenance-layers",
                 for (i, layer) in layers.iter().enumerate() {
                     {
-                        let kind_label = layer_kind_label(layer.kind);
+                        let kind_label = layer.kind.to_string();
                         let won_marker = if layer.won { "[x]" } else { "[ ]" };
                         let layer_class = if layer.won {
                             "klinx-provenance-layer klinx-provenance-layer--won"
@@ -90,14 +90,5 @@ pub fn ProvenancePanel(node_name: String, param_name: String) -> Element {
                 }
             }
         }
-    }
-}
-
-fn layer_kind_label(kind: LayerKind) -> &'static str {
-    match kind {
-        LayerKind::CompositionDefault => "CompositionDefault",
-        LayerKind::ChannelDefault => "ChannelDefault",
-        LayerKind::ChannelFixed => "ChannelFixed",
-        LayerKind::InspectorEdit => "InspectorEdit",
     }
 }

@@ -1,0 +1,5 @@
+# Manifest for the `acme-corp` tenant. Per-target overlays in this folder carry
+# the actual overrides.
+channel:
+  name: acme-corp
+  targets: [customer_etl]

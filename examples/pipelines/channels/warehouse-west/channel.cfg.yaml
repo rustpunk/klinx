@@ -1,0 +1,5 @@
+# Manifest for the `warehouse-west` tenant. Per-target overlays in this folder carry
+# the actual overrides.
+channel:
+  name: warehouse-west
+  targets: [order_fulfillment]

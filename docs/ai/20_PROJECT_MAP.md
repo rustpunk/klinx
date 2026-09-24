@@ -4,7 +4,7 @@
 
 | Path | Purpose | Important files | Dependencies | Tests/examples | Confidence |
 | --- | --- | --- | --- | --- | --- |
-| `Cargo.toml` | Rust workspace root and shared dependency pins | workspace members, release profile, Clinker git deps | Rust 1.91 via `rust-toolchain.toml`; Dioxus `=0.7.4`; Clinker rev `997ea7d` | CI commands use workspace | High |
+| `Cargo.toml` | Rust workspace root and shared dependency pins | workspace members, release profile, Clinker git deps | Rust 1.91 via `rust-toolchain.toml`; Dioxus `=0.7.4`; Clinker rev `35d3227` | CI commands use workspace | High |
 | `crates/klinx` | Dioxus desktop IDE binary | `src/main.rs`, `src/app.rs`, `src/state.rs`, `src/workspace.rs`, `Dioxus.toml`, `assets/klinx.css` | Dioxus desktop, Clinker crates, `klinx-git`, `tokio`, `notify`, `serde`, `petgraph`, `rfd` | many in-file unit tests; `tests/fixtures/large_pipeline.yaml` | High |
 | `crates/klinx-git` | Git/VCS abstraction library | `src/lib.rs`, `src/ops.rs`, `src/gix_backend.rs`, `src/provider.rs`, `src/types.rs` | `tokio` declared; runtime `git` and `gh` CLI tools | unit tests in backend/provider modules | High |
 | `examples/pipelines` | Sample Clinker workspace | `kiln.toml`, `*.yaml`, `compositions`, `channels`, `data`, `retract-demo` | parsed by app/engine | parse-checked from `template.rs` tests | High |
@@ -41,7 +41,7 @@
 ## Architecturally Important External Dependencies
 
 - `dioxus =0.7.4`: desktop UI framework.
-- `cxl`, `clinker-plan`, `clinker-exec`, `clinker-core-types`, `clinker-record`, `clinker-schema`, `clinker-channel`: engine surface from Clinker git rev `997ea7d`.
+- `cxl`, `clinker-plan`, `clinker-exec`, `clinker-core-types`, `clinker-record`, `clinker-schema`, `clinker-channel`, `clinker-lineage`: engine surface from Clinker git rev `35d3227`.
 - `serde-saphyr` and `saphyr-parser-bw`: YAML parsing and span/token support.
 - `petgraph`: compiled composition body views.
 - `notify`: filesystem watching.

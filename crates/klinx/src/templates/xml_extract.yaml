@@ -30,7 +30,7 @@ nodes:
         emit id = id
         emit value = value
 
-  - type: output
+  - type: sink
     name: result
     input: select_fields
     config:

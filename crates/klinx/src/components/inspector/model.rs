@@ -792,11 +792,11 @@ fn node_logic_section(node: Option<&PipelineNode>, stage: Option<&StageView>) ->
                 ),
             ],
         ),
-        PipelineNode::Output { config, .. } => InspectorSection::with_facts(
+        PipelineNode::Sink { config, .. } => InspectorSection::with_facts(
             "LOGIC",
             vec![
                 InspectorFact::new("kind", "output"),
-                InspectorFact::new("path", config.output.path.clone()),
+                InspectorFact::new("path", config.sink.path.clone()),
             ],
         ),
         PipelineNode::Composition { r#use, config, .. } => InspectorSection::with_facts(
@@ -1458,15 +1458,10 @@ impl<'a> BodyScopeResolver<'a> {
     /// memoized [`BodyScope`]. `None` when the plan has no assignment / no bound body
     /// for the name — the trace then degrades to a leaf at that crossing.
     fn resolve(&self, comp_name: &str) -> Option<(CompositionBodyId, Rc<BodyScope>)> {
-        let body_id = *self
-            .plan
-            .artifacts()
-            .composition_body_assignments
-            .get(comp_name)?;
+        let (body_id, body) = crate::pipeline_view::composition_body(self.plan, comp_name)?;
         if let Some(scope) = self.cache.borrow().get(&body_id) {
             return Some((body_id, Rc::clone(scope)));
         }
-        let body = self.plan.body_of(body_id)?;
         let scope = Rc::new(derive_body_scope(body));
         self.cache.borrow_mut().insert(body_id, Rc::clone(&scope));
         Some((body_id, scope))
@@ -2225,12 +2220,7 @@ fn output_port_for_column(
     comp_name: &str,
     column: &str,
 ) -> Option<String> {
-    let body_id = *resolver
-        .plan
-        .artifacts()
-        .composition_body_assignments
-        .get(comp_name)?;
-    let body = resolver.plan.body_of(body_id)?;
+    let (_, body) = crate::pipeline_view::composition_body(resolver.plan, comp_name)?;
     for (port, row) in &body.output_port_rows {
         if row.field_names().any(|f| f.name.as_ref() == column) {
             return Some(port.clone());
@@ -2247,12 +2237,7 @@ fn input_port_for_column(
     comp_name: &str,
     column: &str,
 ) -> Option<String> {
-    let body_id = *resolver
-        .plan
-        .artifacts()
-        .composition_body_assignments
-        .get(comp_name)?;
-    let body = resolver.plan.body_of(body_id)?;
+    let (_, body) = crate::pipeline_view::composition_body(resolver.plan, comp_name)?;
     for (port, row) in &body.input_port_rows {
         if row.field_names().any(|f| f.name.as_ref() == column) {
             return Some(port.clone());
@@ -2642,7 +2627,7 @@ nodes:
     body: pruned
     config:
       strategy: preserve
-  - type: output
+  - type: sink
     name: out
     input: framed
     config:
@@ -2733,7 +2718,7 @@ nodes:
     config:
       cxl: |
         emit x =
-  - type: output
+  - type: sink
     name: out
     input: bad
     config:
@@ -3477,7 +3462,7 @@ nodes:
     config:
       cxl: |
         emit y = x + 1
-  - type: output
+  - type: sink
     name: out
     input: clean
     config:
@@ -3847,7 +3832,7 @@ nodes:
     use: ./body_lineage.comp.yaml
     inputs:
       src: src
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -3936,7 +3921,7 @@ nodes:
     use: ./level0.comp.yaml
     inputs:
       src: src
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:
@@ -4223,7 +4208,7 @@ nodes:
     use: ./level0.comp.yaml
     inputs:
       src: src
-  - type: output
+  - type: sink
     name: out
     input: comp
     config:

@@ -4699,7 +4699,7 @@ nodes:
         emit doubled = amount * 2
         emit tag = status + "-" + region
 
-  - type: output
+  - type: sink
     name: result
     input: stage_0520
     config:
