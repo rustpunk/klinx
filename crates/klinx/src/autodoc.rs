@@ -550,8 +550,15 @@ fn generate_output_doc(
 
     let mut summary_parts = vec![format!("Writes {} to `{}`.", format_name, output.path)];
     if mapped_count > 0 {
+        // What happens to the columns the block does not list is the biggest
+        // factor in the file's shape, so the summary says it next to the count.
+        let unlisted = if output.include_unmapped {
+            "unlisted columns appended"
+        } else {
+            "unlisted columns dropped"
+        };
         summary_parts.push(format!(
-            "{mapped_count} mapped column(s), {renamed_count} renamed."
+            "{mapped_count} mapped column(s), {renamed_count} renamed; {unlisted}."
         ));
     }
     if exclude_count > 0 {
@@ -649,7 +656,7 @@ fn generate_output_doc(
     if let Some(ref mapping) = output.mapping {
         for entry in mapping.entries() {
             let value = if entry.is_passthrough() {
-                "(kept)".to_string()
+                "passthrough".to_string()
             } else {
                 format!("← {}", entry.source)
             };
@@ -992,12 +999,13 @@ fn maybe_add_ref(token: &str, refs: &mut Vec<String>) {
 mod tests {
     use super::*;
 
-    /// A sink `mapping:` mixes kept columns with renames. The summary counts
-    /// both but calls only the renames renames, the mapping list shows a kept
-    /// column as kept rather than `id ← id`, and the rename count matches the
-    /// schema section, which lists renames only.
+    /// A sink `mapping:` mixes passthrough columns with renames. The summary
+    /// counts both but calls only the renames renames and says what happens to
+    /// unlisted columns; the mapping list shows a passthrough column as
+    /// `passthrough` rather than `id ← id`; the rename count matches the schema
+    /// section, which lists renames only.
     #[test]
-    fn sink_doc_distinguishes_kept_columns_from_renames() {
+    fn sink_doc_distinguishes_passthrough_columns_from_renames() {
         let yaml = r#"
 pipeline:
   name: sink_mapping_doc
@@ -1028,7 +1036,8 @@ nodes:
         let doc = generate_stage_doc(&config, "out").expect("sink doc");
 
         assert!(
-            doc.summary.contains("3 mapped column(s), 1 renamed."),
+            doc.summary
+                .contains("3 mapped column(s), 1 renamed; unlisted columns appended."),
             "summary: {}",
             doc.summary
         );
@@ -1042,9 +1051,9 @@ nodes:
         assert_eq!(
             mapping,
             [
-                ("id", "(kept)"),
+                ("id", "passthrough"),
                 ("sold_to", "← customer_id"),
-                ("total", "(kept)")
+                ("total", "passthrough")
             ]
         );
         let schema_rows: Vec<&str> = doc
@@ -1059,6 +1068,44 @@ nodes:
             schema_rows,
             ["sold_to"],
             "the schema section lists renames only"
+        );
+    }
+
+    /// With `include_unmapped: false` the block is the whole file, and the
+    /// summary says unlisted columns are dropped.
+    #[test]
+    fn sink_doc_summary_says_unlisted_columns_are_dropped_when_closed() {
+        let yaml = r#"
+pipeline:
+  name: sink_mapping_closed
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: id, type: string }
+        - { name: customer_id, type: string }
+  - type: sink
+    name: out
+    input: src
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+      include_unmapped: false
+      mapping:
+        - sold_to: customer_id
+"#;
+        let config = clinker_plan::config::parse_config(yaml).expect("pipeline parses");
+        let doc = generate_stage_doc(&config, "out").expect("sink doc");
+        assert!(
+            doc.summary
+                .contains("1 mapped column(s), 1 renamed; unlisted columns dropped."),
+            "summary: {}",
+            doc.summary
         );
     }
 
