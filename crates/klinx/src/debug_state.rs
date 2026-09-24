@@ -121,9 +121,25 @@ impl From<Value> for CellValue {
             Value::Date(d) => Self::Str(d.to_string()),
             Value::DateTime(dt) => Self::Str(dt.to_string()),
             Value::Array(arr) => Self::Array(arr.into_iter().map(CellValue::from).collect()),
-            Value::Map(m) => Self::Str(serde_json::to_string(&Value::Map(m)).unwrap_or_default()),
+            Value::Map(m) => Self::Str(map_cell_text(&m)),
         }
     }
+}
+
+/// A map cell as a JSON object keyed by entry name.
+///
+/// Serializing `Value::Map` itself would wrap the entries in the engine's
+/// variant tag (`{"Map":[["a",..]]}`), which is noise in a grid cell; the
+/// entries alone read as `{"a":..}`.
+fn map_cell_text(map: &clinker_record::owned_storage::OwnedMap) -> String {
+    let object: serde_json::Map<String, serde_json::Value> = map
+        .iter()
+        .map(|(key, value)| {
+            let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+            (key.to_string(), value)
+        })
+        .collect();
+    serde_json::Value::Object(object).to_string()
 }
 
 /// Per-stage performance metrics.
@@ -423,6 +439,21 @@ mod tests {
                 CellValue::Array(vec![CellValue::Bool(true), CellValue::Null]),
                 CellValue::Str("x".into()),
             ])
+        );
+    }
+
+    #[test]
+    fn test_cell_value_from_record_value_map_shows_entries_without_variant_tag() {
+        use clinker_record::owned_storage::{OwnedKey, OwnedMap};
+
+        let mut entries = indexmap::IndexMap::new();
+        entries.insert(OwnedKey::from("a"), Value::Integer(1));
+        entries.insert(OwnedKey::from("b"), Value::Bool(true));
+        let cv = CellValue::from(Value::Map(OwnedMap::from_map(entries)));
+        assert_eq!(
+            cv,
+            CellValue::Str(r#"{"a":{"Integer":1},"b":{"Bool":true}}"#.into()),
+            "entries keyed by name, in declaration order, with no outer `Map` tag",
         );
     }
 

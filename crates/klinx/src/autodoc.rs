@@ -533,16 +533,26 @@ fn generate_output_doc(
     output: &clinker_plan::config::SinkConfig,
 ) -> StageDoc {
     let format_name = output.format.format_name();
-    let mapping_count = output
+    // A `mapping:` entry either renames a column or keeps its upstream name.
+    // Both kinds set the output column order (and, with `include_unmapped:
+    // false`, which columns are written), so both are counted, but only the
+    // renames are called renames: those are what the schema section lists.
+    let (mapped_count, renamed_count) = output
         .mapping
         .as_ref()
-        .map(|m| m.entries().len())
-        .unwrap_or(0);
+        .map(|m| {
+            let entries = m.entries();
+            let renamed = entries.iter().filter(|e| !e.is_passthrough()).count();
+            (entries.len(), renamed)
+        })
+        .unwrap_or((0, 0));
     let exclude_count = output.exclude.as_ref().map(|e| e.len()).unwrap_or(0);
 
     let mut summary_parts = vec![format!("Writes {} to `{}`.", format_name, output.path)];
-    if mapping_count > 0 {
-        summary_parts.push(format!("{} field mapping(s).", mapping_count));
+    if mapped_count > 0 {
+        summary_parts.push(format!(
+            "{mapped_count} mapped column(s), {renamed_count} renamed."
+        ));
     }
     if exclude_count > 0 {
         summary_parts.push(format!("{} exclusion(s).", exclude_count));
@@ -638,10 +648,15 @@ fn generate_output_doc(
     // Mapping entries
     if let Some(ref mapping) = output.mapping {
         for entry in mapping.entries() {
+            let value = if entry.is_passthrough() {
+                "(kept)".to_string()
+            } else {
+                format!("← {}", entry.source)
+            };
             entries.push(ConfigEntry {
                 category: ConfigCategory::Mapping,
                 key: entry.output.clone(),
-                value: format!("← {}", entry.source),
+                value,
             });
         }
     }
@@ -976,6 +991,76 @@ fn maybe_add_ref(token: &str, refs: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sink `mapping:` mixes kept columns with renames. The summary counts
+    /// both but calls only the renames renames, the mapping list shows a kept
+    /// column as kept rather than `id ← id`, and the rename count matches the
+    /// schema section, which lists renames only.
+    #[test]
+    fn sink_doc_distinguishes_kept_columns_from_renames() {
+        let yaml = r#"
+pipeline:
+  name: sink_mapping_doc
+nodes:
+  - type: source
+    name: src
+    config:
+      name: src
+      type: csv
+      path: ./in.csv
+      schema:
+        - { name: id, type: string }
+        - { name: customer_id, type: string }
+        - { name: total, type: float }
+  - type: sink
+    name: out
+    input: src
+    config:
+      name: out
+      type: csv
+      path: ./out.csv
+      mapping:
+        - id
+        - sold_to: customer_id
+        - total
+"#;
+        let config = clinker_plan::config::parse_config(yaml).expect("pipeline parses");
+        let doc = generate_stage_doc(&config, "out").expect("sink doc");
+
+        assert!(
+            doc.summary.contains("3 mapped column(s), 1 renamed."),
+            "summary: {}",
+            doc.summary
+        );
+        let mapping: Vec<(&str, &str)> = doc
+            .config
+            .entries
+            .iter()
+            .filter(|e| e.category == ConfigCategory::Mapping)
+            .map(|e| (e.key.as_str(), e.value.as_str()))
+            .collect();
+        assert_eq!(
+            mapping,
+            [
+                ("id", "(kept)"),
+                ("sold_to", "← customer_id"),
+                ("total", "(kept)")
+            ]
+        );
+        let schema_rows: Vec<&str> = doc
+            .schema
+            .as_ref()
+            .expect("schema section")
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(
+            schema_rows,
+            ["sold_to"],
+            "the schema section lists renames only"
+        );
+    }
 
     #[test]
     fn test_analyze_cxl_emit_statements() {
